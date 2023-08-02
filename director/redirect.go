@@ -155,7 +155,7 @@ func ShortcutMiddleware() gin.HandlerFunc {
 	}
 }
 
-func RegisterOrigin (ctx *gin.Context) {
+func RegisterOrigin(ctx *gin.Context) {
 	tokens, present := ctx.Request.Header["Authorization"]
 	if !present || len(tokens) == 0 {
 		ctx.JSON(401, gin.H{"error": "Bearer token not present in the 'Authorization' header"})
@@ -167,6 +167,10 @@ func RegisterOrigin (ctx *gin.Context) {
 		return
 	}
 
+	if len(ad.Namespaces) == 0 {
+		ctx.JSON(400, gin.H{"error": "Origin must advertise serving at least one namespace"})
+		return
+	}
 	for _, namespace := range(ad.Namespaces) {
 		ok, err := VerifyAdvertiseToken(tokens[0], namespace.Path)
 		if err != nil {

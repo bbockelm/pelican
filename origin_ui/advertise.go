@@ -39,13 +39,40 @@ func AdvertiseOrigin() error {
 	if name == "" {
 		return errors.New("Origin name isn't set")
 	}
-	// TODO: waiting on a different branch to merge origin URL generation
-	originUrl := "https://localhost:8444"
+	namespacePrefix := viper.GetString("NamespacePrefix")
+	if namespacePrefix == "" {
+		return errors.New("No namespace is exported by origin")
+	}
+
+	token, err := director.CreateAdvertiseToken(namespacePrefix)
+	if err != nil {
+		return errors.Wrap(err, "Failed to create token to advertise to the director")
+	}
+
+	originUrl := fmt.Sprintf("https://%v:%v", viper.GetString("Hostname"), viper.GetInt("WebPort"))
+
+	issuerUrlStr, err := director.GetIssuerURL(namespacePrefix)
+	if err != nil {
+		return errors.Wrap(err, "Failed to generate issuer URL")
+	}
+	issuerUrl, err := url.Parse(issuerUrlStr)
+	if err != nil {
+		return errors.Wrapf(err, "Failed to parse issuer URL %v", issuerUrlStr)
+	}
 
 	ad := director.OriginAdvertise{
 		Name: name,
 		URL:  originUrl,
-		Namespaces: make([]director.NamespaceAd, 0),
+		Namespaces: []director.NamespaceAd{
+			director.NamespaceAd{
+				RequireToken: true,
+				Path: namespacePrefix,
+				Issuer: *issuerUrl,
+				MaxScopeDepth: viper.GetUint("Issuer.MaxScopeDepth"),
+				Strategy: director.OAuthStrategy,
+				BasePath: namespacePrefix,
+			},
+		},
 	}
 
 	body, err := json.Marshal(ad)
@@ -63,19 +90,24 @@ func AdvertiseOrigin() error {
 	}
 	directorUrl.Path = "/api/v1.0/director/registerOrigin"
 
+	log.Debugln("Advertising origin at URL", directorUrl.String())
 	req, err := http.NewRequest("POST", directorUrl.String(), bytes.NewBuffer(body))
 	if err != nil {
 		return errors.Wrap(err, "Failed to create POST request for director registration")
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer " + token)
 
 	client := http.Client{}
 	if viper.GetBool("TLSSkipVerify") {
+		log.Debugln("Disabling TLS verification for origin advertising")
 		tr := &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		}
 		client = http.Client{Transport: tr}
+	} else {
+		log.Debugln("Will advertise to director over TLS")
 	}
 	resp, err := client.Do(req)
 	if err != nil {

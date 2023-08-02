@@ -120,7 +120,7 @@ func DiscoverFederation() error {
 	}
 	log.Debugln("Federation URL:", federationStr)
 	curDirectorURL := viper.GetString("DirectorURL")
-	curNamespaceURL := viper.GetString("DirectorURL")
+	curNamespaceURL := viper.GetString("NamespaceURL")
 	if len(curDirectorURL) != 0 && len(curNamespaceURL) != 0 {
 		return nil
 	}
@@ -267,6 +267,21 @@ func InitServer() error {
 			return err
 		}
 	}
+
+	prefixes := GetAllPrefixes()
+	for _, prefix := range prefixes {
+		if val, isSet := os.LookupEnv(prefix + "_DIRECTOR_URL"); isSet {
+			viper.Set("DirectorURL", val)
+			break
+		}
+	}
+	for _, prefix := range prefixes {
+		if val, isSet := os.LookupEnv(prefix + "_NAMESPACE_URL"); isSet {
+			viper.Set("NamespaceURL", val)
+			break
+		}
+	}
+
 	return nil
 }
 

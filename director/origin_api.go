@@ -2,7 +2,7 @@ package director
 
 import (
 	"context"
-	"errors"
+	"crypto/ecdsa"
 	"net/url"
 	"path"
 	"strings"
@@ -14,6 +14,8 @@ import (
 	"github.com/lestrrat-go/jwx/jwk"
 	"github.com/lestrrat-go/jwx/jwt"
 	"github.com/pelicanplatform/pelican/config"
+	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 )
 
@@ -58,7 +60,11 @@ func CreateAdvertiseToken(namespace string) (string, error) {
 		return "", err
 	}
 
-	signed, err := jwt.Sign(tok, jwa.ES512, key)
+	var raw ecdsa.PrivateKey
+	if err = (*key).Raw(&raw); err != nil {
+		return "", errors.Wrap(err, "Failed to sign advertise token")
+	}
+	signed, err := jwt.Sign(tok, jwa.ES512, raw)
 	if err != nil {
 		return "", err
 	}
@@ -75,22 +81,25 @@ func VerifyAdvertiseToken(token, namespace string) (bool, error) {
 		return false, err
 	}
 	var ar *jwk.AutoRefresh
-	{
+	func() {
 		namespaceKeysMutex.RLock()
-		defer namespaceKeysMutex.Unlock()
+		defer namespaceKeysMutex.RUnlock()
 		item := namespaceKeys.Get(namespace)
-		if !item.IsExpired() {
+		if item != nil && !item.IsExpired() {
 			ar = item.Value()
 		}
-	}
+	}()
 	ctx := context.Background()
 	if ar == nil {
-		ar := jwk.NewAutoRefresh(ctx)
+		ar = jwk.NewAutoRefresh(ctx)
 		ar.Configure(issuer_url, jwk.WithMinRefreshInterval(15 * time.Minute))
-		namespaceKeysMutex.Lock()
-		defer namespaceKeysMutex.Unlock()
-		namespaceKeys.Set(namespace, ar, ttlcache.DefaultTTL)
+		func() {
+			namespaceKeysMutex.Lock()
+			defer namespaceKeysMutex.Unlock()
+			namespaceKeys.Set(namespace, ar, ttlcache.DefaultTTL)
+		}()
 	}
+	log.Debugln("Fetching namespace key from URL", issuer_url)
 	keyset, err := ar.Fetch(ctx, issuer_url)
 	if err != nil {
 		return false, err

@@ -9,3 +9,6 @@ MonitoringPortHigher: 9999
 Mount: ""
 NamespacePrefix: ""
 Debug: false
+TLSSkipVerify: false
+Issuer:
+  MaxScopeDepth: 3
