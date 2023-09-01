@@ -35,6 +35,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/lestrrat-go/jwx/v2/jwk"
+	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/pelicanplatform/pelican/config"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -310,6 +311,14 @@ func keySignChallengeCommit(ctx *gin.Context, data *registrationData, action str
 	serverPubkey := serverPrivateKey.PublicKey
 	serverVerified := verifySignature(serverPayload, serverSignature, &serverPubkey)
 
+	serverPrivateKey, err := loadServerKeys()
+	if err != nil {
+		ctx.JSON(500, gin.H{"error": "Failed to load server's private key"})
+		return errors.Wrap(err, "Failed to decode the server's private key")
+	}
+	serverPubkey := serverPrivateKey.PublicKey
+	serverVerified := verifySignature(serverPayload, serverSignature, &serverPubkey)
+
 	if clientVerified && serverVerified {
 		if action == "register" {
 			log.Debug("Registering namespace ", data.Prefix)
@@ -543,7 +552,7 @@ func dbDeleteNamespace(ctx *gin.Context) {
 		because that reflects the path that's getting stored.
 	*/
 	prefix := ctx.Param("wildcard")
-	log.Debug("Attempting to delete prefix ", prefix)
+	log.Debug("Attempting to delete namespace prefix ", prefix)
 
 	// Check if prefix exists before trying to delete it
 	exists, err := namespaceExists(prefix)
@@ -558,6 +567,45 @@ func dbDeleteNamespace(ctx *gin.Context) {
 		return
 	}
 
+	/*
+	*  Need to check that we were provided a token and that it's valid for the origin
+	*  TODO: Should we also investigate checking for the token in the url, in case we
+	*		 need that option at a later point?
+	*/
+	authHeader := ctx.GetHeader("Authorization")
+	delTokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+	// Have the token, now we need to load the JWKS for the prefix
+	originJwks, err := getPrefixJwks(prefix)
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "server encountered an error loading the prefix's stored jwks"})
+		log.Errorf("Failed to get prefix's stored jwks: %v", err)
+		return
+	}
+
+	// Use the JWKS to verify the token -- verification means signature integrity
+	parsed, err := jwt.Parse([]byte(delTokenStr), jwt.WithKeySet(*originJwks))
+	if err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "server could not verify/parse the provided deletion token"})
+		log.Errorf("Failed to parse the token: %v", err)
+		return
+	}
+
+	/*
+	* The signature is verified, now we need to make sure this token actually gives us
+	* permission to delete the namespace from the db. Let's check the subject and the scope.
+	* Here, valid
+	* NOTE: The validate function also handles checking `iat` and `exp` to make sure the token
+	*       remains valid.
+	* TODO: Investigate any other portions of the payload that need to be validated
+	*/
+	if err = jwt.Validate(parsed, jwt.WithSubject("origin"), jwt.WithClaimValue("scope", "pelican.namespace_delete")); err != nil {
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "server could not validate the provided deletion token"})
+		log.Errorf("Failed to validate the token: %v", err)
+		return
+	}
+
+	// If we get to this point in the code, we've passed all the security checks and we're ready to delete
 	err = deleteNamespace(prefix)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "server encountered an error deleting namespace from database"})
