@@ -311,14 +311,6 @@ func keySignChallengeCommit(ctx *gin.Context, data *registrationData, action str
 	serverPubkey := serverPrivateKey.PublicKey
 	serverVerified := verifySignature(serverPayload, serverSignature, &serverPubkey)
 
-	serverPrivateKey, err := loadServerKeys()
-	if err != nil {
-		ctx.JSON(500, gin.H{"error": "Failed to load server's private key"})
-		return errors.Wrap(err, "Failed to decode the server's private key")
-	}
-	serverPubkey := serverPrivateKey.PublicKey
-	serverVerified := verifySignature(serverPayload, serverSignature, &serverPubkey)
-
 	if clientVerified && serverVerified {
 		if action == "register" {
 			log.Debug("Registering namespace ", data.Prefix)
