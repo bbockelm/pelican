@@ -166,10 +166,9 @@ hostname
 xrootd -I v4 -c test.cfg -d &
 oldproc=$!
 
-sleep 3
-set +e
-kill $oldproc
-if [ $? -eq 0 ]; then
+(sleep 3; kill $oldproc) &
+wait $oldproc
+if [ $? -eq 143 ]; then # Indicates the xrootd process lived until it was killed.
   exit 0
 else
   echo "Launched xrootd process failed."
