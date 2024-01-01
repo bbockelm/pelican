@@ -23,10 +23,12 @@ package xrootd
 import (
 	_ "embed"
 	"path/filepath"
+	"strings"
 
 	"github.com/pelicanplatform/pelican/config"
 	"github.com/pelicanplatform/pelican/daemon"
 	"github.com/pelicanplatform/pelican/param"
+	log "github.com/sirupsen/logrus"
 )
 
 type (
@@ -54,6 +56,7 @@ func makeUnprivilegedXrootdLauncher(daemonName string, configPath string) (resul
 	if param.Xrootd_IPv4Only.GetBool() {
 		result.Args = append(result.Args, "-I", "v4")
 	}
+	log.Debugln("Will launch XRootd with the following arguments:", strings.Join(result.Args, " "))
 
 	if config.IsRootExecution() {
 		result.Uid, err = config.GetDaemonUID()
