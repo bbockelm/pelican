@@ -52,7 +52,7 @@ func makeUnprivilegedXrootdLauncher(daemonName string, configPath string) (resul
 	result.Gid = -1
 	xrootdRun := param.Xrootd_RunLocation.GetString()
 	pidFile := filepath.Join(xrootdRun, "xrootd.pid")
-	result.Args = []string{daemonName, "-f", "-s", pidFile, "-c", configPath}
+	result.Args = []string{daemonName, "-s", pidFile, "-c", configPath}
 	if param.Xrootd_IPv4Only.GetBool() {
 		result.Args = append(result.Args, "-I", "v4")
 	}
