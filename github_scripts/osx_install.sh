@@ -163,10 +163,10 @@ EOF
 
 ifconfig
 hostname
-xrootd -I v4 -c test.cfg -d &
+xrootd -c test.cfg &
 oldproc=$!
 
-(sleep 3; kill $oldproc) &
+(sleep 3; set +x; kill $oldproc) &
 wait $oldproc
 if [ $? -eq 143 ]; then # Indicates the xrootd process lived until it was killed.
   exit 0
