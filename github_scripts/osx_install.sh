@@ -69,6 +69,26 @@ popd
 
 popd
 
+#
+# WORKAROUND: force reverse DNS for IPv4 and IPv6
+# Due to https://github.com/xrootd/xrootd/issues/2159, xrootd won't startup
+# without reverse DNS entries.  If there's no corresponding entry, the
+# reverse DNS lookup will take ~10 seconds to timeout.  This is sadly close
+# to the time allocated to the various unit tests, meaning there is often
+# few to no log messages.
+#
+# If only an IPv4 entry is present, then XRootD will still trigger a lookup
+# on IPv6 which takes many seconds to timeout
+ipv6_local=$(ifconfig en0 inet6 | grep inet6 | tail -n 1 | tr '%' ' ' | cut -w -f 3)
+ipv4_local=$(ifconfig en0 inet  | grep inet | tail -n 1 | tr '%' ' ' | cut -w -f 3)
+
+cat > /tmp/hosts_append << EOF
+$ipv4_local $HOSTNAME
+$ipv6_local $HOSTNAME
+EOF
+sudo /bin/sh -c "cat /tmp/hosts_append >> /etc/hosts"
+cat /etc/hosts
+
 # Do a quick test of xrootd startup
 mkdir -p /tmp/xrootd
 
@@ -167,7 +187,7 @@ hostname
 xrootd -c test.cfg &
 oldproc=$!
 
-(sleep 3; kill $oldproc) &
+(sleep 2; kill $oldproc) &
 wait $oldproc
 if [ $? -eq 143 ]; then # Indicates the xrootd process lived until it was killed.
   exit 0
