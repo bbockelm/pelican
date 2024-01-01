@@ -177,6 +177,7 @@ var (
 	Registry_RequireKeyChaining = BoolParam{"Registry.RequireKeyChaining"}
 	StagePlugin_Hook = BoolParam{"StagePlugin.Hook"}
 	TLSSkipVerify = BoolParam{"TLSSkipVerify"}
+	Xrootd_IPv4Only = BoolParam{"Xrootd.IPv4Only"}
 )
 
 var (

@@ -864,7 +864,7 @@ name: OIDC.ClientRedirectHostname
 description: >-
   The hostname for the OIDC client redirect URL that the OIDC provider will redirect to after the user is authenticated
 
-  For development use only. Useful when developing in a container and you want to expose localhost 
+  For development use only. Useful when developing in a container and you want to expose localhost
   instead of container hostname to your OAuth provider
 type: string
 default: none
@@ -878,6 +878,17 @@ description: >-
   The port over which XRootD should be made available.
 type: int
 default: 8443
+components: ["origin", "cache"]
+---
+name: Xrootd.IPv4Only
+description: >-
+  In rare cases, XRootD's hostname resolution fails due to IPv6 being disabled on
+  the host (this has been observed in the Mac OS X runner on GitHub, for example).
+  This flag explicitly sets XRootD to only allow IPv4 connectivity.
+
+  Note the OSG build of XRootD contains a patch which should make this superfluous.
+type: bool
+default: false
 components: ["origin", "cache"]
 ---
 name: Xrootd.RunLocation

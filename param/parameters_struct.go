@@ -149,6 +149,7 @@ type config struct {
 	Xrootd struct {
 		Authfile string
 		DetailedMonitoringHost string
+		IPv4Only bool
 		LocalMonitoringHost string
 		MacaroonsKeyFile string
 		ManagerHost string
