@@ -452,7 +452,7 @@ func TestFullUpload(t *testing.T) {
 	viper.Set("ConfigDir", tmpPath)
 
 	// Increase the log level; otherwise, its difficult to debug failures
-	// viper.Set("Logging.Level", "Debug")
+	viper.Set("Logging.Level", "Debug")
 	config.InitConfig()
 
 	originDir, err := os.MkdirTemp("", "Origin")
