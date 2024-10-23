@@ -28,6 +28,7 @@ type Config struct {
 		Concurrency int `mapstructure:"concurrency"`
 		DataLocation string `mapstructure:"datalocation"`
 		DataLocations []string `mapstructure:"datalocations"`
+		DefaultCacheTimeout time.Duration `mapstructure:"defaultcachetimeout"`
 		EnableLotman bool `mapstructure:"enablelotman"`
 		EnableOIDC bool `mapstructure:"enableoidc"`
 		EnableVoms bool `mapstructure:"enablevoms"`
@@ -325,6 +326,7 @@ type configWithType struct {
 		Concurrency struct { Type string; Value int }
 		DataLocation struct { Type string; Value string }
 		DataLocations struct { Type string; Value []string }
+		DefaultCacheTimeout struct { Type string; Value time.Duration }
 		EnableLotman struct { Type string; Value bool }
 		EnableOIDC struct { Type string; Value bool }
 		EnableVoms struct { Type string; Value bool }
