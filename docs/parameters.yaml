@@ -2191,6 +2191,7 @@ description: |+
   successfully start
 type: duration
 default: 10s
+hidden: true
 components: ["origin", "cache"]
 ---
 ############################
