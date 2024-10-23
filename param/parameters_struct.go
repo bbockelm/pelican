@@ -307,6 +307,7 @@ type Config struct {
 		MacaroonsKeyFile string `mapstructure:"macaroonskeyfile"`
 		ManagerHost string `mapstructure:"managerhost"`
 		ManagerPort int `mapstructure:"managerport"`
+		MaxStartupWait time.Duration `mapstructure:"maxstartupwait"`
 		Mount string `mapstructure:"mount"`
 		Port int `mapstructure:"port"`
 		RobotsTxtFile string `mapstructure:"robotstxtfile"`
@@ -603,6 +604,7 @@ type configWithType struct {
 		MacaroonsKeyFile struct { Type string; Value string }
 		ManagerHost struct { Type string; Value string }
 		ManagerPort struct { Type string; Value int }
+		MaxStartupWait struct { Type string; Value time.Duration }
 		Mount struct { Type string; Value string }
 		Port struct { Type string; Value int }
 		RobotsTxtFile struct { Type string; Value string }

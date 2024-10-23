@@ -2185,6 +2185,14 @@ type: string
 default: none
 components: ["origin"]
 ---
+name: Xrootd.MaxStartupWait
+description: |+
+  The maximum amount of time pelican will wait for the xrootd daemons to
+  successfully start
+type: duration
+default: 10s
+components: ["origin", "cache"]
+---
 ############################
 # Monitoring-level configs #
 ############################
