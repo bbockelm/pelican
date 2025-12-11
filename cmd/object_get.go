@@ -146,9 +146,7 @@ func getMain(cmd *cobra.Command, args []string) {
 			client.WithCallback(pb.callback),
 			client.WithTokenLocation(tokenLocation),
 			client.WithCaches(caches...),
-		}
-		if dryRun {
-			options = append(options, client.WithDryRun(true))
+			client.WithDryRun(dryRun),
 		}
 		transferResults, err := client.DoGet(ctx, src, dest, isRecursive, options...)
 		if err != nil {

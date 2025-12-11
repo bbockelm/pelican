@@ -177,9 +177,7 @@ func syncMain(cmd *cobra.Command, args []string) {
 				client.WithTokenLocation(tokenLocation),
 				client.WithSynchronize(client.SyncSize),
 				client.WithCaches(caches...),
-			}
-			if dryRun {
-				options = append(options, client.WithDryRun(true))
+				client.WithDryRun(dryRun),
 			}
 			if _, err = client.DoGet(ctx, src, dest, true, options...); err != nil {
 				lastSrc = src
@@ -200,9 +198,7 @@ func syncMain(cmd *cobra.Command, args []string) {
 				client.WithTokenLocation(tokenLocation),
 				client.WithSynchronize(client.SyncSize),
 				client.WithCaches(caches...),
-			}
-			if dryRun {
-				options = append(options, client.WithDryRun(true))
+				client.WithDryRun(dryRun),
 			}
 			if _, err = client.DoPut(ctx, src, dest, true, options...); err != nil {
 				lastSrc = src

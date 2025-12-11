@@ -250,12 +250,8 @@ func putMain(cmd *cobra.Command, args []string) {
 	var result error
 	lastSrc := ""
 
-	options = append(options, client.WithCallback(pb.callback), client.WithTokenLocation(tokenLocation))
-	
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	if dryRun {
-		options = append(options, client.WithDryRun(true))
-	}
+	options = append(options, client.WithCallback(pb.callback), client.WithTokenLocation(tokenLocation), client.WithDryRun(dryRun))
 	
 	finalResults := make([][]client.TransferResults, 0)
 
