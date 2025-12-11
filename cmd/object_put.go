@@ -252,7 +252,7 @@ func putMain(cmd *cobra.Command, args []string) {
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	options = append(options, client.WithCallback(pb.callback), client.WithTokenLocation(tokenLocation), client.WithDryRun(dryRun))
-	
+
 	finalResults := make([][]client.TransferResults, 0)
 
 	for _, src := range source {
