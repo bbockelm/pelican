@@ -169,10 +169,6 @@ func syncMain(cmd *cobra.Command, args []string) {
 	lastSrc := ""
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	var dryRunOptions []client.TransferOption
-	if dryRun {
-		dryRunOptions = []client.TransferOption{client.WithDryRun(true)}
-	}
 
 	if doDownload {
 		for _, src := range sources {
@@ -180,9 +176,11 @@ func syncMain(cmd *cobra.Command, args []string) {
 				client.WithCallback(pb.callback),
 				client.WithTokenLocation(tokenLocation),
 				client.WithSynchronize(client.SyncSize),
+				client.WithCaches(caches...),
 			}
-			options = append(options, client.WithCaches(caches...)...)
-			options = append(options, dryRunOptions...)
+			if dryRun {
+				options = append(options, client.WithDryRun(true))
+			}
 			if _, err = client.DoGet(ctx, src, dest, true, options...); err != nil {
 				lastSrc = src
 				break
@@ -201,9 +199,11 @@ func syncMain(cmd *cobra.Command, args []string) {
 				client.WithCallback(pb.callback),
 				client.WithTokenLocation(tokenLocation),
 				client.WithSynchronize(client.SyncSize),
+				client.WithCaches(caches...),
 			}
-			options = append(options, client.WithCaches(caches...)...)
-			options = append(options, dryRunOptions...)
+			if dryRun {
+				options = append(options, client.WithDryRun(true))
+			}
 			if _, err = client.DoPut(ctx, src, dest, true, options...); err != nil {
 				lastSrc = src
 				break
