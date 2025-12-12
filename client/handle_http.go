@@ -1909,7 +1909,7 @@ func downloadObject(transfer *transferFile) (transferResults TransferResults, er
 		if transfer.job != nil && transfer.job.dryRun {
 			// Determine the final local path
 			finalLocalPath := localPath
-			if localPath != "" && os.IsPathSeparator(localPath[len(localPath)-1]) {
+			if len(localPath) > 0 && os.IsPathSeparator(localPath[len(localPath)-1]) {
 				finalLocalPath = path.Join(localPath, path.Base(transfer.remoteURL.Path))
 			}
 			// Print to stdout with structured format for easy parsing
@@ -1928,7 +1928,7 @@ func downloadObject(transfer *transferFile) (transferResults TransferResults, er
 						}
 					} else {
 						directory := path.Dir(localPath)
-						if localPath != "" && os.IsPathSeparator(localPath[len(localPath)-1]) {
+						if len(localPath) > 0 && os.IsPathSeparator(localPath[len(localPath)-1]) {
 							directory = localPath
 							localPath = path.Join(directory, path.Base(transfer.remoteURL.Path))
 						}
