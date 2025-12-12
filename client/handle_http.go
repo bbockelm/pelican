@@ -1905,9 +1905,15 @@ func downloadObject(transfer *transferFile) (transferResults TransferResults, er
 	var fileWriter io.Writer
 	if transfer.xferType == transferTypeDownload {
 		var info os.FileInfo
-		// In dry-run mode, skip actual file operations
+		// In dry-run mode, skip actual file operations and just report what would happen
 		if transfer.job != nil && transfer.job.dryRun {
-			log.Infof("DRY RUN: Would download %s to %s", transfer.remoteURL.Path, localPath)
+			// Determine the final local path
+			finalLocalPath := localPath
+			if localPath != "" && os.IsPathSeparator(localPath[len(localPath)-1]) {
+				finalLocalPath = path.Join(localPath, path.Base(transfer.remoteURL.Path))
+			}
+			// Print to stdout with structured format for easy parsing
+			fmt.Printf("DOWNLOAD: %s -> %s\n", transfer.remoteURL.Path, finalLocalPath)
 			fileWriter = io.Discard
 		} else {
 			if info, err = os.Stat(localPath); err != nil {
@@ -2978,19 +2984,9 @@ func uploadObject(transfer *transferFile) (transferResult TransferResults, err e
 
 	// In dry-run mode, log what would be uploaded and return success
 	if transfer.job != nil && transfer.job.dryRun {
-		log.Infof("DRY RUN: Would upload %s to %s", transfer.localPath, transfer.remoteURL.Path)
-		// Still perform basic file validation
-		if _, err := os.Stat(transfer.localPath); err != nil {
-			if os.IsNotExist(err) {
-				transferResult.Error = error_codes.NewParameter_FileNotFoundError(errors.Wrapf(err, "local file %q does not exist", transfer.localPath))
-			} else if os.IsPermission(err) {
-				transferResult.Error = error_codes.NewAuthorizationError(errors.Wrapf(err, "permission denied accessing local file %q", transfer.localPath))
-			} else {
-				transferResult.Error = error_codes.NewParameterError(errors.Wrapf(err, "failed to stat local file %q", transfer.localPath))
-			}
-			return transferResult, transferResult.Error
-		}
-		// Return success for dry-run
+		// Print to stdout with structured format for easy parsing
+		fmt.Printf("UPLOAD: %s -> %s\n", transfer.localPath, transfer.remoteURL.Path)
+		// Return success for dry-run without performing any file operations
 		return transferResult, nil
 	}
 
