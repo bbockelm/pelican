@@ -124,38 +124,6 @@ func TestDryRunHelpText(t *testing.T) {
 	}
 }
 
-// TestDryRunOutputFormat documents the expected output format for dry-run mode
-func TestDryRunOutputFormat(t *testing.T) {
-	// This test documents the expected output format but doesn't actually run transfers
-	// The format should be:
-	// DOWNLOAD: <remote-path> -> <local-path>
-	// UPLOAD: <local-path> -> <remote-path>
-	
-	t.Run("DownloadFormatDocumentation", func(t *testing.T) {
-		// Expected format for downloads
-		expectedFormat := "DOWNLOAD: /namespace/path/file.txt -> /local/dest/file.txt"
-		
-		// Verify format components
-		assert.Contains(t, expectedFormat, "DOWNLOAD:")
-		assert.Contains(t, expectedFormat, "->")
-		
-		// Should be single line
-		assert.Equal(t, 1, len(strings.Split(expectedFormat, "\n")))
-	})
-	
-	t.Run("UploadFormatDocumentation", func(t *testing.T) {
-		// Expected format for uploads
-		expectedFormat := "UPLOAD: /local/src/file.txt -> /namespace/path/file.txt"
-		
-		// Verify format components
-		assert.Contains(t, expectedFormat, "UPLOAD:")
-		assert.Contains(t, expectedFormat, "->")
-		
-		// Should be single line
-		assert.Equal(t, 1, len(strings.Split(expectedFormat, "\n")))
-	})
-}
-
 // TestWithDryRunOption verifies that the WithDryRun option can be created
 // This test is in the cmd package but tests the client package to ensure
 // the option is exported and usable
@@ -163,10 +131,10 @@ func TestWithDryRunOption(t *testing.T) {
 	// This test is kept simple to just verify the option exists
 	// Integration tests with actual transfers would require xrootd and a full federation setup
 	// which may not be available in all test environments
-	
+
 	// Just verify we can reference the types and functions
 	t.Log("WithDryRun option should be available in client package for use by cmd package")
-	
+
 	// The actual usage is tested indirectly when the commands are used with --dry-run
 	// In a real scenario:
 	// 1. User runs: pelican object get --dry-run <source> <dest>

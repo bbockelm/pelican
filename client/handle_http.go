@@ -1877,6 +1877,7 @@ func downloadObject(transfer *transferFile) (transferResults TransferResults, er
 	log.Debugln("Downloading object from", transfer.remoteURL, "to", transfer.localPath)
 	var downloaded int64
 	localPath := transfer.localPath
+	transferResults.job = transfer.job
 
 	// Create a checksum hash instance for each requested checksum; these will all be
 	// joined together into a single writer interface with the output file
@@ -1914,7 +1915,7 @@ func downloadObject(transfer *transferFile) (transferResults TransferResults, er
 			}
 			// Print to stdout with structured format for easy parsing
 			fmt.Printf("DOWNLOAD: %s -> %s\n", transfer.remoteURL.Path, finalLocalPath)
-			fileWriter = io.Discard
+			return transferResults, nil
 		} else {
 			if info, err = os.Stat(localPath); err != nil {
 				if os.IsNotExist(err) {
