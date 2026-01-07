@@ -84,8 +84,8 @@ func TestReset(t *testing.T) {
 	assert.Empty(t, viper.GetString("TestKey2"))
 
 	// Verify config was cleared
-	config := viperConfig.Load()
-	assert.Nil(t, config)
+	state := configState.Load()
+	assert.Nil(t, state)
 }
 
 func TestConcurrentSetAndGet(t *testing.T) {
@@ -187,7 +187,7 @@ func TestGetOrCreateConfig(t *testing.T) {
 	defer viper.Reset()
 
 	// Clear the atomic config
-	viperConfig.Store(nil)
+	configState.Store(nil)
 
 	// Set test values in viper
 	viper.Set("Cache.Port", 9000)
@@ -202,8 +202,9 @@ func TestGetOrCreateConfig(t *testing.T) {
 	assert.Equal(t, "/test/path", config.Cache.DataLocation)
 
 	// Verify it's now stored in the atomic pointer
-	storedConfig := viperConfig.Load()
-	assert.Equal(t, config, storedConfig)
+	storedState := configState.Load()
+	require.NotNil(t, storedState)
+	assert.Equal(t, config, storedState.Config)
 }
 
 func TestAccessorFunctionsWithNoConfig(t *testing.T) {
@@ -212,7 +213,7 @@ func TestAccessorFunctionsWithNoConfig(t *testing.T) {
 	defer viper.Reset()
 
 	// Clear the atomic config
-	viperConfig.Store(nil)
+	configState.Store(nil)
 
 	// Set values in viper
 	viper.Set("Cache.Port", 7000)
@@ -223,9 +224,10 @@ func TestAccessorFunctionsWithNoConfig(t *testing.T) {
 	assert.Equal(t, 7000, port)
 
 	// Verify config was created and stored
-	config := viperConfig.Load()
-	require.NotNil(t, config)
-	assert.Equal(t, 7000, config.Cache.Port)
+	state := configState.Load()
+	require.NotNil(t, state)
+	require.NotNil(t, state.Config)
+	assert.Equal(t, 7000, state.Config.Cache.Port)
 }
 
 func TestIsRuntimeConfigurable(t *testing.T) {
