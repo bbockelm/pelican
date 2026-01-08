@@ -565,7 +565,9 @@ func GetOriginExports() ([]OriginExport, error) {
 	}
 
 	// This default also set in config.go, but duplicating it here makes testing a bit easier.
-	viper.SetDefault("Origin.StorageType", "posix")
+	if !param.Origin_StorageType.IsSet() {
+		_ = param.Set("Origin.StorageType", "posix")
+	}
 	storageType, err := server_structs.ParseOriginStorageType(param.Origin_StorageType.GetString())
 	if err != nil {
 		return originExports, err

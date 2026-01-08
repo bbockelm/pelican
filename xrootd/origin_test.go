@@ -372,8 +372,8 @@ func TestS3OriginWithSentinel(t *testing.T) {
 	defer mockupCancel()
 
 	mockExportValidStn := server_utils.OriginExport{
-		StoragePrefix:    viper.GetString(param.Origin_StoragePrefix.GetName()),
-		FederationPrefix: viper.GetString(param.Origin_FederationPrefix.GetName()),
+		StoragePrefix:    param.Origin_StoragePrefix.GetString(),
+		FederationPrefix: param.Origin_FederationPrefix.GetString(),
 		Capabilities:     server_structs.Capabilities{Reads: true},
 		SentinelLocation: "MD5SUMS",
 	}
@@ -387,15 +387,15 @@ func TestS3OriginWithSentinel(t *testing.T) {
 
 	// mock export with no sentinel
 	mockExportNoStn := server_utils.OriginExport{
-		StoragePrefix:    viper.GetString(param.Origin_StoragePrefix.GetName()),
-		FederationPrefix: viper.GetString(param.Origin_FederationPrefix.GetName()),
+		StoragePrefix:    param.Origin_StoragePrefix.GetString(),
+		FederationPrefix: param.Origin_FederationPrefix.GetString(),
 		Capabilities:     server_structs.Capabilities{Reads: true},
 	}
 
 	// mock export with an invalid sentinel
 	mockExportInvalidStn := server_utils.OriginExport{
-		StoragePrefix:    viper.GetString(param.Origin_StoragePrefix.GetName()),
-		FederationPrefix: viper.GetString(param.Origin_FederationPrefix.GetName()),
+		StoragePrefix:    param.Origin_StoragePrefix.GetString(),
+		FederationPrefix: param.Origin_FederationPrefix.GetString(),
 		Capabilities:     server_structs.Capabilities{Reads: true},
 		SentinelLocation: "MD5SUMS_dne",
 	}
@@ -452,21 +452,21 @@ func TestPosixOriginWithSentinel(t *testing.T) {
 
 	// mock export with a valid sentinel
 	mockExportValidStn := server_utils.OriginExport{
-		StoragePrefix:    viper.GetString("Origin.StoragePrefix"),
-		FederationPrefix: viper.GetString("Origin.FederationPrefix"),
+		StoragePrefix:    param.Origin_StoragePrefix.GetString(),
+		FederationPrefix: param.Origin_FederationPrefix.GetString(),
 		Capabilities:     server_structs.Capabilities{Reads: true},
 		SentinelLocation: "mock_sentinel",
 	}
 	// mock export with no sentinel
 	mockExportNoStn := server_utils.OriginExport{
-		StoragePrefix:    viper.GetString("Origin.StoragePrefix"),
-		FederationPrefix: viper.GetString("Origin.FederationPrefix"),
+		StoragePrefix:    param.Origin_StoragePrefix.GetString(),
+		FederationPrefix: param.Origin_FederationPrefix.GetString(),
 		Capabilities:     server_structs.Capabilities{Reads: true},
 	}
 	// mock export with an invalid sentinel
 	mockExportInvalidStn := server_utils.OriginExport{
-		StoragePrefix:    viper.GetString("Origin.StoragePrefix"),
-		FederationPrefix: viper.GetString("Origin.FederationPrefix"),
+		StoragePrefix:    param.Origin_StoragePrefix.GetString(),
+		FederationPrefix: param.Origin_FederationPrefix.GetString(),
 		Capabilities:     server_structs.Capabilities{Reads: true},
 		SentinelLocation: "sentinel_dne",
 	}

@@ -414,7 +414,7 @@ func setupExports(t *testing.T, config string) {
 	// sure the file exists and is readable by the process.
 	// Iterate through Origin.XXX keys and check for "<WILL BE REPLACED IN TEST>" in the value
 	for _, key := range viper.AllKeys() {
-		if strings.Contains(viper.GetString(key), "<WILL BE REPLACED IN TEST>") {
+		if strings.Contains(param.GetString(key), "<WILL BE REPLACED IN TEST>") {
 			tmpFile := getTmpFile(t)
 			require.NoError(t, param.Set(key, tmpFile))
 		} else if key == "origin.exports" { // keys will be lowercased
@@ -939,7 +939,7 @@ u * /second/namespace -lr /first/namespace lr /.well-known lr /valid/path r
 
 			// Write the input authfile if provided
 			if tc.inputAuthfile != "" {
-				err := os.WriteFile(viper.GetString(param.Xrootd_Authfile.GetName()), []byte(tc.inputAuthfile), 0600)
+				err := os.WriteFile(param.Xrootd_Authfile.GetString(), []byte(tc.inputAuthfile), 0600)
 				require.NoError(t, err)
 			}
 
@@ -951,12 +951,12 @@ u * /second/namespace -lr /first/namespace lr /.well-known lr /valid/path r
 				server = &origin.OriginServer{}
 				setupExports(t, tc.originCfg)
 				generatedAuthfileName = "authfile-origin-generated"
-				serverDir = viper.GetString(param.Origin_RunLocation.GetName())
+				serverDir = param.Origin_RunLocation.GetString()
 			} else if tc.serverType == server_structs.CacheType {
 				server = &cache.CacheServer{}
 				server.SetNamespaceAds(tc.nsAds)
 				generatedAuthfileName = "authfile-cache-generated"
-				serverDir = viper.GetString(param.Cache_RunLocation.GetName())
+				serverDir = param.Cache_RunLocation.GetString()
 			}
 			err := os.MkdirAll(serverDir, 0755)
 			require.NoError(t, err, "error creating server run dir")

@@ -30,19 +30,17 @@ import (
 	"github.com/spf13/viper"
 )
 
-// ConfigState holds the complete configuration state including values,
-// tracking of explicitly set parameters, and default values.
-type ConfigState struct {
-	Config   *Config
-	IsSet    map[string]bool
-	Defaults map[string]interface{}
+// configState holds the complete configuration state.
+type configState struct {
+	Config *Config
+	IsSet  map[string]bool
 }
 
 var (
-	configState atomic.Pointer[ConfigState]
-	configMutex sync.Mutex
-	callbacks   map[string]ConfigCallback
-	callbackMux sync.RWMutex
+	globalConfigState atomic.Pointer[configState]
+	configMutex       sync.Mutex
+	callbacks         map[string]ConfigCallback
+	callbackMux       sync.RWMutex
 )
 
 // ConfigCallback is a function that is called when configuration changes.
@@ -67,7 +65,7 @@ func Refresh() (*Config, error) {
 	return UnmarshalConfig()
 }
 
-// BindAllParameters binds all known configuration keys to environment variables.
+// bindAllParameters binds all known configuration keys to environment variables.
 //
 // Viper's AutomaticEnv() allows env vars to override Get* calls. However,
 // Viper's AllSettings() (which we use to build a snapshot Config) does not
@@ -75,7 +73,7 @@ func Refresh() (*Config, error) {
 //
 // By binding all known keys, we ensure env overrides are reflected in the
 // snapshot and therefore in generated `param.*` getters.
-func BindAllParameters(v *viper.Viper) {
+func bindAllParameters(v *viper.Viper) {
 	if v == nil {
 		return
 	}
@@ -83,6 +81,29 @@ func BindAllParameters(v *viper.Viper) {
 	for _, key := range allParameterNames {
 		_ = v.BindEnv(key)
 	}
+}
+
+// syncIsSetFromViper queries viper.IsSet() for all known parameters and returns
+// an IsSet map. This should be called after loading configuration from files or
+// other sources to properly track which parameters were explicitly set.
+//
+// Note: viper.IsSet() returns true if a value was set via config file, env var,
+// command-line flag, or explicit Set() call. It returns false for default-only values.
+//
+// This function does not acquire the configMutex; the caller must hold it.
+func syncIsSetFromViper(v *viper.Viper) map[string]bool {
+	if v == nil {
+		return make(map[string]bool)
+	}
+
+	// Create IsSet map by checking viper for each parameter
+	isSet := make(map[string]bool, len(allParameterNames))
+	for _, key := range allParameterNames {
+		if v.IsSet(key) {
+			isSet[key] = true
+		}
+	}
+	return isSet
 }
 
 // DecodeConfig decodes the provided viper instance into a new Config struct.
@@ -94,7 +115,7 @@ func DecodeConfig(v *viper.Viper) (*Config, error) {
 	if v == nil {
 		return nil, errors.New("nil viper instance")
 	}
-	BindAllParameters(v)
+	bindAllParameters(v)
 	newConfig := new(Config)
 	settings := v.AllSettings()
 	mergeKnownKeyOverrides(settings, v)
@@ -176,28 +197,20 @@ func decodeAndStoreConfig(v *viper.Viper) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	oldState := configState.Load()
+	oldState := globalConfigState.Load()
 	var oldConfig *Config
 	if oldState != nil {
 		oldConfig = oldState.Config
 	}
 
-	// Create new state, preserving existing IsSet and Defaults if they exist
-	newState := &ConfigState{
-		Config:   newConfig,
-		IsSet:    make(map[string]bool),
-		Defaults: make(map[string]interface{}),
+	// Sync IsSet tracking from viper
+	newIsSet := syncIsSetFromViper(v)
+
+	newState := &configState{
+		Config: newConfig,
+		IsSet:  newIsSet,
 	}
-	if oldState != nil {
-		// Preserve existing tracking
-		for k, v := range oldState.IsSet {
-			newState.IsSet[k] = v
-		}
-		for k, v := range oldState.Defaults {
-			newState.Defaults[k] = v
-		}
-	}
-	configState.Store(newState)
+	globalConfigState.Store(newState)
 
 	// Invoke callbacks with old and new config
 	invokeCallbacks(oldConfig, newConfig)
@@ -207,7 +220,7 @@ func decodeAndStoreConfig(v *viper.Viper) (*Config, error) {
 
 // Return the unmarshaled viper config struct as a pointer
 func GetUnmarshaledConfig() (*Config, error) {
-	state := configState.Load()
+	state := globalConfigState.Load()
 	if state == nil || state.Config == nil {
 		return nil, errors.New("Config hasn't been unmarshaled yet.")
 	}
@@ -282,12 +295,12 @@ func ConvertToConfigWithType(rawConfig *Config) *configWithType {
 	return &typedConfig
 }
 
-// getOrCreateConfig returns the current config or creates one from viper if it doesn't exist.
-// This helper is used by the generated accessor functions to ensure we always have a config.
-func getOrCreateConfig() *Config {
-	state := configState.Load()
+// getOrCreateState returns the current config state or creates one from viper if it doesn't exist.
+// This helper ensures we always have a config state.
+func getOrCreateState() *configState {
+	state := globalConfigState.Load()
 	if state != nil && state.Config != nil {
-		return state.Config
+		return state
 	}
 
 	// Config doesn't exist yet, create one from viper
@@ -295,9 +308,9 @@ func getOrCreateConfig() *Config {
 	defer configMutex.Unlock()
 
 	// Double-check after acquiring lock
-	state = configState.Load()
+	state = globalConfigState.Load()
 	if state != nil && state.Config != nil {
-		return state.Config
+		return state
 	}
 
 	// Create new config from viper.
@@ -319,20 +332,48 @@ func getOrCreateConfig() *Config {
 		Result: newConfig,
 	})
 	if err != nil {
-		return new(Config)
+		// Return a minimal state on error
+		return &configState{
+			Config: new(Config),
+			IsSet:  make(map[string]bool),
+		}
 	}
 	if err := decoder.Decode(viper.GetViper().AllSettings()); err != nil {
-		return new(Config)
+		// Return a minimal state on error
+		return &configState{
+			Config: new(Config),
+			IsSet:  make(map[string]bool),
+		}
 	}
 
-	// Store new state with empty tracking maps
-	newState := &ConfigState{
-		Config:   newConfig,
-		IsSet:    make(map[string]bool),
-		Defaults: make(map[string]interface{}),
+	// Store new state with IsSet tracking
+	newState := &configState{
+		Config: newConfig,
+		IsSet:  make(map[string]bool),
 	}
-	configState.Store(newState)
-	return newConfig
+	globalConfigState.Store(newState)
+	return newState
+}
+
+// getOrCreateConfig returns the current config or creates one from viper if it doesn't exist.
+// This helper is used by the generated accessor functions to ensure we always have a config.
+func getOrCreateConfig() *Config {
+	return getOrCreateState().Config
+}
+
+// IsSet returns whether a parameter was explicitly set.
+// This is thread-safe, unlike viper.IsSet().
+func IsSet(key string) bool {
+	state := getOrCreateState()
+	return state.IsSet[key]
+}
+
+// GetString gets a string parameter value by key name.
+// This is a convenience function for cases where you have the key as a string.
+// Prefer using the generated typed accessors (e.g., param.Cache_Port.GetString())
+// when possible.
+func GetString(key string) string {
+	return viper.GetString(key)
 }
 
 // Set sets a parameter value in both viper and the config struct.
@@ -376,34 +417,29 @@ func MultiSet(keyValues map[string]interface{}) error {
 	}
 
 	// Get old state and create new state
-	oldState := configState.Load()
+	oldState := globalConfigState.Load()
 	var oldConfig *Config
-	newState := &ConfigState{
-		Config:   newConfig,
-		IsSet:    make(map[string]bool),
-		Defaults: make(map[string]interface{}),
-	}
-
-	// Preserve existing tracking from old state
+	var oldIsSet map[string]bool
 	if oldState != nil {
 		oldConfig = oldState.Config
-		for k, v := range oldState.IsSet {
-			newState.IsSet[k] = v
-		}
-		for k, v := range oldState.Defaults {
-			newState.Defaults[k] = v
-		}
+		oldIsSet = oldState.IsSet
 	}
 
-	// Mark all set keys as explicitly set
+	// Create new IsSet map with updated keys
+	newIsSet := make(map[string]bool, len(oldIsSet)+len(keyValues))
+	for k, v := range oldIsSet {
+		newIsSet[k] = v
+	}
 	for key := range keyValues {
-		newState.IsSet[key] = true
-		// Remove from defaults if it was a default
-		delete(newState.Defaults, key)
+		newIsSet[key] = true
 	}
 
+	newState := &configState{
+		Config: newConfig,
+		IsSet:  newIsSet,
+	}
+	globalConfigState.Store(newState)
 	// Update atomic pointer and invoke callbacks
-	configState.Store(newState)
 	invokeCallbacks(oldConfig, newConfig)
 	return nil
 }
@@ -418,7 +454,7 @@ func Reset() error {
 	viper.Reset()
 
 	// Clear the config state
-	configState.Store(nil)
+	globalConfigState.Store(nil)
 	return nil
 }
 
@@ -452,91 +488,4 @@ func invokeCallbacks(oldConfig, newConfig *Config) {
 		// Call each callback in a goroutine to avoid blocking config updates
 		go cb(oldConfig, newConfig)
 	}
-}
-
-// IsSetInternal returns true if the parameter has been explicitly set (not just a default value).
-// This is thread-safe and intended for use by generated parameter accessor methods.
-func IsSetInternal(name string) bool {
-	state := configState.Load()
-	if state == nil {
-		return false
-	}
-	return state.IsSet[name]
-}
-
-// MarkAsSetInternal marks a parameter as explicitly set.
-// This updates the ConfigState atomically and is intended for use by Set operations.
-func MarkAsSetInternal(name string) {
-	configMutex.Lock()
-	defer configMutex.Unlock()
-
-	state := configState.Load()
-	if state == nil {
-		return
-	}
-
-	// Create new state with updated IsSet map
-	newState := &ConfigState{
-		Config:   state.Config,
-		IsSet:    make(map[string]bool),
-		Defaults: make(map[string]interface{}),
-	}
-
-	// Copy existing maps
-	for k, v := range state.IsSet {
-		newState.IsSet[k] = v
-	}
-	for k, v := range state.Defaults {
-		newState.Defaults[k] = v
-	}
-
-	// Mark as set
-	newState.IsSet[name] = true
-	delete(newState.Defaults, name)
-
-	configState.Store(newState)
-}
-
-// GetDefaultInternal retrieves the default value for a parameter, if one was set.
-// Returns nil if no default exists.
-// This is thread-safe and intended for use by generated parameter accessor methods.
-func GetDefaultInternal(name string) (interface{}, bool) {
-	state := configState.Load()
-	if state == nil {
-		return nil, false
-	}
-	val, ok := state.Defaults[name]
-	return val, ok
-}
-
-// SetDefaultInternal stores a default value for a parameter.
-// This updates the ConfigState atomically and is intended for use by generated SetDefault methods.
-func SetDefaultInternal(name string, value interface{}) {
-	configMutex.Lock()
-	defer configMutex.Unlock()
-
-	state := configState.Load()
-	if state == nil {
-		return
-	}
-
-	// Create new state with updated Defaults map
-	newState := &ConfigState{
-		Config:   state.Config,
-		IsSet:    make(map[string]bool),
-		Defaults: make(map[string]interface{}),
-	}
-
-	// Copy existing maps
-	for k, v := range state.IsSet {
-		newState.IsSet[k] = v
-	}
-	for k, v := range state.Defaults {
-		newState.Defaults[k] = v
-	}
-
-	// Set default
-	newState.Defaults[name] = value
-
-	configState.Store(newState)
 }

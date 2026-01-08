@@ -29,7 +29,6 @@ import (
 	"time"
 
 	_ "github.com/glebarez/sqlite"
-	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -100,8 +99,8 @@ func TestCacheServe_PreservesExistingPort(t *testing.T) {
 	_ = fed_test_utils.NewFedTest(t, bothPubNamespaces)
 
 	// After startup, Cache.Url should remain with the original port
-	finalURL := viper.GetString(param.Cache_Url.GetName())
-	finalPort := viper.GetInt(param.Cache_Port.GetName())
+	finalURL := param.Cache_Url.GetString()
+	finalPort := param.Cache_Port.GetInt()
 
 	assert.Equal(t, "https://example.com:8442", finalURL, "Cache.Url should preserve existing port")
 	assert.NotEqual(t, 0, finalPort, "Cache.Port should be set by CacheServe")
@@ -120,8 +119,8 @@ func TestCacheServe_AddsPortWhenMissing(t *testing.T) {
 	_ = fed_test_utils.NewFedTest(t, bothPubNamespaces)
 
 	// After startup, Cache.Url should include a port
-	finalURL := viper.GetString(param.Cache_Url.GetName())
-	finalPort := viper.GetInt(param.Cache_Port.GetName())
+	finalURL := param.Cache_Url.GetString()
+	finalPort := param.Cache_Port.GetInt()
 
 	assert.NotEqual(t, 0, finalPort, "Cache.Port should be set by CacheServe")
 	assert.Contains(t, finalURL, ":", "Cache.Url should include a port")

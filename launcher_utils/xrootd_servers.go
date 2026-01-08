@@ -25,7 +25,6 @@ import (
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	"github.com/spf13/viper"
 
 	"github.com/pelicanplatform/pelican/metrics"
 	"github.com/pelicanplatform/pelican/param"
@@ -68,10 +67,14 @@ func CheckDefaults(server server_structs.XRootDServer) error {
 
 	if managerHost := param.Xrootd_ManagerHost.GetString(); managerHost == "" {
 		log.Debug("No manager host specified for the cmsd process in origin; assuming no xrootd protocol support")
-		viper.SetDefault("Origin.EnableCmsd", false)
+		if !param.Origin_EnableCmsd.IsSet() {
+			_ = param.Set("Origin.EnableCmsd", false)
+		}
 		metrics.DeleteComponentHealthStatus("cmsd")
 	} else {
-		viper.SetDefault("Origin.EnableCmsd", true)
+		if !param.Origin_EnableCmsd.IsSet() {
+			_ = param.Set("Origin.EnableCmsd", true)
+		}
 	}
 
 	// TODO: Could upgrade this to a check for a cert in the file...

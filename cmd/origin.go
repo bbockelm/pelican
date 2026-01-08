@@ -24,6 +24,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/pelicanplatform/pelican/param"
 )
 
 var (
@@ -142,7 +144,7 @@ instead.
 	if err := viper.BindPFlag("Origin.S3UrlStyle", originServeCmd.Flags().Lookup("url-style")); err != nil {
 		panic(err)
 	}
-	if viper.IsSet("Origin.S3UrlStyle") && viper.GetString("Origin.S3UrlStyle") != "path" && viper.GetString("Origin.S3UrlStyle") != "virtual" {
+	if param.Origin_S3UrlStyle.IsSet() && viper.GetString("Origin.S3UrlStyle") != "path" && viper.GetString("Origin.S3UrlStyle") != "virtual" {
 		panic("The --url-style flag must be either 'path' or 'virtual'")
 	}
 

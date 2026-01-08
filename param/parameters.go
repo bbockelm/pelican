@@ -744,7 +744,7 @@ func (sP StringParam) GetName() string {
 }
 
 func (sP StringParam) IsSet() bool {
-	return viper.IsSet(sP.name)
+	return IsSet(sP.name)
 }
 
 func (sP StringParam) IsRuntimeConfigurable() bool {
@@ -801,7 +801,7 @@ func (slP StringSliceParam) GetName() string {
 }
 
 func (slP StringSliceParam) IsSet() bool {
-	return viper.IsSet(slP.name)
+	return IsSet(slP.name)
 }
 
 func (slP StringSliceParam) IsRuntimeConfigurable() bool {
@@ -896,7 +896,7 @@ func (iP IntParam) GetName() string {
 }
 
 func (iP IntParam) IsSet() bool {
-	return viper.IsSet(iP.name)
+	return IsSet(iP.name)
 }
 
 func (iP IntParam) IsRuntimeConfigurable() bool {
@@ -1055,7 +1055,7 @@ func (bP BoolParam) GetName() string {
 }
 
 func (bP BoolParam) IsSet() bool {
-	return viper.IsSet(bP.name)
+	return IsSet(bP.name)
 }
 
 func (bP BoolParam) IsRuntimeConfigurable() bool {
@@ -1154,7 +1154,7 @@ func (dP DurationParam) GetName() string {
 }
 
 func (dP DurationParam) IsSet() bool {
-	return viper.IsSet(dP.name)
+	return IsSet(dP.name)
 }
 
 func (dP DurationParam) IsRuntimeConfigurable() bool {
@@ -1170,7 +1170,7 @@ func (oP ObjectParam) GetName() string {
 }
 
 func (oP ObjectParam) IsSet() bool {
-	return viper.IsSet(oP.name)
+	return IsSet(oP.name)
 }
 
 func (oP ObjectParam) IsRuntimeConfigurable() bool {
