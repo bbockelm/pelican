@@ -2353,6 +2353,9 @@ func ResetConfig() {
 	transport = nil
 	basicTransport = nil
 
+	// Clear cached SSRF transport object
+	ResetSSRFTransportForTest()
+
 	// Clear the instance ID information for generated server ads
 	server_structs.Reset()
 
