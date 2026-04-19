@@ -309,6 +309,7 @@ var runtimeConfigurableMap = map[string]bool{
 	"Origin.DbLocation": false,
 	"Origin.DefaultChecksumTypes": false,
 	"Origin.DirectorTest": false,
+	"Origin.DisableCopies": false,
 	"Origin.DisableDirectClients": false,
 	"Origin.DiskUsageCalculationDelay": false,
 	"Origin.DiskUsageCalculationInterval": false,
@@ -975,6 +976,7 @@ var boolAccessors = map[string]func(*Config) bool{
 	"Monitoring.MetricAuthorization": func(c *Config) bool { return c.Monitoring.MetricAuthorization },
 	"Monitoring.PromQLAuthorization": func(c *Config) bool { return c.Monitoring.PromQLAuthorization },
 	"Origin.DirectorTest": func(c *Config) bool { return c.Origin.DirectorTest },
+	"Origin.DisableCopies": func(c *Config) bool { return c.Origin.DisableCopies },
 	"Origin.DisableDirectClients": func(c *Config) bool { return c.Origin.DisableDirectClients },
 	"Origin.EnableAtomicUploads": func(c *Config) bool { return c.Origin.EnableAtomicUploads },
 	"Origin.EnableBroker": func(c *Config) bool { return c.Origin.EnableBroker },
@@ -1412,6 +1414,7 @@ var allParameterNames = []string{
 	"Origin.DbLocation",
 	"Origin.DefaultChecksumTypes",
 	"Origin.DirectorTest",
+	"Origin.DisableCopies",
 	"Origin.DisableDirectClients",
 	"Origin.DiskUsageCalculationDelay",
 	"Origin.DiskUsageCalculationInterval",
@@ -1930,6 +1933,7 @@ var (
 	Monitoring_MetricAuthorization = BoolParam{"Monitoring.MetricAuthorization"}
 	Monitoring_PromQLAuthorization = BoolParam{"Monitoring.PromQLAuthorization"}
 	Origin_DirectorTest = BoolParam{"Origin.DirectorTest"}
+	Origin_DisableCopies = BoolParam{"Origin.DisableCopies"}
 	Origin_DisableDirectClients = BoolParam{"Origin.DisableDirectClients"}
 	Origin_EnableAtomicUploads = BoolParam{"Origin.EnableAtomicUploads"}
 	Origin_EnableBroker = BoolParam{"Origin.EnableBroker"}
@@ -2368,6 +2372,7 @@ func init() {
 		"Monitoring.MetricAuthorization": Monitoring_MetricAuthorization,
 		"Monitoring.PromQLAuthorization": Monitoring_PromQLAuthorization,
 		"Origin.DirectorTest": Origin_DirectorTest,
+		"Origin.DisableCopies": Origin_DisableCopies,
 		"Origin.DisableDirectClients": Origin_DisableDirectClients,
 		"Origin.EnableAtomicUploads": Origin_EnableAtomicUploads,
 		"Origin.EnableBroker": Origin_EnableBroker,
