@@ -125,6 +125,23 @@ Origin:
     KeepaliveTimeout: 20s
     Port: 22
     SessionEstablishTimeout: 5m
+  Posc:
+    Enabled: false
+    Prefix: ".pelican-posc"
+    FileTimeout: 1h
+    KeepaliveInterval: 19m
+  Metadata:
+    Enabled: false
+    Endpoint: ""
+    Mode: "eventual"
+    RequestTimeout: 10s
+    TokenLifetime: 5m
+    MinBackoff: 30s
+    MaxBackoff: 30m
+    MaxInflight: 4
+    RatePerSecond: 10
+    WarnAfter: 4h
+    ErrorAfter: 24h
 Registry:
   InstitutionsUrlReloadMinutes: 15m
   RequireCacheApproval: false
