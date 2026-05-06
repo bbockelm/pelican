@@ -51,6 +51,7 @@ const (
 	Collection_Read TokenScope = "collection.read"
 	Collection_Modify TokenScope = "collection.modify"
 	Collection_Delete TokenScope = "collection.delete"
+	Share_Access TokenScope = "share.access"
 
 	// WLCG Scopes
 	Wlcg_Storage_Read TokenScope = "storage.read"
@@ -76,8 +77,8 @@ func (s TokenScope) String() string {
 // Interface that allows us to assign a path to some token scopes, such as "storage.read:/foo/bar"
 func (s TokenScope) Path(path string) (TokenScope, error) {
 	// Only some of the token scopes can be assigned a path. This list might grow in the future.
-	if !(s == Wlcg_Storage_Read || s == Wlcg_Storage_Create || s == Wlcg_Storage_Modify || s == Wlcg_Storage_Stage || s == Scitokens_Read || s == Scitokens_Write || false) { // final "false" is a hack so we don't have to post process the template we generate from
-		return "", errors.New("cannot assign path to non-wlcg or non-scitokens2 token scope")
+	if !(s == Wlcg_Storage_Read || s == Wlcg_Storage_Create || s == Wlcg_Storage_Modify || s == Wlcg_Storage_Stage || s == Scitokens_Read || s == Scitokens_Write || s == Share_Access || false) { // final "false" is a hack so we don't have to post process the template we generate from
+		return "", errors.New("cannot assign path to a non-path-bearing token scope")
 	}
 
 	return TokenScope(s.String() + ":" + path), nil
@@ -141,6 +142,7 @@ var scopeDescriptions = map[TokenScope]string{
 	Collection_Read: `For getting/reading the contents of a collection`,
 	Collection_Modify: `For modifying the contents of a collection`,
 	Collection_Delete: `For deleting a collection`,
+	Share_Access: `Path-bearing scope minted onto access tokens issued for a "share" (a child collection that delegates a subset of its parent's access). The path component is the share's collection ID — e.g. share.access:/abcdef12 — and the data plane reads it to impersonate the share's owner, not the token bearer, when serving objects under the share's prefix. See docs/collections-design.md for the full design. Not user-grantable: the issuer mints it directly on access tokens, intersecting against the share owner's current parent-collection ACLs at mint and refresh time.`,
 }
 
 // Describe returns the human-readable description of the supplied
