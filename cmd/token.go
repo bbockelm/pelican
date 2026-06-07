@@ -141,8 +141,9 @@ func init() {
 	addScopeFlags(tokenCreateCmd)
 	addScopeFlags(tokenFetchCmd)
 
-	// Token fetch requires exactly one of read, write or modify
-	tokenFetchCmd.MarkFlagsMutuallyExclusive("read", "write", "modify")
+	// Token fetch requires at least one of read, write or modify; more than one
+	// may be combined (e.g. --read --modify), since these capabilities do not
+	// imply one another.
 	tokenFetchCmd.MarkFlagsOneRequired("read", "write", "modify")
 
 	tokenCreateCmd.Flags().BoolP("stage", "s", false, "Indicate the requested token should provide the ability to stage the specified resource.")
@@ -497,18 +498,20 @@ func fetchToken(cmd *cobra.Command, args []string) error {
 	modify, _ := cmd.Flags().GetBool("modify")
 	read, _ := cmd.Flags().GetBool("read")
 
+	// The requested capabilities may be combined; OR them into a single
+	// operation so the device-flow token carries all of the corresponding
+	// storage scopes (e.g. storage.read and storage.modify).
 	var oper config.TokenOperation
-	var method string
+	method := http.MethodGet
 	if read {
-		oper = config.TokenRead
-		method = http.MethodGet
+		oper |= config.TokenRead
 	}
 	if write {
-		oper = config.TokenWrite
+		oper |= config.TokenWrite
 		method = http.MethodPut
 	}
 	if modify {
-		oper = config.TokenDelete
+		oper |= config.TokenDelete
 		method = http.MethodPut
 	}
 
