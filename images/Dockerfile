@@ -774,7 +774,16 @@ RUN --mount=type=cache,id=dnf-${TARGETPLATFORM},target=/var/cache/dnf,sharing=lo
   # Install HTCondor for integration tests, but forcibly remove the
   # Pelican packages that it pulls in so that there is zero chance tests
   # are run using the wrong binary.
-  dnf install -y condor
+  #
+  # condor-credmon-oauth provides the OAuth2 credential monitor.  The Pelican
+  # credmon integration test (TestHTCondorPelicanCredmon) supplies its own
+  # edited copy of the credmon via the PELICAN_CONDOR_CREDMON /
+  # PELICAN_CONDOR_CREDENTIAL_STORER environment variables, but it relies on the
+  # credmon's Python runtime dependencies being present.  We install
+  # python3-requests-oauthlib and python3-scitokens explicitly so the full
+  # credmon (OAuth2 + local SciTokens issuer) is functional regardless of the
+  # package's declared dependencies.
+  dnf install -y condor condor-credmon-oauth python3-requests-oauthlib python3-scitokens
   rpm -e --nodeps pelican pelican-osdf-compat
 
   # Add some normal user accounts for testing.
