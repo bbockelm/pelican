@@ -146,6 +146,16 @@ Origin:
     MaxMetadataBytes: 4194304
     MetadataPartName: "metadata"
     ObjectPartName: "object"
+    TrackAccess: false
+    TrackExtra: false
+    EtagPolicy: "uuid"
+    AccessFlushInterval: 5m
+    BatchFlushInterval: 50ms
+    BatchBufferSize: 256
+    History:
+      RetentionDays: 90
+      PruneInterval: 1h
+      PruneBatchSize: 1000
 Registry:
   InstitutionsUrlReloadMinutes: 15m
   RequireCacheApproval: false
