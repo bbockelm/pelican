@@ -142,6 +142,10 @@ Origin:
     RatePerSecond: 10
     WarnAfter: 4h
     ErrorAfter: 24h
+    AllowMultipart: true
+    MaxMetadataBytes: 4194304
+    MetadataPartName: "metadata"
+    ObjectPartName: "object"
 Registry:
   InstitutionsUrlReloadMinutes: 15m
   RequireCacheApproval: false
