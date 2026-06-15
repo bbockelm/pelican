@@ -1975,6 +1975,25 @@ default: "0"
 hidden: false
 components: ["localcache"]
 ---
+name: LocalCache.MemoryCacheBackend
+description: |+
+  Selects the backend implementation for the in-memory plaintext block cache
+  (see LocalCache.MemoryCacheSize).  Supported values:
+    "ristretto" (default) — a fixed-size in-heap cache.  Its memory cannot be
+      reclaimed by the kernel under memory pressure.
+    "offheap" — a Linux-only off-heap cache that stores decrypted blocks in an
+      mmap'd arena and uses MADV_FREE so the kernel may reclaim those pages
+      under memory pressure, degrading to re-decrypt rather than driving the
+      process toward OOM.  With this backend the configured MemoryCacheSize is
+      treated as a ceiling and the effective size floats below it based on
+      available memory.  Disk reads that feed the cache use O_DIRECT to avoid
+      double-caching ciphertext in the kernel page cache.  On non-Linux hosts
+      or kernels without MADV_FREE this transparently falls back to ristretto.
+type: string
+default: "ristretto"
+hidden: false
+components: ["localcache"]
+---
 name: LocalCache.PrefetchTimeout
 description: |+
   The maximum time to wait for a prefetch operation to complete before giving up.
@@ -2616,6 +2635,25 @@ description: |+
   (e.g. "8GB", "512MB", "1TB").
 type: string
 default: "0"
+hidden: false
+components: ["cache"]
+---
+name: Cache.MemoryCacheBackend
+description: |+
+  Selects the backend implementation for the in-memory plaintext block cache
+  (see Cache.MemoryCacheSize).  Supported values:
+    "ristretto" (default) — a fixed-size in-heap cache.  Its memory cannot be
+      reclaimed by the kernel under memory pressure.
+    "offheap" — a Linux-only off-heap cache that stores decrypted blocks in an
+      mmap'd arena and uses MADV_FREE so the kernel may reclaim those pages
+      under memory pressure, degrading to re-decrypt rather than driving the
+      process toward OOM.  With this backend the configured MemoryCacheSize is
+      treated as a ceiling and the effective size floats below it based on
+      available memory.  Disk reads that feed the cache use O_DIRECT to avoid
+      double-caching ciphertext in the kernel page cache.  On non-Linux hosts
+      or kernels without MADV_FREE this transparently falls back to ristretto.
+type: string
+default: "ristretto"
 hidden: false
 components: ["cache"]
 ---

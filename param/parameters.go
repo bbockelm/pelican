@@ -127,6 +127,7 @@ var runtimeConfigurableMap = map[string]bool{
 	"Cache.HighWaterMark": false,
 	"Cache.LocalRoot": false,
 	"Cache.LowWatermark": false,
+	"Cache.MemoryCacheBackend": false,
 	"Cache.MemoryCacheSize": false,
 	"Cache.MetaLocations": false,
 	"Cache.MinDirectorRefreshInterval": false,
@@ -244,6 +245,7 @@ var runtimeConfigurableMap = map[string]bool{
 	"LocalCache.HighWaterMarkPercentage": false,
 	"LocalCache.LowWaterMarkPercentage": false,
 	"LocalCache.MaxConcurrentPrefetch": false,
+	"LocalCache.MemoryCacheBackend": false,
 	"LocalCache.MemoryCacheSize": false,
 	"LocalCache.PrefetchTimeout": false,
 	"LocalCache.RevalidationJitter": false,
@@ -566,6 +568,7 @@ var stringAccessors = map[string]func(*Config) string{
 	"Cache.HighWaterMark": func(c *Config) string { return c.Cache.HighWaterMark },
 	"Cache.LocalRoot": func(c *Config) string { return c.Cache.LocalRoot },
 	"Cache.LowWatermark": func(c *Config) string { return c.Cache.LowWatermark },
+	"Cache.MemoryCacheBackend": func(c *Config) string { return c.Cache.MemoryCacheBackend },
 	"Cache.MemoryCacheSize": func(c *Config) string { return c.Cache.MemoryCacheSize },
 	"Cache.NamespaceLocation": func(c *Config) string { return c.Cache.NamespaceLocation },
 	"Cache.PSSOrigin": func(c *Config) string { return c.Cache.PSSOrigin },
@@ -606,6 +609,7 @@ var stringAccessors = map[string]func(*Config) string{
 	"Issuer.TomcatLocation": func(c *Config) string { return c.Issuer.TomcatLocation },
 	"LocalCache.ChunkSize": func(c *Config) string { return c.LocalCache.ChunkSize },
 	"LocalCache.DataLocation": func(c *Config) string { return c.LocalCache.DataLocation },
+	"LocalCache.MemoryCacheBackend": func(c *Config) string { return c.LocalCache.MemoryCacheBackend },
 	"LocalCache.MemoryCacheSize": func(c *Config) string { return c.LocalCache.MemoryCacheSize },
 	"LocalCache.RunLocation": func(c *Config) string { return c.LocalCache.RunLocation },
 	"LocalCache.Size": func(c *Config) string { return c.LocalCache.Size },
@@ -1254,6 +1258,7 @@ var allParameterNames = []string{
 	"Cache.HighWaterMark",
 	"Cache.LocalRoot",
 	"Cache.LowWatermark",
+	"Cache.MemoryCacheBackend",
 	"Cache.MemoryCacheSize",
 	"Cache.MetaLocations",
 	"Cache.MinDirectorRefreshInterval",
@@ -1371,6 +1376,7 @@ var allParameterNames = []string{
 	"LocalCache.HighWaterMarkPercentage",
 	"LocalCache.LowWaterMarkPercentage",
 	"LocalCache.MaxConcurrentPrefetch",
+	"LocalCache.MemoryCacheBackend",
 	"LocalCache.MemoryCacheSize",
 	"LocalCache.PrefetchTimeout",
 	"LocalCache.RevalidationJitter",
@@ -1666,6 +1672,7 @@ var (
 	Cache_HighWaterMark = StringParam{"Cache.HighWaterMark"}
 	Cache_LocalRoot = StringParam{"Cache.LocalRoot"}
 	Cache_LowWatermark = StringParam{"Cache.LowWatermark"}
+	Cache_MemoryCacheBackend = StringParam{"Cache.MemoryCacheBackend"}
 	Cache_MemoryCacheSize = StringParam{"Cache.MemoryCacheSize"}
 	Cache_NamespaceLocation = StringParam{"Cache.NamespaceLocation"}
 	Cache_PSSOrigin = StringParam{"Cache.PSSOrigin"}
@@ -1706,6 +1713,7 @@ var (
 	Issuer_TomcatLocation = StringParam{"Issuer.TomcatLocation"}
 	LocalCache_ChunkSize = StringParam{"LocalCache.ChunkSize"}
 	LocalCache_DataLocation = StringParam{"LocalCache.DataLocation"}
+	LocalCache_MemoryCacheBackend = StringParam{"LocalCache.MemoryCacheBackend"}
 	LocalCache_MemoryCacheSize = StringParam{"LocalCache.MemoryCacheSize"}
 	LocalCache_RunLocation = StringParam{"LocalCache.RunLocation"}
 	LocalCache_Size = StringParam{"LocalCache.Size"}
@@ -2128,6 +2136,7 @@ func init() {
 		"Cache.HighWaterMark": Cache_HighWaterMark,
 		"Cache.LocalRoot": Cache_LocalRoot,
 		"Cache.LowWatermark": Cache_LowWatermark,
+		"Cache.MemoryCacheBackend": Cache_MemoryCacheBackend,
 		"Cache.MemoryCacheSize": Cache_MemoryCacheSize,
 		"Cache.NamespaceLocation": Cache_NamespaceLocation,
 		"Cache.PSSOrigin": Cache_PSSOrigin,
@@ -2168,6 +2177,7 @@ func init() {
 		"Issuer.TomcatLocation": Issuer_TomcatLocation,
 		"LocalCache.ChunkSize": LocalCache_ChunkSize,
 		"LocalCache.DataLocation": LocalCache_DataLocation,
+		"LocalCache.MemoryCacheBackend": LocalCache_MemoryCacheBackend,
 		"LocalCache.MemoryCacheSize": LocalCache_MemoryCacheSize,
 		"LocalCache.RunLocation": LocalCache_RunLocation,
 		"LocalCache.Size": LocalCache_Size,

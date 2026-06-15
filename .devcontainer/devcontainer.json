@@ -4,6 +4,16 @@
 	"name": "Pelican",
 	"image": "hub.opensciencegrid.org/pelican_platform/pelican-dev:latest-itb",
 	"workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+	// Run privileged with a private cgroup v2 namespace so the off-heap block
+	// cache's memory-pressure test (local_cache: TestOffHeapUnderMemoryPressure)
+	// can create a child cgroup, cap its memory, and force the kernel to reclaim
+	// the cache's MADV_FREE'd pages.  Under --privileged Docker mounts
+	// /sys/fs/cgroup read-write, and --cgroupns=private gives the container its
+	// own writable cgroup root.  Requires a container rebuild to take effect.
+	"privileged": true,
+	"runArgs": [
+		"--cgroupns=private"
+	],
 	"forwardPorts": [
 		8444,
 		8443,

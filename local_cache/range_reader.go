@@ -236,7 +236,7 @@ func NewRangeReader(
 		rr.encryptor = dc.encryptor
 
 		if !meta.IsChunked() {
-			rc, err := storage.getFile(instanceHash, meta.StorageID)
+			rc, err := storage.getReadFile(instanceHash, meta, 0)
 			if err != nil {
 				if !errors.Is(err, os.ErrNotExist) {
 					return nil, errors.Wrap(err, "failed to open object file")
@@ -508,7 +508,7 @@ func (rr *RangeReader) repairAndRetry(ctx context.Context, startBlock, endBlock 
 
 	// Re-open the file handle if it was nil (file was recreated on disk).
 	if rr.file == nil && !rr.meta.IsChunked() {
-		if rc, err := rr.storage.getFile(rr.instanceHash, rr.meta.StorageID); err == nil {
+		if rc, err := rr.storage.getReadFile(rr.instanceHash, rr.meta, 0); err == nil {
 			rr.file = rc
 		}
 	}
@@ -563,7 +563,7 @@ func (rr *RangeReader) readDiskDirect(dst []byte, off int64) (int, error) {
 		return 0, errors.New("object file is missing from disk")
 	}
 
-	return decryptBlocksFromFile(rr.file.File(), meta.ContentLength, encryptor, dst[:actualLen], off, rr.storage.ptCache, rr.instanceHash, 0)
+	return decryptBlocksFromFile(rr.file.File(), meta.ContentLength, encryptor, dst[:actualLen], off, rr.storage.ptCache, rr.instanceHash, 0, rr.storage.ptCacheDirectIO)
 }
 
 // Close closes the range reader

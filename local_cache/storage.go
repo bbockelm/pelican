@@ -29,9 +29,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/RoaringBitmap/roaring"
-	ristretto "github.com/dgraph-io/ristretto/v2"
 	"github.com/google/uuid"
 	"github.com/jellydator/ttlcache/v3"
 	"github.com/pkg/errors"
@@ -211,6 +211,33 @@ var readBufPool = sync.Pool{
 	},
 }
 
+// directIOAlignment is the buffer/length/offset alignment required for
+// O_DIRECT reads.  On-disk blocks are BlockTotalSize (4096) at 4096-aligned
+// offsets, so the page-size alignment used here is always satisfied.
+const directIOAlignment = 4096
+
+// alignedReadBufPool pools page-aligned read buffers for O_DIRECT batch reads
+// (used only when the off-heap cache backend is active).  Same logical size as
+// readBufPool but the backing array starts on a directIOAlignment boundary.
+var alignedReadBufPool = sync.Pool{
+	New: func() any {
+		b := newAlignedBuf(DefaultReadBatchBlocks*BlockTotalSize, directIOAlignment)
+		return &b
+	},
+}
+
+// newAlignedBuf returns a slice of exactly size bytes whose first element is
+// aligned to align bytes (align must be a power of two).  Go's GC is
+// non-moving, so the computed alignment remains valid for the slice's life.
+func newAlignedBuf(size, align int) []byte {
+	raw := make([]byte, size+align)
+	off := int(uintptr(unsafe.Pointer(&raw[0])) & uintptr(align-1))
+	if off != 0 {
+		off = align - off
+	}
+	return raw[off : off+size : off+size]
+}
+
 // writeBufPool pools reusable write buffers for batched disk writes.
 // Each buffer is writeBatchBlocks × BlockTotalSize = 256 KiB.
 var writeBufPool = sync.Pool{
@@ -343,12 +370,26 @@ type StorageManager struct {
 	// call opens a fresh descriptor.
 	fdCacheMaxSize uint64
 
-	// ptCache is an optional in-memory plaintext block cache backed by
-	// ristretto.  When non-nil, decrypted 4080-byte blocks are cached
-	// so that repeated reads bypass AES-GCM decryption.  Keyed by
-	// (InstanceHash, blockNumber); cost = BlockDataSize per entry.
-	// Nil when disabled (MemoryCacheSize == 0).
-	ptCache *ristretto.Cache[uint64, []byte]
+	// ptCache is an optional in-memory plaintext block cache.  When
+	// non-nil, decrypted 4080-byte blocks are cached so that repeated reads
+	// bypass AES-GCM decryption.  Keyed by (InstanceHash, blockNumber).
+	// Nil when disabled (MemoryCacheSize == 0).  The concrete backend is
+	// selected by Cache.MemoryCacheBackend / LocalCache.MemoryCacheBackend
+	// (ristretto, default; or offheap on Linux).
+	ptCache blockCache
+
+	// ptCacheDirectIO is true when the active ptCache backend wants disk
+	// reads that feed it to use O_DIRECT (the off-heap backend, to avoid
+	// double-caching ciphertext in the kernel page cache).
+	ptCacheDirectIO bool
+
+	// directFiles caches O_DIRECT read-only descriptors used by the decrypt
+	// read path when ptCacheDirectIO is set.  It is kept separate from
+	// openFiles (which holds O_RDWR buffered handles shared with the write
+	// path) because O_DIRECT imposes alignment constraints that the write
+	// path's unaligned tail writes do not satisfy.  Nil when direct I/O is
+	// disabled.
+	directFiles *ttlcache.Cache[chunkFileKey, *refCountedFile]
 
 	// chooseDir selects a storage directory for new chunk files.
 	// Defaults to simple round-robin.  In production, NewPersistentCache
@@ -509,17 +550,18 @@ func NewStorageManager(db *CacheDB, dirs []string, inlineMax int, egrp *errgroup
 	}
 	// fdCacheSizeParam <= 0 → fdCacheSize stays 0, disabling caching.
 
-	// Plaintext block cache: when MemoryCacheSize > 0, create a
-	// ristretto cache that stores decrypted 4080-byte blocks keyed by
-	// (instanceHash, blockNum).  MaxCost = configured size in bytes;
-	// each entry costs BlockDataSize (4080) bytes.
+	// Plaintext block cache: when MemoryCacheSize > 0, create a block cache
+	// that stores decrypted 4080-byte blocks keyed by (instanceHash,
+	// blockNum).  The configured size is the byte ceiling.
 	//
-	// Check Cache.MemoryCacheSize (cache server) first, then fall back
-	// to LocalCache.MemoryCacheSize (local cache module).
-	var ptCache *ristretto.Cache[uint64, []byte]
+	// Check Cache.MemoryCacheSize (cache server) first, then fall back to
+	// LocalCache.MemoryCacheSize (local cache module); likewise for the
+	// backend selector.
 	ptCacheSizeStr := param.Cache_MemoryCacheSize.GetString()
+	ptCacheBackend := param.Cache_MemoryCacheBackend.GetString()
 	if ptCacheSizeStr == "" || ptCacheSizeStr == "0" {
 		ptCacheSizeStr = param.LocalCache_MemoryCacheSize.GetString()
+		ptCacheBackend = param.LocalCache_MemoryCacheBackend.GetString()
 	}
 	var ptCacheSize uint64
 	if ptCacheSizeStr != "" && ptCacheSizeStr != "0" {
@@ -529,22 +571,9 @@ func NewStorageManager(db *CacheDB, dirs []string, inlineMax int, egrp *errgroup
 			return nil, errors.Wrapf(parseErr, "failed to parse MemoryCacheSize value %q", ptCacheSizeStr)
 		}
 	}
-	if ptCacheSize > 0 {
-		// NumCounters should be ~10× the expected max number of entries.
-		numEntries := int64(ptCacheSize) / BlockDataSize
-		numCounters := numEntries * 10
-		if numCounters < 1000 {
-			numCounters = 1000
-		}
-		var err error
-		ptCache, err = ristretto.NewCache(&ristretto.Config[uint64, []byte]{
-			NumCounters: numCounters,
-			MaxCost:     int64(ptCacheSize),
-			BufferItems: 64,
-		})
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to create plaintext block cache")
-		}
+	ptCache, err := newBlockCache(ptCacheBackend, ptCacheSize)
+	if err != nil {
+		return nil, err
 	}
 
 	// Build sorted directory ID list for default round-robin.
@@ -561,13 +590,14 @@ func NewStorageManager(db *CacheDB, dirs []string, inlineMax int, egrp *errgroup
 	}
 
 	sm := &StorageManager{
-		db:             db,
-		dirs:           objDirs,
-		inlineMaxBytes: inlineMax,
-		fdCacheMaxSize: fdCacheSize,
-		ptCache:        ptCache,
-		chooseDir:      defaultChooseDir,
-		blockStates:    newBlockStateCache(db),
+		db:              db,
+		dirs:            objDirs,
+		inlineMaxBytes:  inlineMax,
+		fdCacheMaxSize:  fdCacheSize,
+		ptCache:         ptCache,
+		ptCacheDirectIO: ptCache != nil && ptCache.directIO(),
+		chooseDir:       defaultChooseDir,
+		blockStates:     newBlockStateCache(db),
 		diskCrypto: ttlcache.New[InstanceHash, *diskCryptoEntry](
 			ttlcache.WithTTL[InstanceHash, *diskCryptoEntry](diskCryptoTTL),
 		),
@@ -593,7 +623,67 @@ func NewStorageManager(db *CacheDB, dirs []string, inlineMax int, egrp *errgroup
 	egrp.Go(func() error { sm.diskCrypto.Start(); return nil })
 	egrp.Go(func() error { sm.openFiles.Start(); return nil })
 
+	// When the off-heap cache backend is active, decrypt reads use O_DIRECT
+	// handles held in a separate FD cache (see field doc).
+	if sm.ptCacheDirectIO && fdCacheSize > 0 {
+		sm.directFiles = ttlcache.New[chunkFileKey, *refCountedFile](
+			ttlcache.WithTTL[chunkFileKey, *refCountedFile](openFileTTL),
+			ttlcache.WithCapacity[chunkFileKey, *refCountedFile](fdCacheSize),
+		)
+		sm.directFiles.OnEviction(func(_ context.Context, _ ttlcache.EvictionReason, item *ttlcache.Item[chunkFileKey, *refCountedFile]) {
+			if rc := item.Value(); rc != nil {
+				rc.Release()
+			}
+		})
+		egrp.Go(func() error { sm.directFiles.Start(); return nil })
+	}
+
 	return sm, nil
+}
+
+// getReadFile returns a reference-counted file descriptor for the decrypt read
+// path.  When direct I/O is enabled it returns an O_DIRECT read-only handle
+// (cached in directFiles); otherwise it delegates to getChunkFile (the shared
+// O_RDWR cache).  The caller MUST call Release() when I/O is complete.
+func (sm *StorageManager) getReadFile(instanceHash InstanceHash, meta *CacheMetadata, chunkIndex int) (*refCountedFile, error) {
+	if !sm.ptCacheDirectIO {
+		return sm.getChunkFile(instanceHash, meta, chunkIndex)
+	}
+
+	// Resolve the storage ID and path for this chunk (mirrors getChunkFile).
+	var storageID StorageID
+	if !meta.IsChunked() || chunkIndex == 0 {
+		if meta.StorageID == StorageIDInline {
+			return nil, errors.New("cannot get file for inline storage")
+		}
+		storageID = meta.StorageID
+	} else {
+		if !meta.IsChunkAllocated(chunkIndex) {
+			return nil, errors.Errorf("chunk %d is not allocated", chunkIndex)
+		}
+		storageID = meta.GetChunkStorageID(chunkIndex)
+	}
+	path := sm.getChunkPath(storageID, instanceHash, chunkIndex)
+
+	key := chunkFileKey{instanceHash: instanceHash, chunkIndex: chunkIndex}
+	if sm.directFiles != nil {
+		if item := sm.directFiles.Get(key); item != nil {
+			if rc := item.Value(); rc.Acquire() {
+				return rc, nil
+			}
+		}
+	}
+
+	file, _, err := openDirectRead(path)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to open chunk %d for direct read", chunkIndex)
+	}
+	rc := newRefCountedFile(file)
+	if sm.directFiles != nil {
+		rc.Acquire()
+		sm.directFiles.Set(key, rc, ttlcache.DefaultTTL)
+	}
+	return rc, nil
 }
 
 // GetDirs returns the configured storage directories (storageID → objects dir).
@@ -609,6 +699,10 @@ func (sm *StorageManager) Close() {
 	// Closing caches evicts all entries, triggering OnEviction which
 	// closes each file descriptor.
 	sm.openFiles.DeleteAll()
+	if sm.directFiles != nil {
+		sm.directFiles.Stop()
+		sm.directFiles.DeleteAll()
+	}
 	if sm.ptCache != nil {
 		sm.ptCache.Close()
 	}
@@ -1452,7 +1546,7 @@ func (sm *StorageManager) ReadBlocksInto(dst []byte, instanceHash InstanceHash, 
 // disk I/O.  globalBlockNum0 is the global block number corresponding to
 // file-local block 0; pass 0 for non-chunked files (where local == global).
 // For chunk files, pass ContentOffsetToBlock(chunkStart).
-func decryptBlocksFromFile(file *os.File, contentLength int64, encryptor *BlockEncryptor, dst []byte, startOffset int64, ptCache *ristretto.Cache[uint64, []byte], instanceHash InstanceHash, globalBlockNum0 uint32) (int, error) {
+func decryptBlocksFromFile(file *os.File, contentLength int64, encryptor *BlockEncryptor, dst []byte, startOffset int64, ptCache blockCache, instanceHash InstanceHash, globalBlockNum0 uint32, directIO bool) (int, error) {
 	endOffset := startOffset + int64(len(dst))
 	if endOffset > contentLength {
 		endOffset = contentLength
@@ -1466,10 +1560,27 @@ func decryptBlocksFromFile(file *os.File, contentLength int64, encryptor *BlockE
 	resultLen := int(endOffset - startOffset)
 	resultPos := 0
 
-	// Use pooled read buffer.
-	bp := readBufPool.Get().(*[]byte)
-	readBuf := *bp
-	defer readBufPool.Put(bp)
+	// Use pooled read buffer.  With the off-heap cache backend, reads use
+	// O_DIRECT, which requires a page-aligned buffer and page-multiple read
+	// lengths; use the aligned pool in that case.  (Aligned reads are also
+	// correct on a buffered fd, so this path is safe even if O_DIRECT silently
+	// fell back to buffered I/O on this filesystem.)
+	var readBuf []byte
+	if directIO {
+		bp := alignedReadBufPool.Get().(*[]byte)
+		readBuf = *bp
+		defer alignedReadBufPool.Put(bp)
+	} else {
+		bp := readBufPool.Get().(*[]byte)
+		readBuf = *bp
+		defer readBufPool.Put(bp)
+	}
+
+	// ptScratch is a lazily-allocated full-block buffer used only for
+	// partial-block cache hits (at most the first and last block of a
+	// range), where the cached block must be materialized before slicing
+	// out the requested sub-range.  Full-block hits copy straight into dst.
+	var ptScratch []byte
 
 	for batchStart := startBlock; batchStart <= endBlock; batchStart += uint32(DefaultReadBatchBlocks) {
 		batchEnd := batchStart + uint32(DefaultReadBatchBlocks) - 1
@@ -1490,10 +1601,24 @@ func decryptBlocksFromFile(file *os.File, contentLength int64, encryptor *BlockE
 			readSize = batchBlockCount * BlockTotalSize
 		}
 
+		// For O_DIRECT the read length must be a multiple of the alignment.
+		// Round the request up to whole blocks (BlockTotalSize == 4096 ==
+		// alignment); the kernel returns a short read at EOF, which the
+		// per-block bounds checks below handle via n.
+		ioReadSize := readSize
+		if directIO {
+			ioReadSize = batchBlockCount * BlockTotalSize
+		}
+
 		fileOffset := BlockOffset(batchStart)
-		n, err := file.ReadAt(readBuf[:readSize], fileOffset)
+		n, err := file.ReadAt(readBuf[:ioReadSize], fileOffset)
 		if err != nil && err != io.EOF {
 			return 0, errors.Wrapf(err, "failed to read blocks %d-%d", batchStart, batchEnd)
+		}
+		if n > readSize {
+			// Trim any bytes read past the logical end of the batch (possible
+			// when the rounded-up O_DIRECT request extends beyond EOF padding).
+			n = readSize
 		}
 
 		readPos := 0
@@ -1526,13 +1651,20 @@ func decryptBlocksFromFile(file *os.File, contentLength int64, encryptor *BlockE
 
 			// Check plaintext cache first.
 			if ptCache != nil {
-				if cached, ok := ptCache.Get(ptCacheKey(instanceHash, globalBlock)); ok {
-					if !isPartialFirst && !isPartialLast {
-						copy(dst[resultPos:], cached[:blockDataSize])
-						resultPos += blockDataSize
-					} else {
+				if !isPartialFirst && !isPartialLast {
+					// Full block: copy straight into dst (zero-copy, zero-alloc).
+					if n, ok := ptCache.Get(ptCacheKey(instanceHash, globalBlock), dst[resultPos:]); ok {
+						resultPos += n
+						continue
+					}
+				} else {
+					// Partial block: materialize into scratch, then slice.
+					if ptScratch == nil {
+						ptScratch = make([]byte, BlockDataSize)
+					}
+					if n, ok := ptCache.Get(ptCacheKey(instanceHash, globalBlock), ptScratch); ok {
 						dataStart := 0
-						dataEnd := len(cached)
+						dataEnd := n
 						if isPartialFirst {
 							dataStart = int(offsetWithinFirstBlock)
 						}
@@ -1542,10 +1674,10 @@ func decryptBlocksFromFile(file *os.File, contentLength int64, encryptor *BlockE
 								dataEnd = dataStart + remaining
 							}
 						}
-						copy(dst[resultPos:], cached[dataStart:dataEnd])
+						copy(dst[resultPos:], ptScratch[dataStart:dataEnd])
 						resultPos += dataEnd - dataStart
+						continue
 					}
-					continue
 				}
 			}
 
@@ -1556,9 +1688,7 @@ func decryptBlocksFromFile(file *os.File, contentLength int64, encryptor *BlockE
 					return 0, errors.Wrapf(err, "failed to decrypt block %d", globalBlock)
 				}
 				if ptCache != nil {
-					entry := make([]byte, blockDataSize)
-					copy(entry, dst[resultPos:resultPos+blockDataSize])
-					ptCache.Set(ptCacheKey(instanceHash, globalBlock), entry, int64(BlockDataSize))
+					ptCache.Set(ptCacheKey(instanceHash, globalBlock), dst[resultPos:resultPos+blockDataSize])
 				}
 				resultPos += blockDataSize
 			} else {
@@ -1569,9 +1699,7 @@ func decryptBlocksFromFile(file *os.File, contentLength int64, encryptor *BlockE
 				}
 
 				if ptCache != nil {
-					entry := make([]byte, len(decrypted))
-					copy(entry, decrypted)
-					ptCache.Set(ptCacheKey(instanceHash, globalBlock), entry, int64(BlockDataSize))
+					ptCache.Set(ptCacheKey(instanceHash, globalBlock), decrypted)
 				}
 
 				dataStart := 0
@@ -1641,7 +1769,7 @@ func (sm *StorageManager) readBlocksChunkedInto(instanceHash InstanceHash, meta 
 		if rc, ok := openChunks.get(chunkIdx); ok {
 			file = rc.File()
 		} else {
-			rc, err := sm.getChunkFile(instanceHash, meta, chunkIdx)
+			rc, err := sm.getReadFile(instanceHash, meta, chunkIdx)
 			if err != nil {
 				return 0, errors.Wrapf(err, "failed to open chunk %d", chunkIdx)
 			}
@@ -1658,7 +1786,7 @@ func (sm *StorageManager) readBlocksChunkedInto(instanceHash InstanceHash, meta 
 
 		n, err := decryptBlocksFromFile(file, chunkContentLen, encryptor,
 			dst[resultPos:resultPos+int(readLen)], chunkLocalOffset,
-			sm.ptCache, instanceHash, globalBlockNum0)
+			sm.ptCache, instanceHash, globalBlockNum0, sm.ptCacheDirectIO)
 		if err != nil {
 			return 0, err
 		}
@@ -2002,7 +2130,7 @@ func (sm *StorageManager) NewObjectReader(instanceHash InstanceHash) (*ObjectRea
 		// underlying FD alive for the lifetime of the reader (even if the
 		// cache evicts the entry) and shares the handle with concurrent
 		// ReadBlocks callers.
-		rc, err := sm.getFile(instanceHash, meta.StorageID)
+		rc, err := sm.getReadFile(instanceHash, meta, 0)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to open object file")
 		}
@@ -2061,7 +2189,7 @@ func (r *ObjectReader) readDiskDirect(dst []byte, off int64) (int, error) {
 // into dst.  It delegates to decryptBlocksFromFile which uses a pooled read
 // buffer.
 func (r *ObjectReader) readSimpleInto(dst []byte, off int64) (int, error) {
-	return decryptBlocksFromFile(r.file.File(), r.meta.ContentLength, r.encryptor, dst, off, r.sm.ptCache, r.instanceHash, 0)
+	return decryptBlocksFromFile(r.file.File(), r.meta.ContentLength, r.encryptor, dst, off, r.sm.ptCache, r.instanceHash, 0, r.sm.ptCacheDirectIO)
 }
 
 // Read implements io.Reader
