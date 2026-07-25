@@ -23,6 +23,7 @@ package transfer_test
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -375,6 +376,31 @@ func storageTokenForIssuer(t testing.TB, issuer, subject, audience string, scope
 	return tok
 }
 
+// logTokenClaims decodes a JWT's payload (without verifying its signature) and
+// logs the claims most relevant to an XRootD scitokens 'aud'/scope rejection, so
+// a CI failure shows exactly what the origin received versus what it expects.
+func logTokenClaims(t testing.TB, label, tok string) {
+	t.Helper()
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		t.Logf("[token %s] not a 3-part JWT", label)
+		return
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Logf("[token %s] payload decode failed: %v", label, err)
+		return
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Logf("[token %s] payload unmarshal failed: %v", label, err)
+		return
+	}
+	t.Logf("[token %s] aud=%v iss=%v sub=%v scope=%v wlcg.ver=%v ver=%v",
+		label, claims["aud"], claims["iss"], claims["sub"],
+		claims["scope"], claims["wlcg.ver"], claims["ver"])
+}
+
 // writeTokenFile writes a token to a temp file and returns its path.
 func writeTokenFile(t testing.TB, name, tok string) string {
 	t.Helper()
@@ -517,8 +543,13 @@ func runCrossOriginTPCE2E(t *testing.T, storageType string) {
 	// it (e.g. "/user2" → /origin2/user2, "/testuser" → /data/testuser).
 	const destNS = "/data"
 	origin1Issuer := param.Server_ExternalWebUrl.GetString() + "/api/v1.0/issuer/ns" + destNS
-	srcTokenFile := writeTokenFile(t, "src-token", storageTokenForIssuer(t, o2.issuer, user2, o2.audience,
-		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user2)))
+	srcToken := storageTokenForIssuer(t, o2.issuer, user2, o2.audience,
+		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user2))
+	// Diagnostic: log exactly what the source token carries versus what origin #2's
+	// XRootD scitokens plugin expects, so an 'aud' rejection is unambiguous in CI.
+	t.Logf("origin #2 expects audience %q (issuer %q)", o2.audience, o2.issuer)
+	logTokenClaims(t, "src", srcToken)
+	srcTokenFile := writeTokenFile(t, "src-token", srcToken)
 	dstTokenFile := writeTokenFile(t, "dst-token", storageTokenForIssuer(t, origin1Issuer, user1, "",
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Create, "/"+user1),
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Modify, "/"+user1),
