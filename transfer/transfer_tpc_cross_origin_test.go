@@ -23,7 +23,6 @@ package transfer_test
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,7 +54,6 @@ type secondOrigin struct {
 	fedPrefix  string // federation prefix it exports, e.g. "/origin2"
 	storageDir string // on-disk storage root for that prefix
 	issuer     string // the origin's issuer URL (tokens for it must carry this)
-	audience   string // its configured token audience (tokens for it must carry this in 'aud')
 	port       int    // its HTTPS web port
 	password   string // htpasswd password of the origin's user
 }
@@ -80,7 +78,12 @@ func launchSecondOrigin(t testing.TB, ctx context.Context, host, user, password,
 	// search bit for "other". fed_test_utils does the same to its temp root; the
 	// per-file/dir ownership below (ChownToDaemon) and pelican's own rundir chown
 	// handle write access. Without this the second origin fails to start with
-	// "fork/exec /usr/bin/xrootd: permission denied".
+	// "fork/exec /usr/bin/xrootd: permission denied", and — more subtly — the
+	// daemon user cannot stat the exported source file, so the transfer's source
+	// HEAD gets a 403 ("Unable to locate ...; permission denied") even though the
+	// token is accepted. t.TempDir() also creates the per-test root 0700, so that
+	// grandparent must get the search bit too, not just origin2Dir itself.
+	require.NoError(t, os.Chmod(filepath.Dir(origin2Dir), 0o755))
 	require.NoError(t, os.Chmod(origin2Dir, 0o755))
 	storageDir := filepath.Join(origin2Dir, "storage")
 	require.NoError(t, os.MkdirAll(storageDir, 0755))
@@ -168,9 +171,9 @@ Origin:
   EnableVoms: false
   Port: 0
   # Origin.Port is 0 (auto-assign), so the default TokenAudience (${Origin.Url})
-  # would be the malformed "https://<host>:0". XRootD's scitokens plugin writes
-  # that into audience_json and then fails every token's 'aud' check. Pin a
-  # well-formed audience (the origin's web URL) so token verification works.
+  # would be the malformed "https://<host>:0" and reject every token's 'aud'.
+  # Pin a well-formed audience (the origin's web URL); XRootD's scitokens plugin
+  # still honors the WLCG "any" marker the federation's storage tokens carry.
   TokenAudience: %s
   DbLocation: %s
   Exports:
@@ -276,7 +279,6 @@ Xrootd:
 		// launchers/origin_serve.go.)  Its base-path is the namespace, so
 		// storage scopes are relative to it.
 		issuer:   origin2URL + "/api/v1.0/issuer/ns" + fedPrefix,
-		audience: origin2URL,
 		port:     origin2Port,
 		password: password,
 	}
@@ -352,53 +354,20 @@ func dumpFileToLog(t testing.TB, path string) {
 
 // storageTokenForIssuer mints a WLCG storage token with the given issuer,
 // subject, and resource scopes, signed by the server's (shared) issuer key.
-//
-// audience controls the token's 'aud' claim. An origin whose Origin.TokenAudience
-// is set (e.g. the subprocess origin #2) restricts its XRootD scitokens plugin to
-// that exact audience; scitokens-cpp does an exact string match and does NOT honor
-// the WLCG "any" marker, so such a token must carry the origin's audience verbatim.
-// Pass "" for an unrestricted origin (e.g. the in-process fed origin, whose
-// audience fed_test_utils clears), which accepts the WLCG "any" audience.
-func storageTokenForIssuer(t testing.TB, issuer, subject, audience string, scopes ...token_scopes.ResourceScope) string {
+// The token carries the WLCG "any" audience, which both origins' scitokens
+// plugins honor (the WLCG Common JWT Profile wildcard) regardless of their
+// configured Origin.TokenAudience.
+func storageTokenForIssuer(t testing.TB, issuer, subject string, scopes ...token_scopes.ResourceScope) string {
 	t.Helper()
 	tc := token.NewWLCGToken()
 	tc.Lifetime = 10 * time.Minute
 	tc.Issuer = issuer
 	tc.Subject = subject
-	if audience != "" {
-		tc.AddAudiences(audience)
-	} else {
-		tc.AddAudienceAny()
-	}
+	tc.AddAudienceAny()
 	tc.AddResourceScopes(scopes...)
 	tok, err := tc.CreateToken()
 	require.NoError(t, err)
 	return tok
-}
-
-// logTokenClaims decodes a JWT's payload (without verifying its signature) and
-// logs the claims most relevant to an XRootD scitokens 'aud'/scope rejection, so
-// a CI failure shows exactly what the origin received versus what it expects.
-func logTokenClaims(t testing.TB, label, tok string) {
-	t.Helper()
-	parts := strings.Split(tok, ".")
-	if len(parts) != 3 {
-		t.Logf("[token %s] not a 3-part JWT", label)
-		return
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		t.Logf("[token %s] payload decode failed: %v", label, err)
-		return
-	}
-	var claims map[string]any
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		t.Logf("[token %s] payload unmarshal failed: %v", label, err)
-		return
-	}
-	t.Logf("[token %s] aud=%v iss=%v sub=%v scope=%v wlcg.ver=%v ver=%v",
-		label, claims["aud"], claims["iss"], claims["sub"],
-		claims["scope"], claims["wlcg.ver"], claims["ver"])
 }
 
 // writeTokenFile writes a token to a temp file and returns its path.
@@ -543,14 +512,9 @@ func runCrossOriginTPCE2E(t *testing.T, storageType string) {
 	// it (e.g. "/user2" → /origin2/user2, "/testuser" → /data/testuser).
 	const destNS = "/data"
 	origin1Issuer := param.Server_ExternalWebUrl.GetString() + "/api/v1.0/issuer/ns" + destNS
-	srcToken := storageTokenForIssuer(t, o2.issuer, user2, o2.audience,
-		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user2))
-	// Diagnostic: log exactly what the source token carries versus what origin #2's
-	// XRootD scitokens plugin expects, so an 'aud' rejection is unambiguous in CI.
-	t.Logf("origin #2 expects audience %q (issuer %q)", o2.audience, o2.issuer)
-	logTokenClaims(t, "src", srcToken)
-	srcTokenFile := writeTokenFile(t, "src-token", srcToken)
-	dstTokenFile := writeTokenFile(t, "dst-token", storageTokenForIssuer(t, origin1Issuer, user1, "",
+	srcTokenFile := writeTokenFile(t, "src-token", storageTokenForIssuer(t, o2.issuer, user2,
+		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user2)))
+	dstTokenFile := writeTokenFile(t, "dst-token", storageTokenForIssuer(t, origin1Issuer, user1,
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Create, "/"+user1),
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Modify, "/"+user1),
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user1)))
@@ -594,7 +558,7 @@ func runCrossOriginTPCE2E(t *testing.T, storageType string) {
 
 	// Verify the destination file on origin #1 by downloading it with a read token.
 	dlDir := t.TempDir()
-	readTok := storageTokenForIssuer(t, origin1Issuer, user1, "",
+	readTok := storageTokenForIssuer(t, origin1Issuer, user1,
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user1))
 	_, err := client.DoGet(ft.Ctx, destURL+"?directread", filepath.Join(dlDir, "dest.txt"), false,
 		client.WithToken(readTok))

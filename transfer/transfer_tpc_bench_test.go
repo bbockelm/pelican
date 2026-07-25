@@ -120,9 +120,9 @@ func runCrossOriginTPCBench(b *testing.B, storageType string) {
 	// writes /data/user1 (origin #1's ns issuer). Scopes are namespace-relative.
 	const destNS = "/data"
 	origin1Issuer := serverURL + "/api/v1.0/issuer/ns" + destNS
-	srcTokenFile := writeTokenFile(b, "src-token", storageTokenForIssuer(b, o2.issuer, user2, o2.audience,
+	srcTokenFile := writeTokenFile(b, "src-token", storageTokenForIssuer(b, o2.issuer, user2,
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user2)))
-	dstTokenFile := writeTokenFile(b, "dst-token", storageTokenForIssuer(b, origin1Issuer, user1, "",
+	dstTokenFile := writeTokenFile(b, "dst-token", storageTokenForIssuer(b, origin1Issuer, user1,
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Create, "/"+user1),
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Modify, "/"+user1),
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user1)))
