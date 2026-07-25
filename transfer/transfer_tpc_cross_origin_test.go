@@ -54,6 +54,7 @@ type secondOrigin struct {
 	fedPrefix  string // federation prefix it exports, e.g. "/origin2"
 	storageDir string // on-disk storage root for that prefix
 	issuer     string // the origin's issuer URL (tokens for it must carry this)
+	audience   string // its configured token audience (tokens for it must carry this in 'aud')
 	port       int    // its HTTPS web port
 	password   string // htpasswd password of the origin's user
 }
@@ -274,6 +275,7 @@ Xrootd:
 		// launchers/origin_serve.go.)  Its base-path is the namespace, so
 		// storage scopes are relative to it.
 		issuer:   origin2URL + "/api/v1.0/issuer/ns" + fedPrefix,
+		audience: origin2URL,
 		port:     origin2Port,
 		password: password,
 	}
@@ -349,13 +351,24 @@ func dumpFileToLog(t testing.TB, path string) {
 
 // storageTokenForIssuer mints a WLCG storage token with the given issuer,
 // subject, and resource scopes, signed by the server's (shared) issuer key.
-func storageTokenForIssuer(t testing.TB, issuer, subject string, scopes ...token_scopes.ResourceScope) string {
+//
+// audience controls the token's 'aud' claim. An origin whose Origin.TokenAudience
+// is set (e.g. the subprocess origin #2) restricts its XRootD scitokens plugin to
+// that exact audience; scitokens-cpp does an exact string match and does NOT honor
+// the WLCG "any" marker, so such a token must carry the origin's audience verbatim.
+// Pass "" for an unrestricted origin (e.g. the in-process fed origin, whose
+// audience fed_test_utils clears), which accepts the WLCG "any" audience.
+func storageTokenForIssuer(t testing.TB, issuer, subject, audience string, scopes ...token_scopes.ResourceScope) string {
 	t.Helper()
 	tc := token.NewWLCGToken()
 	tc.Lifetime = 10 * time.Minute
 	tc.Issuer = issuer
 	tc.Subject = subject
-	tc.AddAudienceAny()
+	if audience != "" {
+		tc.AddAudiences(audience)
+	} else {
+		tc.AddAudienceAny()
+	}
 	tc.AddResourceScopes(scopes...)
 	tok, err := tc.CreateToken()
 	require.NoError(t, err)
@@ -504,9 +517,9 @@ func runCrossOriginTPCE2E(t *testing.T, storageType string) {
 	// it (e.g. "/user2" → /origin2/user2, "/testuser" → /data/testuser).
 	const destNS = "/data"
 	origin1Issuer := param.Server_ExternalWebUrl.GetString() + "/api/v1.0/issuer/ns" + destNS
-	srcTokenFile := writeTokenFile(t, "src-token", storageTokenForIssuer(t, o2.issuer, user2,
+	srcTokenFile := writeTokenFile(t, "src-token", storageTokenForIssuer(t, o2.issuer, user2, o2.audience,
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user2)))
-	dstTokenFile := writeTokenFile(t, "dst-token", storageTokenForIssuer(t, origin1Issuer, user1,
+	dstTokenFile := writeTokenFile(t, "dst-token", storageTokenForIssuer(t, origin1Issuer, user1, "",
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Create, "/"+user1),
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Modify, "/"+user1),
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user1)))
@@ -550,7 +563,7 @@ func runCrossOriginTPCE2E(t *testing.T, storageType string) {
 
 	// Verify the destination file on origin #1 by downloading it with a read token.
 	dlDir := t.TempDir()
-	readTok := storageTokenForIssuer(t, origin1Issuer, user1,
+	readTok := storageTokenForIssuer(t, origin1Issuer, user1, "",
 		token_scopes.NewResourceScope(token_scopes.Wlcg_Storage_Read, "/"+user1))
 	_, err := client.DoGet(ft.Ctx, destURL+"?directread", filepath.Join(dlDir, "dest.txt"), false,
 		client.WithToken(readTok))
