@@ -92,6 +92,15 @@ jobs:
         env:
           JUNIT_FILE: junit-${{ matrix.binary_name }}.xml
         run: |
+          # macOS defaults RLIMIT_NOFILE to 256, which is too tight for the
+          # federation integration tests: a single fed legitimately opens ~132
+          # descriptors and peak tests (e.g. eviction, concurrent range reads)
+          # transiently reach ~214. Under -p=4 that tips past 256 and surfaces
+          # as "XrdOpen: Unable to connect socket ...; invalid argument". Raise
+          # the limit only modestly (Linux CI effectively runs far higher) so a
+          # genuine descriptor leak still accumulates past the ceiling and fails
+          # CI rather than being masked.
+          ulimit -n 512
           echo "::group::Building web UI"
           make web-build
           echo "::endgroup::"
