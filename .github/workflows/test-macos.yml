@@ -96,11 +96,20 @@ jobs:
           # federation integration tests: a single fed legitimately opens ~132
           # descriptors and peak tests (e.g. eviction, concurrent range reads)
           # transiently reach ~214. Under -p=4 that tips past 256 and surfaces
-          # as "XrdOpen: Unable to connect socket ...; invalid argument". Raise
-          # the limit only modestly (Linux CI effectively runs far higher) so a
-          # genuine descriptor leak still accumulates past the ceiling and fails
-          # CI rather than being masked.
-          ulimit -n 512
+          # as "XrdOpen: Unable to connect socket ...; invalid argument" (macOS
+          # reports FD exhaustion on a socket call as EINVAL, not EMFILE).
+          #
+          # A bare `ulimit -n` cannot exceed the kernel's per-process cap
+          # (kern.maxfilesperproc) or the launchd `maxfiles` limit, so raise
+          # those first — otherwise the ulimit silently has no effect. Keep the
+          # per-process ceiling modest (512, ~2.4x the ~214 peak) so a genuine
+          # descriptor leak still climbs past it and fails CI rather than being
+          # masked; give the system-wide table generous headroom for the many
+          # concurrent xrootd child processes under -p=4.
+          sudo sysctl -w kern.maxfiles=65536 kern.maxfilesperproc=512 || true
+          sudo launchctl limit maxfiles 512 unlimited || true
+          ulimit -n 512 || true
+          echo "effective open-file limit: soft=$(ulimit -Sn) hard=$(ulimit -Hn); kern.maxfilesperproc=$(sysctl -n kern.maxfilesperproc)"
           echo "::group::Building web UI"
           make web-build
           echo "::endgroup::"
