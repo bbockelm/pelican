@@ -360,6 +360,59 @@ func writeEncryptedKeys(dest io.Writer, dekAndNonce []byte, issuerKeys map[strin
 	return nil
 }
 
+// encryptSQLiteToStream writes a complete PEM-framed encrypted backup of the
+// SQLite file at srcPath to dest: the plaintext metadata block, the data
+// encryption key sealed to each issuer key, then the gzip'd database contents
+// as encrypted chunks. It is shared between periodic backups and the follower
+// registry snapshot endpoint.
+func encryptSQLiteToStream(srcPath string, dest io.Writer, meta BackupMetadata, issuerKeys map[string]jwk.Key) error {
+	sourceFile, err := os.Open(srcPath)
+	if err != nil {
+		return errors.Wrap(err, "failed to open vacuumed database file")
+	}
+	defer sourceFile.Close()
+
+	// Generate a random data encryption key (DEK) and base nonce.
+	var dek [32]byte
+	if _, err := io.ReadFull(rand.Reader, dek[:]); err != nil {
+		return errors.Wrap(err, "failed to generate data encryption key")
+	}
+	var baseNonce [24]byte
+	if _, err := io.ReadFull(rand.Reader, baseNonce[:]); err != nil {
+		return errors.Wrap(err, "failed to generate base nonce")
+	}
+
+	// Write the metadata PEM block first (human-readable, unencrypted).
+	if err := writeBackupMetadata(dest, meta); err != nil {
+		return errors.Wrap(err, "failed to write backup metadata block")
+	}
+
+	// Write the encrypted key PEM blocks.
+	dekAndNonce := make([]byte, 56) // 32-byte DEK + 24-byte nonce
+	copy(dekAndNonce[:32], dek[:])
+	copy(dekAndNonce[32:], baseNonce[:])
+	if err := writeEncryptedKeys(dest, dekAndNonce, issuerKeys); err != nil {
+		return errors.Wrap(err, "failed to write encrypted key blocks")
+	}
+
+	// Stream: source file → gzip → encrypted chunk writer → PEM → dest
+	chunkWriter := newEncryptedChunkWriter(dest, dek, baseNonce)
+	gzWriter, err := gzip.NewWriterLevel(chunkWriter, gzip.BestCompression)
+	if err != nil {
+		return errors.Wrap(err, "failed to create gzip writer")
+	}
+	if _, err := io.Copy(gzWriter, sourceFile); err != nil {
+		return errors.Wrap(err, "failed to compress and encrypt backup data")
+	}
+	if err := gzWriter.Close(); err != nil {
+		return errors.Wrap(err, "failed to finalize gzip compression")
+	}
+	if err := chunkWriter.Close(); err != nil {
+		return errors.Wrap(err, "failed to finalize encrypted chunk writer")
+	}
+	return nil
+}
+
 // createBackup creates a compressed and encrypted backup of the SQLite database.
 // It uses VACUUM INTO for an atomic snapshot, then streams the data through
 // gzip compression and chunked NaCl secretbox encryption, writing the result
@@ -416,23 +469,6 @@ func createBackup(ctx context.Context) error {
 		return errors.Wrap(err, "failed to create database backup via VACUUM INTO")
 	}
 
-	// Open the vacuumed database for streaming.
-	sourceFile, err := os.Open(vacuumPath)
-	if err != nil {
-		return errors.Wrap(err, "failed to open vacuumed database file")
-	}
-	defer sourceFile.Close()
-
-	// Generate a random data encryption key (DEK) and base nonce.
-	var dek [32]byte
-	if _, err := io.ReadFull(rand.Reader, dek[:]); err != nil {
-		return errors.Wrap(err, "failed to generate data encryption key")
-	}
-	var baseNonce [24]byte
-	if _, err := io.ReadFull(rand.Reader, baseNonce[:]); err != nil {
-		return errors.Wrap(err, "failed to generate base nonce")
-	}
-
 	// Create a temporary file for the backup output (atomic write via rename).
 	tmpBackupFile, err := os.CreateTemp(backupDir, backupTempPrefix+"*.tmp")
 	if err != nil {
@@ -444,34 +480,9 @@ func createBackup(ctx context.Context) error {
 		os.Remove(tmpBackupPath) // clean up on failure; no-op after rename
 	}()
 
-	// Write the metadata PEM block first (human-readable, unencrypted).
 	meta := collectBackupMetadata(dbPath, backupTime)
-	if err := writeBackupMetadata(tmpBackupFile, meta); err != nil {
-		return errors.Wrap(err, "failed to write backup metadata block")
-	}
-
-	// Write the encrypted key PEM blocks.
-	dekAndNonce := make([]byte, 56) // 32-byte DEK + 24-byte nonce
-	copy(dekAndNonce[:32], dek[:])
-	copy(dekAndNonce[32:], baseNonce[:])
-	if err := writeEncryptedKeys(tmpBackupFile, dekAndNonce, allKeys); err != nil {
-		return errors.Wrap(err, "failed to write encrypted key blocks")
-	}
-
-	// Stream: source file → gzip → encrypted chunk writer → PEM → temp file
-	chunkWriter := newEncryptedChunkWriter(tmpBackupFile, dek, baseNonce)
-	gzWriter, err := gzip.NewWriterLevel(chunkWriter, gzip.BestCompression)
-	if err != nil {
-		return errors.Wrap(err, "failed to create gzip writer")
-	}
-	if _, err := io.Copy(gzWriter, sourceFile); err != nil {
-		return errors.Wrap(err, "failed to compress and encrypt backup data")
-	}
-	if err := gzWriter.Close(); err != nil {
-		return errors.Wrap(err, "failed to finalize gzip compression")
-	}
-	if err := chunkWriter.Close(); err != nil {
-		return errors.Wrap(err, "failed to finalize encrypted chunk writer")
+	if err := encryptSQLiteToStream(vacuumPath, tmpBackupFile, meta, allKeys); err != nil {
+		return err
 	}
 
 	// Sync and close before rename.

@@ -68,6 +68,9 @@ function StatusDisplay({ component, status, message }: StatusDisplayProps) {
     case 'registry':
       component = 'Registry';
       break;
+    case 'follower-sync':
+      component = 'Follower Sync';
+      break;
     default:
       // Capitalize the component name by default if it has more than 1 letters
       component =

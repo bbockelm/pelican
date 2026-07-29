@@ -5,6 +5,7 @@ import (
 	"embed"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/glebarez/sqlite"
 	"github.com/pkg/errors"
@@ -85,11 +86,14 @@ func InitSQLiteDB(dbPath string) (*gorm.DB, error) {
 	return db, nil
 }
 
-func MigrateDB(sqldb *sql.DB, migrationFS embed.FS, migrationPath string) error {
-	return MigrateServerSpecificDB(sqldb, migrationFS, migrationPath, "")
-}
+// gooseMu serializes access to goose's package-level state (base FS, dialect,
+// table name). Migrations normally only run at startup, but a follower registry
+// also up/downgrades snapshot databases at runtime.
+var gooseMu sync.Mutex
 
-func MigrateServerSpecificDB(sqldb *sql.DB, migrationFS embed.FS, migrationPath string, tablePrefix string) error {
+// configureGoose points goose's package-level state at the given migration set.
+// Callers must hold gooseMu.
+func configureGoose(migrationFS embed.FS, tablePrefix string) error {
 	goose.SetBaseFS(migrationFS)
 
 	if err := goose.SetDialect("sqlite3"); err != nil {
@@ -102,8 +106,40 @@ func MigrateServerSpecificDB(sqldb *sql.DB, migrationFS embed.FS, migrationPath 
 	} else {
 		goose.SetTableName("goose_db_version") // Default table name
 	}
+	return nil
+}
+
+func MigrateDB(sqldb *sql.DB, migrationFS embed.FS, migrationPath string) error {
+	return MigrateServerSpecificDB(sqldb, migrationFS, migrationPath, "")
+}
+
+func MigrateServerSpecificDB(sqldb *sql.DB, migrationFS embed.FS, migrationPath string, tablePrefix string) error {
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+
+	if err := configureGoose(migrationFS, tablePrefix); err != nil {
+		return err
+	}
 
 	if err := goose.Up(sqldb, migrationPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DowngradeServerSpecificDB rolls the database back until its migration version
+// is at most targetVersion. It is the inverse of MigrateServerSpecificDB and is
+// used when serving a database snapshot to a follower registry running an older
+// release than this one.
+func DowngradeServerSpecificDB(sqldb *sql.DB, migrationFS embed.FS, migrationPath string, tablePrefix string, targetVersion int64) error {
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+
+	if err := configureGoose(migrationFS, tablePrefix); err != nil {
+		return err
+	}
+
+	if err := goose.DownTo(sqldb, migrationPath, targetVersion); err != nil {
 		return err
 	}
 	return nil

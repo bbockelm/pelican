@@ -396,6 +396,13 @@ type Config struct {
 		CustomRegistrationFields any `mapstructure:"customregistrationfields" yaml:"CustomRegistrationFields"`
 		DbLocation string `mapstructure:"dblocation" yaml:"DbLocation"`
 		EnableOIDC bool `mapstructure:"enableoidc" yaml:"EnableOIDC"`
+		Follower struct {
+			AllowChainedSnapshots bool `mapstructure:"allowchainedsnapshots" yaml:"AllowChainedSnapshots"`
+			Enabled bool `mapstructure:"enabled" yaml:"Enabled"`
+			SnapshotCriticalAge time.Duration `mapstructure:"snapshotcriticalage" yaml:"SnapshotCriticalAge"`
+			SnapshotWarningAge time.Duration `mapstructure:"snapshotwarningage" yaml:"SnapshotWarningAge"`
+			SyncInterval time.Duration `mapstructure:"syncinterval" yaml:"SyncInterval"`
+		} `mapstructure:"follower" yaml:"Follower"`
 		InactiveRegistrationCleanupInterval time.Duration `mapstructure:"inactiveregistrationcleanupinterval" yaml:"InactiveRegistrationCleanupInterval"`
 		InactiveRegistrationTimeout time.Duration `mapstructure:"inactiveregistrationtimeout" yaml:"InactiveRegistrationTimeout"`
 		Institutions any `mapstructure:"institutions" yaml:"Institutions"`
@@ -404,6 +411,7 @@ type Config struct {
 		RequireCacheApproval bool `mapstructure:"requirecacheapproval" yaml:"RequireCacheApproval"`
 		RequireKeyChaining bool `mapstructure:"requirekeychaining" yaml:"RequireKeyChaining"`
 		RequireOriginApproval bool `mapstructure:"requireoriginapproval" yaml:"RequireOriginApproval"`
+		SnapshotCacheLifetime time.Duration `mapstructure:"snapshotcachelifetime" yaml:"SnapshotCacheLifetime"`
 	} `mapstructure:"registry" yaml:"Registry"`
 	RuntimeDir string `mapstructure:"runtimedir" yaml:"RuntimeDir"`
 	Server struct {
@@ -914,6 +922,13 @@ type configWithType struct {
 		CustomRegistrationFields struct { Type string; Value any }
 		DbLocation struct { Type string; Value string }
 		EnableOIDC struct { Type string; Value bool }
+		Follower struct {
+			AllowChainedSnapshots struct { Type string; Value bool }
+			Enabled struct { Type string; Value bool }
+			SnapshotCriticalAge struct { Type string; Value time.Duration }
+			SnapshotWarningAge struct { Type string; Value time.Duration }
+			SyncInterval struct { Type string; Value time.Duration }
+		}
 		InactiveRegistrationCleanupInterval struct { Type string; Value time.Duration }
 		InactiveRegistrationTimeout struct { Type string; Value time.Duration }
 		Institutions struct { Type string; Value any }
@@ -922,6 +937,7 @@ type configWithType struct {
 		RequireCacheApproval struct { Type string; Value bool }
 		RequireKeyChaining struct { Type string; Value bool }
 		RequireOriginApproval struct { Type string; Value bool }
+		SnapshotCacheLifetime struct { Type string; Value time.Duration }
 	}
 	RuntimeDir struct { Type string; Value string }
 	Server struct {

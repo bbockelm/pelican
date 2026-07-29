@@ -137,6 +137,13 @@ description: >-
 issuedBy: ["origin"]
 acceptedBy: ["registry"]
 ---
+name: registry.database_download
+description: >-
+  For a follower (warm standby) registry to download an encrypted snapshot of the
+  active registry's database
+issuedBy: ["registry"]
+acceptedBy: ["registry"]
+---
 ############################
 #    Monitoring Scopes     #
 ############################

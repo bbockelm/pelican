@@ -865,6 +865,12 @@ func wildcardHandler(ctx *gin.Context) {
 	// new / here!
 	path := ctx.Param("wildcard")
 
+	// Encrypted database snapshot download for warm-standby (follower) registries.
+	if path == "/database/snapshot" {
+		serveDatabaseSnapshot(ctx)
+		return
+	}
+
 	// Get the prefix's JWKS
 	// Avoid using filepath.Base for path matching, as filepath format depends on OS
 	// while HTTP path is always slash (/)
@@ -1280,9 +1286,14 @@ func getServerByPrefixHandler(ctx *gin.Context) {
 		return
 	}
 
-	// Refresh servers.last_seen so the cleanup goroutine knows this server is still active.
-	if err := updateServerLastSeen(server.ID); err != nil {
-		log.Warningf("Failed to update last_seen for server %q (prefix %q): %v", server.ID, prefix, err)
+	// Refresh servers.last_seen so the cleanup goroutine knows this server is
+	// still active. Skip in follower mode — the database is a read-only copy
+	// of the active registry's and any local write would be discarded on the
+	// next snapshot cutover.
+	if !param.Registry_Follower_Enabled.GetBool() {
+		if err := updateServerLastSeen(server.ID); err != nil {
+			log.Warningf("Failed to update last_seen for server %q (prefix %q): %v", server.ID, prefix, err)
+		}
 	}
 
 	ctx.JSON(http.StatusOK, server)
@@ -1295,16 +1306,20 @@ func RegisterRegistryAPI(router *gin.RouterGroup) {
 	// It will cause duplicated route error. Use wildcardHandler to handle such
 	// routing if needed.
 	{
-		registryAPI.POST("", cliRegisterNamespace)
+		// Mutating routes carry blockInFollowerMode so a warm-standby
+		// (follower) registry stays read-only; several POST routes below are
+		// actually read-only queries, so the guard is per-route rather than
+		// group-wide.
+		registryAPI.POST("", blockInFollowerMode, cliRegisterNamespace)
 		registryAPI.GET("", getAllNamespacesHandler)
 
 		// Handle everything under "/" route with GET method
 		registryAPI.GET("/*wildcard", wildcardHandler)
 		registryAPI.POST("/checkNamespaceExists", checkNamespaceExistsHandler)
 		registryAPI.POST("/checkNamespaceStatus", checkApprovalHandler)
-		registryAPI.POST("/updateNamespacesPubKey", updateNamespacesPubKey)
+		registryAPI.POST("/updateNamespacesPubKey", blockInFollowerMode, updateNamespacesPubKey)
 
-		registryAPI.DELETE("/*wildcard", deleteNamespaceHandler)
+		registryAPI.DELETE("/*wildcard", blockInFollowerMode, deleteNamespaceHandler)
 	}
 
 	checkApis := registryAPI.Group("/namespaces/check")

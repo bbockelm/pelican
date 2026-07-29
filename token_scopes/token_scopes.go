@@ -41,6 +41,7 @@ const (
 	Server_CollectionAdmin TokenScope = "server.collection_admin"
 	Pelican_LoggingModify TokenScope = "pelican.logging_modify"
 	Registry_EditRegistration TokenScope = "registry.edit_registration"
+	Registry_DatabaseDownload TokenScope = "registry.database_download"
 	Monitoring_Scrape TokenScope = "monitoring.scrape"
 	Monitoring_Query TokenScope = "monitoring.query"
 	Broker_Reverse TokenScope = "broker.reverse"
@@ -135,6 +136,7 @@ var scopeDescriptions = map[TokenScope]string{
 	Server_CollectionAdmin: `Create, modify, and delete collections and manage their ACLs.`,
 	Pelican_LoggingModify: `Permits modification of server log levels at runtime`,
 	Registry_EditRegistration: `For origin admin to edit namespace registration at the registry`,
+	Registry_DatabaseDownload: `For a follower (warm standby) registry to download an encrypted snapshot of the active registry's database`,
 	Monitoring_Scrape: `For server's Prometheus instance to scrape its Prometheus http data exporter at /metrics`,
 	Monitoring_Query: `View server metrics. Required for the web UI's metrics dashboards and for external monitoring tools (e.g. Grafana) to read this server's metrics through its Prometheus-compatible query endpoint.`,
 	Broker_Reverse: `Permits reversal requests sent to the broker by a cache.`,

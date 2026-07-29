@@ -218,6 +218,20 @@ export const getDirectorNamespaces = async () => {
 
 export const NAMESPACE_KEY = 'getNamespaces';
 
+export const FOLLOWER_STATUS_KEY = 'getFollowerStatus';
+
+/**
+ * Get the registry's warm-standby (follower) status
+ */
+export const getFollowerStatus = async (): Promise<Response> => {
+  const url = new URL(
+    `${API_V1_BASE_URL}/registry_ui/follower`,
+    window.location.origin
+  );
+
+  return await fetchApi(async () => await fetch(url));
+};
+
 /**
  * Get namespaces
  */

@@ -655,6 +655,16 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Plugin_DirectorDecisionPercentage.GetName(), 20)
 	// Registry.EnableOIDC
 	v.SetDefault(param.Registry_EnableOIDC.GetName(), false)
+	// Registry.Follower.AllowChainedSnapshots
+	v.SetDefault(param.Registry_Follower_AllowChainedSnapshots.GetName(), false)
+	// Registry.Follower.Enabled
+	v.SetDefault(param.Registry_Follower_Enabled.GetName(), false)
+	// Registry.Follower.SnapshotCriticalAge
+	v.SetDefault(param.Registry_Follower_SnapshotCriticalAge.GetName(), "2h")
+	// Registry.Follower.SnapshotWarningAge
+	v.SetDefault(param.Registry_Follower_SnapshotWarningAge.GetName(), "30m")
+	// Registry.Follower.SyncInterval
+	v.SetDefault(param.Registry_Follower_SyncInterval.GetName(), "5m")
 	// Registry.InactiveRegistrationCleanupInterval
 	v.SetDefault(param.Registry_InactiveRegistrationCleanupInterval.GetName(), "5m")
 	// Registry.InactiveRegistrationTimeout
@@ -675,6 +685,8 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	} else {
 		v.SetDefault(param.Registry_RequireOriginApproval.GetName(), false)
 	}
+	// Registry.SnapshotCacheLifetime
+	v.SetDefault(param.Registry_SnapshotCacheLifetime.GetName(), "1m")
 	// Server.AdLifetime
 	v.SetDefault(param.Server_AdLifetime.GetName(), "10m")
 	// Server.AdvertisementInterval

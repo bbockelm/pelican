@@ -432,6 +432,11 @@ var runtimeConfigurableMap = map[string]bool{
 	"Registry.CustomRegistrationFields": false,
 	"Registry.DbLocation": false,
 	"Registry.EnableOIDC": false,
+	"Registry.Follower.AllowChainedSnapshots": false,
+	"Registry.Follower.Enabled": true,
+	"Registry.Follower.SnapshotCriticalAge": false,
+	"Registry.Follower.SnapshotWarningAge": false,
+	"Registry.Follower.SyncInterval": false,
 	"Registry.InactiveRegistrationCleanupInterval": false,
 	"Registry.InactiveRegistrationTimeout": false,
 	"Registry.Institutions": false,
@@ -440,6 +445,7 @@ var runtimeConfigurableMap = map[string]bool{
 	"Registry.RequireCacheApproval": false,
 	"Registry.RequireKeyChaining": false,
 	"Registry.RequireOriginApproval": false,
+	"Registry.SnapshotCacheLifetime": false,
 	"RuntimeDir": false,
 	"Server.AUPCanonicalURL": false,
 	"Server.AUPFile": false,
@@ -1070,6 +1076,8 @@ var boolAccessors = map[string]func(*Config) bool{
 	"Origin.ScitokensMapSubject": func(c *Config) bool { return c.Origin.ScitokensMapSubject },
 	"Origin.SelfTest": func(c *Config) bool { return c.Origin.SelfTest },
 	"Registry.EnableOIDC": func(c *Config) bool { return c.Registry.EnableOIDC },
+	"Registry.Follower.AllowChainedSnapshots": func(c *Config) bool { return c.Registry.Follower.AllowChainedSnapshots },
+	"Registry.Follower.Enabled": func(c *Config) bool { return c.Registry.Follower.Enabled },
 	"Registry.RequireCacheApproval": func(c *Config) bool { return c.Registry.RequireCacheApproval },
 	"Registry.RequireKeyChaining": func(c *Config) bool { return c.Registry.RequireKeyChaining },
 	"Registry.RequireOriginApproval": func(c *Config) bool { return c.Registry.RequireOriginApproval },
@@ -1176,9 +1184,13 @@ var durationAccessors = map[string]func(*Config) time.Duration{
 	"Origin.SelfTestInterval": func(c *Config) time.Duration { return c.Origin.SelfTestInterval },
 	"Origin.SelfTestMaxAge": func(c *Config) time.Duration { return c.Origin.SelfTestMaxAge },
 	"Origin.UserMapfileRefreshInterval": func(c *Config) time.Duration { return c.Origin.UserMapfileRefreshInterval },
+	"Registry.Follower.SnapshotCriticalAge": func(c *Config) time.Duration { return c.Registry.Follower.SnapshotCriticalAge },
+	"Registry.Follower.SnapshotWarningAge": func(c *Config) time.Duration { return c.Registry.Follower.SnapshotWarningAge },
+	"Registry.Follower.SyncInterval": func(c *Config) time.Duration { return c.Registry.Follower.SyncInterval },
 	"Registry.InactiveRegistrationCleanupInterval": func(c *Config) time.Duration { return c.Registry.InactiveRegistrationCleanupInterval },
 	"Registry.InactiveRegistrationTimeout": func(c *Config) time.Duration { return c.Registry.InactiveRegistrationTimeout },
 	"Registry.InstitutionsUrlReloadMinutes": func(c *Config) time.Duration { return c.Registry.InstitutionsUrlReloadMinutes },
+	"Registry.SnapshotCacheLifetime": func(c *Config) time.Duration { return c.Registry.SnapshotCacheLifetime },
 	"Server.AdLifetime": func(c *Config) time.Duration { return c.Server.AdLifetime },
 	"Server.AdvertisementInterval": func(c *Config) time.Duration { return c.Server.AdvertisementInterval },
 	"Server.DatabaseBackup.Frequency": func(c *Config) time.Duration { return c.Server.DatabaseBackup.Frequency },
@@ -1623,6 +1635,11 @@ var allParameterNames = []string{
 	"Registry.CustomRegistrationFields",
 	"Registry.DbLocation",
 	"Registry.EnableOIDC",
+	"Registry.Follower.AllowChainedSnapshots",
+	"Registry.Follower.Enabled",
+	"Registry.Follower.SnapshotCriticalAge",
+	"Registry.Follower.SnapshotWarningAge",
+	"Registry.Follower.SyncInterval",
 	"Registry.InactiveRegistrationCleanupInterval",
 	"Registry.InactiveRegistrationTimeout",
 	"Registry.Institutions",
@@ -1631,6 +1648,7 @@ var allParameterNames = []string{
 	"Registry.RequireCacheApproval",
 	"Registry.RequireKeyChaining",
 	"Registry.RequireOriginApproval",
+	"Registry.SnapshotCacheLifetime",
 	"RuntimeDir",
 	"Server.AUPCanonicalURL",
 	"Server.AUPFile",
@@ -2113,6 +2131,8 @@ var (
 	Origin_ScitokensMapSubject = BoolParam{"Origin.ScitokensMapSubject"}
 	Origin_SelfTest = BoolParam{"Origin.SelfTest"}
 	Registry_EnableOIDC = BoolParam{"Registry.EnableOIDC"}
+	Registry_Follower_AllowChainedSnapshots = BoolParam{"Registry.Follower.AllowChainedSnapshots"}
+	Registry_Follower_Enabled = BoolParam{"Registry.Follower.Enabled"}
 	Registry_RequireCacheApproval = BoolParam{"Registry.RequireCacheApproval"}
 	Registry_RequireKeyChaining = BoolParam{"Registry.RequireKeyChaining"}
 	Registry_RequireOriginApproval = BoolParam{"Registry.RequireOriginApproval"}
@@ -2191,9 +2211,13 @@ var (
 	Origin_SelfTestInterval = DurationParam{"Origin.SelfTestInterval"}
 	Origin_SelfTestMaxAge = DurationParam{"Origin.SelfTestMaxAge"}
 	Origin_UserMapfileRefreshInterval = DurationParam{"Origin.UserMapfileRefreshInterval"}
+	Registry_Follower_SnapshotCriticalAge = DurationParam{"Registry.Follower.SnapshotCriticalAge"}
+	Registry_Follower_SnapshotWarningAge = DurationParam{"Registry.Follower.SnapshotWarningAge"}
+	Registry_Follower_SyncInterval = DurationParam{"Registry.Follower.SyncInterval"}
 	Registry_InactiveRegistrationCleanupInterval = DurationParam{"Registry.InactiveRegistrationCleanupInterval"}
 	Registry_InactiveRegistrationTimeout = DurationParam{"Registry.InactiveRegistrationTimeout"}
 	Registry_InstitutionsUrlReloadMinutes = DurationParam{"Registry.InstitutionsUrlReloadMinutes"}
+	Registry_SnapshotCacheLifetime = DurationParam{"Registry.SnapshotCacheLifetime"}
 	Server_AdLifetime = DurationParam{"Server.AdLifetime"}
 	Server_AdvertisementInterval = DurationParam{"Server.AdvertisementInterval"}
 	Server_DatabaseBackup_Frequency = DurationParam{"Server.DatabaseBackup.Frequency"}
@@ -2595,6 +2619,8 @@ func init() {
 		"Origin.ScitokensMapSubject": Origin_ScitokensMapSubject,
 		"Origin.SelfTest": Origin_SelfTest,
 		"Registry.EnableOIDC": Registry_EnableOIDC,
+		"Registry.Follower.AllowChainedSnapshots": Registry_Follower_AllowChainedSnapshots,
+		"Registry.Follower.Enabled": Registry_Follower_Enabled,
 		"Registry.RequireCacheApproval": Registry_RequireCacheApproval,
 		"Registry.RequireKeyChaining": Registry_RequireKeyChaining,
 		"Registry.RequireOriginApproval": Registry_RequireOriginApproval,
@@ -2670,9 +2696,13 @@ func init() {
 		"Origin.SelfTestInterval": Origin_SelfTestInterval,
 		"Origin.SelfTestMaxAge": Origin_SelfTestMaxAge,
 		"Origin.UserMapfileRefreshInterval": Origin_UserMapfileRefreshInterval,
+		"Registry.Follower.SnapshotCriticalAge": Registry_Follower_SnapshotCriticalAge,
+		"Registry.Follower.SnapshotWarningAge": Registry_Follower_SnapshotWarningAge,
+		"Registry.Follower.SyncInterval": Registry_Follower_SyncInterval,
 		"Registry.InactiveRegistrationCleanupInterval": Registry_InactiveRegistrationCleanupInterval,
 		"Registry.InactiveRegistrationTimeout": Registry_InactiveRegistrationTimeout,
 		"Registry.InstitutionsUrlReloadMinutes": Registry_InstitutionsUrlReloadMinutes,
+		"Registry.SnapshotCacheLifetime": Registry_SnapshotCacheLifetime,
 		"Server.AdLifetime": Server_AdLifetime,
 		"Server.AdvertisementInterval": Server_AdvertisementInterval,
 		"Server.DatabaseBackup.Frequency": Server_DatabaseBackup_Frequency,

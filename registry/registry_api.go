@@ -60,8 +60,13 @@ func updateOSDFInstitutionCountMetric() error {
 // last_seen (updated on metadata polling) is older than Registry.InactiveRegistrationTimeout,
 // deletes all registrations linked to those servers via services, then deletes the server rows.
 func LaunchInactiveRegistrationCleanup(ctx context.Context, egrp *errgroup.Group) {
+	interval := param.Registry_InactiveRegistrationCleanupInterval.GetDuration()
+	if interval <= 0 {
+		log.Info("Inactive registration cleanup is disabled (interval is 0 or negative)")
+		return
+	}
 	egrp.Go(func() error {
-		ticker := time.NewTicker(param.Registry_InactiveRegistrationCleanupInterval.GetDuration())
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
 			select {

@@ -3440,6 +3440,73 @@ type: duration
 default: 5m
 components: ["registry"]
 ---
+name: Registry.Follower.Enabled
+description: |+
+  When enabled, the registry runs as a warm standby ("follower") of the federation's
+  active registry. In follower mode all mutable registry APIs are disabled (the registry
+  is read-only) and the registry periodically downloads a snapshot of the active
+  registry's database — the registry listed in the federation metadata — and cuts its
+  own database over to it.
+
+  The follower authenticates its snapshot downloads with a token signed by its issuer
+  key, and the downloaded snapshot is encrypted to the active registry's issuer keys,
+  so leader and follower must share issuer key material (see IssuerKeysDirectory).
+
+  This parameter is runtime-configurable: toggling it through a hot config reload
+  promotes a follower to the active registry (or demotes the active registry to a
+  follower) without a restart — the mutable APIs unblock immediately and the
+  role-specific background tasks are switched in place. Changing it via the web UI
+  configuration page (which applies changes through a server restart) works as well.
+type: bool
+default: false
+runtime_configurable: true
+components: ["registry"]
+---
+name: Registry.Follower.SyncInterval
+description: |+
+  How often a follower registry attempts to download a fresh database snapshot from the
+  active registry.
+type: duration
+default: 5m
+components: ["registry"]
+---
+name: Registry.Follower.SnapshotWarningAge
+description: |+
+  If a follower registry has not successfully cut over to a fresh database snapshot from
+  the active registry within this duration, the follower's health status degrades to
+  "warning".
+type: duration
+default: 30m
+components: ["registry"]
+---
+name: Registry.Follower.SnapshotCriticalAge
+description: |+
+  If a follower registry has not successfully cut over to a fresh database snapshot from
+  the active registry within this duration, the follower's health status degrades to
+  "critical".
+type: duration
+default: 2h
+components: ["registry"]
+---
+name: Registry.Follower.AllowChainedSnapshots
+description: |+
+  Whether a registry running in follower mode will itself serve database snapshots to
+  other followers. By default a follower refuses snapshot requests so that standby
+  registries always synchronize directly from the active registry; enable this to allow
+  chained (follower-of-follower) topologies.
+type: bool
+default: false
+components: ["registry"]
+---
+name: Registry.SnapshotCacheLifetime
+description: |+
+  How long the registry may serve a cached database snapshot to follower registries
+  before generating a fresh one. This throttles the cost of snapshot generation
+  (VACUUM plus encryption) when multiple followers poll the active registry.
+type: duration
+default: 1m
+components: ["registry"]
+---
 ############################
 #   Server-level configs   #
 ############################

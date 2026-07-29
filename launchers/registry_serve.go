@@ -26,10 +26,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/pelicanplatform/pelican/config"
 	"github.com/pelicanplatform/pelican/database"
-	"github.com/pelicanplatform/pelican/metrics"
-	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/registry"
 	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/web_ui"
@@ -53,15 +50,12 @@ func RegistryServe(ctx context.Context, engine *gin.Engine, egrp *errgroup.Group
 		return err
 	}
 
-	if config.GetPreferredPrefix() == config.OsdfPrefix && !param.Topology_DisableOrigins.GetBool() {
-		metrics.SetComponentHealthStatus(metrics.DirectorRegistry_Topology, metrics.StatusWarning, "Start requesting from topology, status unknown")
-		log.Info("Populating registry with namespaces from OSG topology service...")
-		if err := registry.PopulateTopology(ctx); err != nil {
-			panic(errors.Wrap(err, "Unable to populate topology table"))
-		}
-
-		// Checks topology for updates every 10 minutes
-		go registry.PeriodicTopologyReload(ctx)
+	// Start the role-appropriate background tasks (follower snapshot sync vs
+	// leader maintenance such as topology population and registration
+	// cleanup), and keep them in sync with hot config reloads of
+	// Registry.Follower.Enabled.
+	if err := registry.LaunchFollowerManager(ctx, egrp); err != nil {
+		return err
 	}
 
 	rootRouterGroup := engine.Group("/", web_ui.ServerHeaderMiddleware)
@@ -74,9 +68,6 @@ func RegistryServe(ctx context.Context, engine *gin.Engine, egrp *errgroup.Group
 
 	// Launch registry prometheus metrics
 	registry.LaunchRegistryMetrics(ctx, egrp)
-
-	// Launch cleanup goroutine for inactive pending registrations
-	registry.LaunchInactiveRegistrationCleanup(ctx, egrp)
 
 	egrp.Go(func() error {
 		<-ctx.Done()

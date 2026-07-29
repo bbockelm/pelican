@@ -38,6 +38,7 @@ import { AlertDispatchContext } from '@/components/AlertProvider';
 import { alertOnError } from '@/helpers/util';
 import { getExtendedNamespaces } from '@/helpers/get';
 import { NAMESPACE_KEY } from '@/helpers/api';
+import FollowerStatusBanner from '@/components/FollowerStatusBanner';
 
 export default function Home() {
   const dispatch = useContext(AlertDispatchContext);
@@ -100,6 +101,7 @@ export default function Home() {
 
   return (
     <Box width={'100%'}>
+      <FollowerStatusBanner />
       <Grid container spacing={2}>
         <Grid
           justifyContent={'space-between'}

@@ -1010,6 +1010,9 @@ func RegisterRegistryWebAPI(router *gin.RouterGroup) error {
 	// any update methods (post/delete/patch, etc) and automatically check if a
 	// X-CSRF-Token header is present and the token matches
 	registryWebAPI.Use(csrfHandler)
+	// The web UI API is RESTful, so a warm-standby (follower) registry can
+	// reject every mutating method wholesale to stay read-only.
+	registryWebAPI.Use(followerReadOnlyMiddleware)
 	// Follow RESTful schema
 	{
 		registryWebAPI.GET("/namespaces", listNamespaces)
@@ -1044,6 +1047,10 @@ func RegisterRegistryWebAPI(router *gin.RouterGroup) error {
 	}
 	{
 		registryWebAPI.GET("/institutions", web_ui.AuthHandler, listInstitutions)
+	}
+	{
+		// Follower/leader state and snapshot age for the web UI dashboard
+		registryWebAPI.GET("/follower", getFollowerStatusHandler)
 	}
 	return nil
 }
