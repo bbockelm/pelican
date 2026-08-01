@@ -42,6 +42,7 @@ const (
 	Pelican_LoggingModify TokenScope = "pelican.logging_modify"
 	Registry_EditRegistration TokenScope = "registry.edit_registration"
 	Monitoring_Scrape TokenScope = "monitoring.scrape"
+	Monitoring_Raw TokenScope = "monitoring.raw"
 	Monitoring_Query TokenScope = "monitoring.query"
 	Broker_Reverse TokenScope = "broker.reverse"
 	Broker_Retrieve TokenScope = "broker.retrieve"
@@ -136,6 +137,7 @@ var scopeDescriptions = map[TokenScope]string{
 	Pelican_LoggingModify: `Permits modification of server log levels at runtime`,
 	Registry_EditRegistration: `For origin admin to edit namespace registration at the registry`,
 	Monitoring_Scrape: `For server's Prometheus instance to scrape its Prometheus http data exporter at /metrics`,
+	Monitoring_Raw: `Read this server's raw per-transfer records through its change feed. Distinct from monitoring.scrape because the records are far more revealing than the aggregate metrics that scope guards: each carries the object path, the client address, and the identity of the user who requested it. A token that may read a server's metrics should not thereby be able to reconstruct who transferred what.`,
 	Monitoring_Query: `View server metrics. Required for the web UI's metrics dashboards and for external monitoring tools (e.g. Grafana) to read this server's metrics through its Prometheus-compatible query endpoint.`,
 	Broker_Reverse: `Permits reversal requests sent to the broker by a cache.`,
 	Broker_Retrieve: `Permits retrieval of requests to an origin`,

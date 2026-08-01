@@ -629,13 +629,15 @@ func (pc *PersistentCache) serveObject(w http.ResponseWriter, r *http.Request) {
 	}).Info("Request complete")
 }
 
-// emitTransferMonitoring emits an XRootD-style monitoring record for a served
-// GET, mirroring what the POSIXv2 origin emits.  It is a no-op when the
-// monitoring shoveler is disabled or when no bytes were served (e.g. a 304).
-// The packets flow to the shoveler's internal channel and on to the configured
-// monitoring collectors.
+// emitTransferMonitoring records a served GET, mirroring what the POSIXv2 origin
+// emits.  It is a no-op when no bytes were served (e.g. a 304).
+//
+// The record goes to every registered consumer: the XRootD-format shoveler
+// stream when Shoveler.Enable is set, and any other consumer independently of
+// it.  The shoveler's knob is deliberately not checked here -- it governs that
+// one consumer, not whether the transfer is recorded at all.
 func (pc *PersistentCache) emitTransferMonitoring(r *http.Request, objectPath string, bytesServed int64, start time.Time, bearerToken string) {
-	if bytesServed <= 0 || !param.Shoveler_Enable.GetBool() {
+	if bytesServed <= 0 {
 		return
 	}
 

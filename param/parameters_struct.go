@@ -252,6 +252,7 @@ type Config struct {
 		DataRetention time.Duration `mapstructure:"dataretention" yaml:"DataRetention"`
 		DataRetentionSize string `mapstructure:"dataretentionsize" yaml:"DataRetentionSize"`
 		EnablePrometheus bool `mapstructure:"enableprometheus" yaml:"EnablePrometheus"`
+		EnableTransferRecords bool `mapstructure:"enabletransferrecords" yaml:"EnableTransferRecords"`
 		LabelLimit int `mapstructure:"labellimit" yaml:"LabelLimit"`
 		LabelNameLengthLimit int `mapstructure:"labelnamelengthlimit" yaml:"LabelNameLengthLimit"`
 		LabelValueLengthLimit int `mapstructure:"labelvaluelengthlimit" yaml:"LabelValueLengthLimit"`
@@ -265,6 +266,8 @@ type Config struct {
 		StorageWarningThreshold int `mapstructure:"storagewarningthreshold" yaml:"StorageWarningThreshold"`
 		TokenExpiresIn time.Duration `mapstructure:"tokenexpiresin" yaml:"TokenExpiresIn"`
 		TokenRefreshInterval time.Duration `mapstructure:"tokenrefreshinterval" yaml:"TokenRefreshInterval"`
+		TransferRecordsLocation string `mapstructure:"transferrecordslocation" yaml:"TransferRecordsLocation"`
+		TransferRecordsMaxSize int `mapstructure:"transferrecordsmaxsize" yaml:"TransferRecordsMaxSize"`
 	} `mapstructure:"monitoring" yaml:"Monitoring"`
 	OIDC struct {
 		AuthorizationEndpoint string `mapstructure:"authorizationendpoint" yaml:"AuthorizationEndpoint"`
@@ -771,6 +774,7 @@ type configWithType struct {
 		DataRetention struct { Type string; Value time.Duration }
 		DataRetentionSize struct { Type string; Value string }
 		EnablePrometheus struct { Type string; Value bool }
+		EnableTransferRecords struct { Type string; Value bool }
 		LabelLimit struct { Type string; Value int }
 		LabelNameLengthLimit struct { Type string; Value int }
 		LabelValueLengthLimit struct { Type string; Value int }
@@ -784,6 +788,8 @@ type configWithType struct {
 		StorageWarningThreshold struct { Type string; Value int }
 		TokenExpiresIn struct { Type string; Value time.Duration }
 		TokenRefreshInterval struct { Type string; Value time.Duration }
+		TransferRecordsLocation struct { Type string; Value string }
+		TransferRecordsMaxSize struct { Type string; Value int }
 	}
 	OIDC struct {
 		AuthorizationEndpoint struct { Type string; Value string }

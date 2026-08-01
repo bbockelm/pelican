@@ -26,3 +26,7 @@ e2e_fed_tests.test
 
 # Compiled scope generator binary (source is generate/scope_generator.go)
 /generate/generate
+
+# Artifacts left behind by local_cache tests (the dque queue and its lock).
+local_cache/*.dque
+local_cache/lock.lock

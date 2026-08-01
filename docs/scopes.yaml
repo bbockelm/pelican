@@ -146,6 +146,17 @@ description: >-
 issuedBy: ["*"]
 acceptedBy: ["*"]
 ---
+name: monitoring.raw
+description: >-
+  Read this server's raw per-transfer records through its change feed. Distinct
+  from monitoring.scrape because the records are far more revealing than the
+  aggregate metrics that scope guards: each carries the object path, the client
+  address, and the identity of the user who requested it. A token that may read
+  a server's metrics should not thereby be able to reconstruct who transferred
+  what.
+issuedBy: ["*"]
+acceptedBy: ["origin", "cache"]
+---
 name: monitoring.query
 description: >-
   View server metrics. Required for the web UI's metrics dashboards
