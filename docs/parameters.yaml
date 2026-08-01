@@ -4681,6 +4681,45 @@ root_default: /var/lib/pelican/monitoring/data
 default: ${ConfigBase}/monitoring/data
 components: ["origin", "cache", "director", "registry", "broker", "localcache"]
 ---
+name: Monitoring.EnableTransferRecords
+description: |+
+  Keep a local record of every transfer this server serves, as ClassAds in an embedded
+  database, and expose them to a central monitoring service over an authenticated change
+  feed.
+
+  The records are written locally and collected by subscription, so nothing in the data
+  path waits on the monitoring service and the server is unaffected if it is absent. The
+  store is bounded by `Monitoring.TransferRecordsMaxSize`; the oldest records are dropped
+  once that limit is reached.
+
+  Reading the feed requires a token with the `monitoring.scrape` scope. Note that transfer
+  records are more revealing than aggregate metrics: they include object paths, client
+  addresses, and user identities.
+type: bool
+default: false
+components: ["origin", "cache"]
+---
+name: Monitoring.TransferRecordsLocation
+description: |+
+  The directory holding the embedded transfer-record database. Only used when
+  `Monitoring.EnableTransferRecords` is true.
+type: string
+root_default: /var/lib/pelican/monitoring/transfer_records
+default: ${ConfigBase}/monitoring/transfer_records
+components: ["origin", "cache"]
+---
+name: Monitoring.TransferRecordsMaxSize
+description: |+
+  The maximum number of bytes of completed transfer records to keep on disk. Once the
+  archive exceeds this, the oldest records are dropped in bulk.
+
+  This is a hard bound on disk usage rather than a retention period: how far back the
+  records reach depends on how busy the server is. A server that is never collected from
+  will fill to this limit and then begin forgetting.
+type: int
+default: 1073741824
+components: ["origin", "cache"]
+---
 name: Monitoring.PortLower
 description: |+
   The lower end of a range of monitoring ports for Prometheus configuration.

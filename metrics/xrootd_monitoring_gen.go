@@ -72,6 +72,9 @@ type TransferMonitor struct {
 	userId uint32
 	ch     chan []byte
 	event  TransferEvent
+	// activeKeys holds the key each in-flight-transfer observer issued at the
+	// start, so progress and completion can be attributed to the same transfer.
+	activeKeys map[string]string
 }
 
 var (
@@ -128,13 +131,19 @@ func EmitTransferEvent(event TransferEvent) {
 // BeginTransferMonitor starts monitoring a transfer. It emits a 'u' (user login)
 // packet and an 'f' (f-stream) packet with isOpen, then returns a TransferMonitor
 // that can emit periodic isXfr records and a final isClose.
-// Returns nil if the shoveler is disabled or if the packets could not be built.
+// Returns nil only if the packets could not be built. When the shoveler is
+// disabled the monitor is still returned, inert as to packets but live as to
+// consumers (see RegisterTransferEventConsumer).
 func BeginTransferMonitor(event TransferEvent) *TransferMonitor {
-	if !param.Shoveler_Enable.GetBool() {
-		return nil
+	// With the shoveler disabled the monitor still exists, with a nil channel: it
+	// emits no XRootD-format packets, but Close still delivers the completed
+	// record to registered consumers. Returning nil here instead -- as this did
+	// when the shoveler was the only consumer -- would make an unrelated
+	// subsystem's knob silently switch off transfer recording for everyone.
+	var ch chan []byte
+	if param.Shoveler_Enable.GetBool() {
+		ch = GetInternalMonitorChan()
 	}
-
-	ch := GetInternalMonitorChan()
 
 	userId := nextUserId.Add(1)
 	fileId := nextFileId.Add(1)
@@ -185,10 +194,11 @@ func BeginTransferMonitor(event TransferEvent) *TransferMonitor {
 	sendPacketToChannel(ch, openPacket)
 
 	return &TransferMonitor{
-		fileId: fileId,
-		userId: userId,
-		ch:     ch,
-		event:  event,
+		fileId:     fileId,
+		userId:     userId,
+		ch:         ch,
+		event:      event,
+		activeKeys: beginActiveTransfer(event),
 	}
 }
 
@@ -196,6 +206,10 @@ func BeginTransferMonitor(event TransferEvent) *TransferMonitor {
 // current cumulative byte counts. Call this periodically during long-running
 // transfers to provide intermediate visibility.
 func (tm *TransferMonitor) EmitXfr(readBytes, writeBytes int64) {
+	progress := tm.event
+	progress.ReadBytes, progress.WriteBytes = readBytes, writeBytes
+	updateActiveTransfer(tm.activeKeys, progress)
+
 	packet, err := buildFStreamXfrPacket(byte(pseqCounter.Add(1)), tm.fileId, readBytes, writeBytes)
 	if err != nil {
 		log.Debugf("Failed to build f-stream xfr monitoring packet: %v", err)
@@ -208,6 +222,21 @@ func (tm *TransferMonitor) EmitXfr(readBytes, writeBytes int64) {
 // operation counts, followed by an isDisc (disconnect) record.
 // This must be called exactly once when the transfer ends.
 func (tm *TransferMonitor) Close(readBytes, writeBytes int64, readOps, writeOps int32) {
+	// Deliver the completed record to any registered consumer before returning,
+	// whatever happens to the XRootD-format packets below. A packet that fails to
+	// build is a problem for the shoveler stream alone; it must not also cost the
+	// record. Deferred because the packet paths below return early on error.
+	defer func() {
+		final := tm.event
+		final.ReadBytes, final.WriteBytes = readBytes, writeBytes
+		final.ReadOps, final.WriteOps = readOps, writeOps
+		if final.EndTime.IsZero() {
+			final.EndTime = time.Now()
+		}
+		completeActiveTransfer(tm.activeKeys, final)
+		notifyTransferEventConsumers(final)
+	}()
+
 	// Emit the isClose record
 	packet, err := buildFStreamClosePacket(byte(pseqCounter.Add(1)), tm.fileId, readBytes, writeBytes, readOps, writeOps)
 	if err != nil {
@@ -228,6 +257,10 @@ func (tm *TransferMonitor) Close(readBytes, writeBytes int64, readOps, writeOps 
 // sendPacketToChannel attempts to send a packet to the internal monitoring channel.
 // It drops the packet if the channel is full to avoid blocking the HTTP handler.
 func sendPacketToChannel(ch chan []byte, packet []byte) {
+	if ch == nil {
+		// The shoveler is disabled; the monitor exists only to feed consumers.
+		return
+	}
 	select {
 	case ch <- packet:
 	default:
