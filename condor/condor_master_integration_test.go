@@ -33,10 +33,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PelicanPlatform/classad/dbrpc"
+	cedarclient "github.com/bbockelm/cedar/client"
+	"github.com/bbockelm/cedar/security"
 	htcondor "github.com/bbockelm/golang-htcondor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pelicanplatform/pelican/condor"
 	"github.com/pelicanplatform/pelican/transfer_records"
 )
 
@@ -207,6 +211,18 @@ DC_DAEMON_LIST = +PELICAN
 	require.True(t, waitForLog(t, pelicanLog, "no runtime-configurable parameter changed", 20*time.Second),
 		"condor_reconfig did not report the outcome of reapplying the configuration")
 
+	// The transfer-record store is queryable over dbrpc on the same command port,
+	// which is what lets htcondordb-cli run SQL against a Pelican daemon. Proving
+	// it here rather than trusting registration: this exercises the CEDAR
+	// handshake, the DAEMON authorization gate, and the dbrpc session together.
+	require.True(t, waitForLog(t, pelicanLog, "queryable over dbrpc", 30*time.Second),
+		"the dbrpc session was never mounted")
+	assertTransferRecordsQueryable(t, h, addr)
+	// The daemon logged serving the session, so the query went through the
+	// handler and its DAEMON gate rather than succeeding somewhere incidental.
+	require.True(t, waitForLog(t, pelicanLog, "Transfer-record SQL session opened", 15*time.Second),
+		"the daemon never reported serving a SQL session")
+
 	// The daemon advertises itself to the pool's collector, so condor_status can
 	// see a Pelican server the same way it sees any other daemon.
 	if !eventually(90*time.Second, 2*time.Second, func() bool {
@@ -231,6 +247,39 @@ DC_DAEMON_LIST = +PELICAN
 	}
 	require.True(t, waitForLog(t, pelicanLog, "Pelican daemon has shut down", 30*time.Second),
 		"pelican did not complete an orderly shutdown")
+}
+
+// assertTransferRecordsQueryable opens a dbrpc session against the daemon's
+// command port and lists its tables, the way htcondordb-cli does.
+func assertTransferRecordsQueryable(t *testing.T, h *htcondor.CondorTestHarness, addr string) {
+	t.Helper()
+
+	cfg, err := h.GetConfig()
+	require.NoError(t, err)
+
+	sec, err := htcondor.GetSecurityConfig(cfg, condor.DBSessionCommand, "CLIENT")
+	require.NoError(t, err)
+	sec.Command = condor.DBSessionCommand
+	if sec.Authentication == security.SecurityOptional {
+		// Authenticate so the peer maps to a user the DAEMON table can match;
+		// negotiating no auth would leave the session anonymous and rejected.
+		sec.Authentication = security.SecurityPreferred
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cl, err := cedarclient.ConnectAndAuthenticate(ctx, addr, sec)
+	require.NoError(t, err, "could not open a dbrpc session on the command port")
+	defer cl.Close()
+
+	dbc := dbrpc.NewClient(dbrpc.NewCedarConn(ctx, cl.GetStream()))
+	defer dbc.Close()
+
+	archives, err := dbc.ArchiveTables(ctx)
+	require.NoError(t, err, "listing archive tables over dbrpc")
+	assert.Contains(t, archives, transfer_records.ArchiveTableName,
+		"the completed-transfer archive should be visible to a SQL client")
 }
 
 // freePort returns a TCP port that is free at the moment of the call.

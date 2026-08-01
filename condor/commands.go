@@ -61,7 +61,16 @@ func commandServer(d *daemon.Daemon) (*cedarserver.Server, net.Listener, error) 
 	}
 
 	srv := cedarserver.New(sec)
+
+	// Apply the pool's ALLOW_/DENY_ tables. Without this CEDAR records the
+	// per-command levels below but never consults them, so a command registered
+	// at ADMINISTRATOR would in fact be open to any peer that could authenticate.
+	if err := installAuthorizer(d, srv); err != nil {
+		return nil, nil, err
+	}
+
 	d.RegisterDefaultCommands(srv)
+	mountTransferRecordsDB(d, srv)
 
 	ln, err := d.Listener(func() (net.Listener, error) {
 		return net.Listen("tcp", "127.0.0.1:0")

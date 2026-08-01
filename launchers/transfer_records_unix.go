@@ -81,6 +81,10 @@ func launchTransferRecords(ctx context.Context, engine *gin.Engine, egrp *errgro
 	// Registered as an observer rather than a plain consumer: the store tracks a
 	// transfer from start to finish, so it archives the record itself at the end.
 	// Doing both would archive every transfer twice.
+	// Publish the store for components assembled before this point -- the
+	// HTCondor command port among them. Cleared on shutdown below.
+	transfer_records.SetShared(store)
+
 	metrics.RegisterActiveTransferObserver("transfer_records", store)
 	store.RunMaintenance(ctx)
 	store.RegisterFeedRoutes(engine.Group("/", web_ui.ServerHeaderMiddleware))
@@ -88,6 +92,7 @@ func launchTransferRecords(ctx context.Context, engine *gin.Engine, egrp *errgro
 	egrp.Go(func() error {
 		<-ctx.Done()
 		metrics.UnregisterActiveTransferObserver("transfer_records")
+		transfer_records.SetShared(nil)
 		if err := store.Close(); err != nil {
 			log.WithError(err).Warn("Failed to close the transfer-record store cleanly")
 		}

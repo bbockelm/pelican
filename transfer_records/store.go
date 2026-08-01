@@ -328,3 +328,28 @@ func (s *Store) rotateOnce() {
 func (s *Store) newKey() string {
 	return "xfer-" + strconv.FormatUint(s.nextKey.Add(1), 36)
 }
+
+// shared holds the process's store, so a component constructed before the
+// modules launch can reach it once it exists.
+var shared atomic.Pointer[Store]
+
+// SetShared publishes the process's store, or clears it when s is nil.
+//
+// This exists for one ordering problem. A server's transfer-record store is
+// created while the modules launch, but something built earlier may need to
+// serve from it -- the HTCondor command port is assembled before
+// LaunchModules runs. Rather than reorder startup around one optional feature,
+// the store is published here and looked up when a request actually arrives.
+//
+// Callers must clear it on shutdown, or a later lookup would hand out a closed
+// store.
+func SetShared(s *Store) {
+	shared.Store(s)
+}
+
+// Shared returns the process's transfer-record store, or nil when recording is
+// disabled or has not started yet. A caller reaching this on a request path
+// should treat nil as "not available" rather than as an error in itself.
+func Shared() *Store {
+	return shared.Load()
+}

@@ -309,3 +309,35 @@ DC_DAEMON_LIST = +PELICAN
 ```
 
 `condor_restart -master` after installing; a `condor_reconfig` is not enough, because `DAEMON_LIST` is only consulted when daemons start.
+
+## 11. Querying the transfer records with SQL
+
+The transfer-record store (see [transfer-records-design.md](transfer-records-design.md)) is exposed over `dbrpc` on the same command port, so `htcondordb-cli` can run SQL against a Pelican daemon:
+
+```console
+$ htcondordb-cli -addr "$(cat /var/log/condor/.pelican_address)"
+> .tables
+> SELECT TransferPath, ReadBytes, UserDN FROM transfers WHERE Project == "cms" LIMIT 20
+```
+
+This works because the pieces already fit: `dbrpc.NewServerCatalog` takes the `*db.Catalog` the store already exposes, and the CLI accepts an arbitrary address, which the daemon already publishes.
+
+**Two restrictions, both narrower than htcondordb's own service.**
+
+*DAEMON only.* htcondordb registers the session at READ and escalates per connection. Here the whole surface is gated at DAEMON — the level HTCondor reserves for secret material — because the records name the object transferred, the address that asked for it, and the user who authenticated. A pool's READ list is usually far wider than its DAEMON list, and this data does not belong to everyone who may run `condor_status`.
+
+*Read-only, unconditionally.* The store is the server's own record of what it served. There is no legitimate reason to write to it over CEDAR, and a mutation path would be a way to falsify accounting. Private attributes stay hidden for the same reason.
+
+### 11.1 The authorization tables had to be installed
+
+Registering a command at a level does nothing on its own. CEDAR's `Authorizer` is optional, and when nil it "advertises only the negotiated command (no authorization table applied)" — the levels passed to `Handle` are recorded and never consulted. Mounting the session at DAEMON without one would have been decoration: any peer that could authenticate at all could open it.
+
+So the command port now installs `authz.Policy`, which resolves the pool's `ALLOW_`/`DENY_` tables the way HTCondor's `IpVerify` does. This also means the levels on the pre-existing `DC_*` commands — reconfigure and shutdown at ADMINISTRATOR — are enforced now, where before they were advisory.
+
+### 11.2 Two access paths, two credentials
+
+The change feed authenticates a federation token bearing `monitoring.raw`; this authenticates the pool's own CEDAR identity. That split is deliberate — the feed serves the federation, this serves the machine's operator — but it does mean two authorization systems reach the same data, and both have to be right. Anyone changing one should check the other still says what they think.
+
+### 11.3 The store is resolved per connection
+
+The command port is assembled before `LaunchModules` runs, so the store does not exist yet at registration time. Rather than reorder startup around an optional feature, the store is published when it opens and looked up when a session actually arrives; a session opened on a server with recording disabled is refused with that reason.

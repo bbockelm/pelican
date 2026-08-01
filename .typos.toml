@@ -29,6 +29,10 @@ condor_startd = "condor_startd"
 Startd = "Startd"
 STARTD = "STARTD"
 StartdAttrs = "StartdAttrs"
+# TRANSFERD_BASE is HTCondor's retired transferd command block, cited by name in
+# condor/dbrpc.go because that is where the command integer comes from.
+TRANSFERD_BASE = "TRANSFERD_BASE"
+TRANSFERD = "TRANSFERD"
 
 [type.xrootd-metrics]
 extend-glob = ["xrootd_metrics.go"]
