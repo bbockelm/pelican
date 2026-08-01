@@ -24,7 +24,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 
-	"github.com/pelicanplatform/pelican/launchers"
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/server_structs"
 )
@@ -41,10 +40,5 @@ func fedServeStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	_, cancel, err := launchers.LaunchModules(cmd.Context(), modules)
-	if err != nil {
-		cancel()
-	}
-
-	return err
+	return launchServer(cmd, modules)
 }

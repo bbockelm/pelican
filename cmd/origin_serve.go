@@ -25,15 +25,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/pelicanplatform/pelican/launchers"
 	"github.com/pelicanplatform/pelican/server_structs"
 )
 
 func serveOrigin(cmd *cobra.Command, args []string) error {
-	_, cancel, err := launchers.LaunchModules(cmd.Context(), server_structs.OriginType)
-	if err != nil {
-		cancel()
-	}
-
-	return err
+	return launchServer(cmd, server_structs.OriginType)
 }

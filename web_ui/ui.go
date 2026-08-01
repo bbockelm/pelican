@@ -1191,7 +1191,7 @@ func runEngineWithListener(ctx context.Context, ln net.Listener, engine *gin.Eng
 	port := param.Server_WebPort.GetInt()
 	addr := fmt.Sprintf("%v:%v", param.Server_WebHost.GetString(), port)
 
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	cert, err := loadCertificate(certFile, keyFile)
 	if err != nil {
 		panic(err)
 	}
@@ -1205,7 +1205,7 @@ func runEngineWithListener(ctx context.Context, ln net.Listener, engine *gin.Eng
 		"server TLS maintenance",
 		2*time.Minute,
 		func(notifyEvent bool) error {
-			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+			cert, err := loadCertificate(certFile, keyFile)
 			if err == nil {
 				log.Debugln("Loaded new X509 key pair")
 				certPtr.Store(&cert)

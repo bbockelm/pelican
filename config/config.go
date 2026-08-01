@@ -1478,6 +1478,21 @@ func initConfigInternalImpl(logLevel log.Level) {
 		cobra.CheckErr(err)
 	}
 
+	// Give an external configuration provider a chance to contribute values.
+	// This runs after every config-file merge and before env vars are recorded,
+	// so a provider layers over the config files while environment variables
+	// still win -- the same precedence a config file has.
+	//
+	// The HTCondor configuration layer registers itself here. The hook exists
+	// because a provider cannot run any earlier: this function is what loads
+	// Pelican's configuration in the first place, so anything that ran before it
+	// would be overwritten by the merges above.
+	if provider := externalConfigProvider.Load(); provider != nil {
+		if err := (*provider)(viper.GetViper()); err != nil {
+			cobra.CheckErr(errors.Wrap(err, "failed to apply external configuration"))
+		}
+	}
+
 	// Record environment variable sources. This must happen after all config file
 	// merges because env vars take precedence in viper, and we want the source
 	// tracker to reflect that.
