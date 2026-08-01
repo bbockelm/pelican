@@ -103,6 +103,8 @@ github.com/PelicanPlatform/classad/collections v0.21.1 h1:kQHkl4pDeUSCTo20Ls+aHr
 github.com/PelicanPlatform/classad/collections v0.21.1/go.mod h1:djT/JhGuLcMnVyXOsdiniPzZC6NaxQz8ZHTkffYZtNY=
 github.com/PelicanPlatform/classad/db v0.21.1 h1:iZ4nkqfmSZDn2hIUIwc7yUTzszYoSb6FaE17y1RMvEI=
 github.com/PelicanPlatform/classad/db v0.21.1/go.mod h1:Haywg1w8LL5P1QteAi7pfX+H92k8Mceip1kyVli4ISs=
+github.com/PelicanPlatform/classad/dbrpc v0.21.1 h1:N0V7J4oo4A+9aHKr50c5c4ohUcNv+N69mmNiPNT7iqk=
+github.com/PelicanPlatform/classad/dbrpc v0.21.1/go.mod h1:toQqDqM03Gu/Mf2nbNSP5+0+wLBy9KVwBj7mJV6xMyw=
 github.com/PuerkitoBio/purell v1.1.1/go.mod h1:c11w/QuzBsJSee3cPx9rAFu61PvFxuPbtSwDGJws/X0=
 github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578/go.mod h1:uGdkoq3SwY9Y+13GIhn11/XLaGBb4BfwItxLd5jeuXE=
 github.com/RoaringBitmap/roaring v1.9.4 h1:yhEIoH4YezLYT04s1nHehNO64EKFTop/wBhxv2QzDdQ=

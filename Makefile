@@ -160,7 +160,7 @@ condor-test-privileged: ## Run the privileged HTCondor credential tests as root 
 	@$(CONTAINER_TOOL) run --rm --user root \
 		-v $(PWD):/src:ro \
 		-v $$(go env GOMODCACHE):/gomod:ro \
-		-e GOMODCACHE=/gomod -e GOFLAGS=-mod=mod -e GOCACHE=/tmp/gocache \
+		-e GOMODCACHE=/gomod -e GOFLAGS=-mod=readonly -e GOCACHE=/tmp/gocache \
 		-w /src $(CONDOR_TEST_IMAGE) \
 		go test -tags server -count=1 -v \
 		-run 'TestRootOwnedCredentialReadableAfterDrop|TestElevationIsPerThread|TestCredentialReadSurvivesReconfigure' \
