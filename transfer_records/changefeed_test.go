@@ -271,7 +271,7 @@ func TestAuthenticatedPull(t *testing.T) {
 			Table:      ArchiveTableName,
 			Src:        s.cfg.Identity.Name,
 			Subscriber: "collector-1",
-			Token:      mintFeedToken(t, issuer, "collector-1", token_scopes.Monitoring_Scrape),
+			Token:      mintFeedToken(t, issuer, "collector-1", token_scopes.Monitoring_Raw),
 		}, sink)
 	}()
 
@@ -281,10 +281,11 @@ func TestAuthenticatedPull(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
-// TestPullRejectedWithoutScope checks that authentication alone is not enough.
-// A token that identifies its bearer but carries no monitoring scope must not
-// open the feed -- transfer records are more revealing than the metrics the
-// scope usually guards, so the scope check is the whole access control.
+// TestPullRejectedWithoutScope checks that authentication alone is not enough,
+// and specifically that monitoring.scrape does not open this feed. Someone
+// permitted to scrape a server's metrics must not thereby be able to read who
+// transferred what; that separation is the entire reason monitoring.raw exists,
+// so it is worth a test rather than a comment.
 func TestPullRejectedWithoutScope(t *testing.T) {
 	server_utils.ResetTestState()
 	defer server_utils.ResetTestState()
@@ -294,8 +295,9 @@ func TestPullRejectedWithoutScope(t *testing.T) {
 	s.Record(sampleEvent())
 	srv := authenticatedFeedServer(t, s)
 
-	// A valid token for a different scope entirely.
-	tok := mintFeedToken(t, issuer, "collector-1", token_scopes.WebUi_Access)
+	// A valid token carrying monitoring.scrape -- enough to read this server's
+	// metrics, and deliberately not enough to read its transfer records.
+	tok := mintFeedToken(t, issuer, "collector-1", token_scopes.Monitoring_Scrape)
 
 	req, err := http.NewRequest(http.MethodGet,
 		srv.URL+FeedRoutePrefix+changefeed.PathSubscribe+"?table="+ArchiveTableName, nil)

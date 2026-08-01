@@ -132,11 +132,11 @@ A subscriber is a `replicate.Sink` plus a call to `changefeed.Pull`, which resum
 
 ### 5.3 Authorization
 
-Reading the feed requires a token with the `monitoring.scrape` scope.
+Reading the feed requires a token with the `monitoring.raw` scope.
 
 **The subscriber identity comes from the token's subject**, not from a request parameter, and a token that authenticates but names no subject is refused. This is not tidiness: acknowledgements advance a garbage-collection floor, so a client free to name itself could acknowledge on another subscriber's behalf and cause records to be dropped before that subscriber collected them. An anonymous shared cursor has the same failure mode.
 
-**A caveat worth stating.** `monitoring.scrape` also grants Prometheus scraping, and transfer records are considerably more revealing than aggregate metrics — they carry object paths, client addresses, and user identities. A deployment wanting those held to a narrower audience than its metrics needs a distinct scope. That is a policy decision; nothing in the mechanism would change.
+**A separate scope from `monitoring.scrape`, deliberately.** Metrics are aggregates; these records name the object transferred, the address that asked for it, and the user who authenticated. Granting both with one scope would mean anyone permitted to scrape a server could also reconstruct who transferred what. A test asserts a `monitoring.scrape` token is refused, so the separation cannot quietly erode.
 
 ### 5.4 Outage behaviour
 
@@ -180,5 +180,4 @@ Not covered: minting a token against a *separate* `pelican-server` process's iss
 
 1. **Schema stability.** Are the record attributes a committed interface or explicitly provisional? Consumers will assume committed unless told. Deferred until closer to a release.
 1. **The retention default.** The byte cap is the collection-lag tolerance, and the window it buys depends on record rate — which wants a measurement per service class rather than a guess.
-1. **A distinct scope for records**, per §5.3.
 1. **Collection-aware reclamation** using the acknowledgement floor, so a byte cap is not the only thing standing between an outage and lost records.
