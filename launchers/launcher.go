@@ -243,6 +243,13 @@ func LaunchModules(ctx context.Context, modules server_structs.ServerType) (serv
 		log.Info("Transfer module enabled")
 	}
 
+	// Record transfers locally and expose them to a monitoring service. Started
+	// before the web engine so the feed's routes are registered while the engine
+	// is still being assembled.
+	if err = launchTransferRecords(ctx, engine, egrp, modules); err != nil {
+		return
+	}
+
 	// Start periodic database backup routine
 	database.LaunchPeriodicBackup(ctx, egrp)
 
