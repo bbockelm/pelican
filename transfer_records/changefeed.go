@@ -57,12 +57,12 @@ type subscriberContextKey struct{}
 // durably stored; the acknowledgement is what lets this server know how far the
 // collector has got.
 //
-// Authorization requires monitoring.scrape. Note that this is the same scope
-// that grants Prometheus scraping, and transfer records are more revealing than
-// aggregate metrics -- they carry object paths, client addresses, and user
-// identities. A deployment that wants those held to a narrower audience than its
-// metrics needs a distinct scope; that is a policy decision rather than a
-// mechanism one, and the mechanism here would not change.
+// Authorization requires monitoring.raw, which exists to be narrower than
+// monitoring.scrape. Metrics are aggregates; these records name the object
+// transferred, the address that asked for it, and the user who authenticated.
+// Granting both with one scope would mean anyone permitted to scrape a server
+// could also reconstruct who transferred what, so the two are separated and a
+// deployment decides independently who gets each.
 func (s *Store) RegisterFeedRoutes(router *gin.RouterGroup) {
 	handler := changefeed.Handler(s.cat, changefeed.ServerOptions{
 		// Identity has already been established by the middleware below; this
@@ -96,7 +96,7 @@ func (s *Store) authenticateSubscriber(ctx *gin.Context) {
 	result, status, ok, err := token.VerifyAndExtract(ctx, token.AuthOption{
 		Sources: []token.TokenSource{token.Header},
 		Issuers: []token.TokenIssuer{token.FederationIssuer, token.LocalIssuer, token.APITokenIssuer},
-		Scopes:  []token_scopes.TokenScope{token_scopes.Monitoring_Scrape},
+		Scopes:  []token_scopes.TokenScope{token_scopes.Monitoring_Raw},
 	})
 	if !ok {
 		msg := "authentication required to read transfer records"

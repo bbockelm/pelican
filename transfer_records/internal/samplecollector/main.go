@@ -54,7 +54,7 @@ func main() {
 		table      = flag.String("table", "transfers", "table to follow")
 		src        = flag.String("src", "", "source label to subscribe as (defaults to the server's own)")
 		subscriber = flag.String("subscriber", "", "durable subscription id; the source attributes acknowledgements to it")
-		token      = flag.String("token", "", "bearer token with the monitoring.scrape scope")
+		token      = flag.String("token", "", "bearer token with the monitoring.raw scope")
 		tokenFile  = flag.String("token-file", "", "file holding the bearer token")
 		cursorAt   = flag.String("cursor-file", "", "file in which to persist the resume cursor")
 		count      = flag.Int("count", 0, "exit after this many records (0 means run until interrupted)")

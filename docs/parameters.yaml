@@ -5891,7 +5891,7 @@ description: |+
   store is bounded by `Monitoring.TransferRecordsMaxSize`; the oldest records are dropped
   once that limit is reached.
 
-  Reading the feed requires a token with the `monitoring.scrape` scope. Note that transfer
+  Reading the feed requires a token with the `monitoring.raw` scope. Note that transfer
   records are more revealing than aggregate metrics: they include object paths, client
   addresses, and user identities.
 type: bool
