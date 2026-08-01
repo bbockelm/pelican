@@ -143,3 +143,25 @@ pelican-serve-test-origin: pelican-build
 pelican-build-server-image:
 	@echo BUILD SERVER IMAGE
 	@$(CONTAINER_TOOL) build -t pelican-server -f images/Dockerfile .
+
+# Image used by condor-test-privileged. Any Linux image with a Go toolchain and
+# an unprivileged account (condor, nobody or daemon) will do; pelican-test also
+# works and is what CI has.
+CONDOR_TEST_IMAGE ?= golang-htcondor:integration-test
+
+.PHONY: condor-test-privileged
+condor-test-privileged: ## Run the privileged HTCondor credential tests as root in Linux
+	@# These verify what only root can: that a root-owned 0600 credential stays
+	@# readable after the daemon drops to the condor account, and that the
+	@# elevation doing so is confined to one thread. They are Linux-only and skip
+	@# when not root, so on a developer machine they need a container to run at
+	@# all -- otherwise they silently prove nothing.
+	@echo "Running privileged condor tests as root in $(CONDOR_TEST_IMAGE)"
+	@$(CONTAINER_TOOL) run --rm --user root \
+		-v $(PWD):/src:ro \
+		-v $$(go env GOMODCACHE):/gomod:ro \
+		-e GOMODCACHE=/gomod -e GOFLAGS=-mod=mod -e GOCACHE=/tmp/gocache \
+		-w /src $(CONDOR_TEST_IMAGE) \
+		go test -tags server -count=1 -v \
+		-run 'TestRootOwnedCredentialReadableAfterDrop|TestElevationIsPerThread|TestCredentialReadSurvivesReconfigure' \
+		./condor/

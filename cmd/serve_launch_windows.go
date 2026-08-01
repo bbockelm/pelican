@@ -1,3 +1,5 @@
+//go:build server && windows
+
 /***************************************************************
  *
  * Copyright (C) 2026, Pelican Project, Morgridge Institute for Research
@@ -18,19 +20,22 @@
 
 package main
 
-//go:generate go run ../generate
+import (
+	"github.com/spf13/cobra"
 
-// This should not be included in any release of pelican
+	"github.com/pelicanplatform/pelican/launchers"
+	"github.com/pelicanplatform/pelican/server_structs"
+)
 
-// Include more generator functions here but keep them encapsulated
-// in their separate files under `generate` package
-func main() {
-	GenParamEnum()
-	GenParamStruct()
-	GenDefaults()
-	GenSwaggerDoc()
-	GenTokenScope()
-	GenErrorCodes()
-	GenServerFeatures()
-	GenCondorObjectParams()
+// launchServer starts the given server modules.
+//
+// condor_master is not supported on Windows -- the privilege model the daemon
+// mode relies on is POSIX-specific -- so this is always a standalone launch. See
+// the Unix build of this file for the supervised mode.
+func launchServer(cmd *cobra.Command, modules server_structs.ServerType) error {
+	_, cancel, err := launchers.LaunchModules(cmd.Context(), modules)
+	if err != nil {
+		cancel()
+	}
+	return err
 }

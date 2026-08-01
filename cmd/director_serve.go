@@ -23,17 +23,11 @@ package main
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/pelicanplatform/pelican/launchers"
 	"github.com/pelicanplatform/pelican/server_structs"
 )
 
 func serveDirector(cmd *cobra.Command, args []string) error {
 	modules := server_structs.DirectorType
 
-	_, cancel, err := launchers.LaunchModules(cmd.Context(), modules)
-	if err != nil {
-		cancel()
-	}
-
-	return err
+	return launchServer(cmd, modules)
 }

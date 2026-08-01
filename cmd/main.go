@@ -74,6 +74,12 @@ func handleCLI(args []string) error {
 		}
 	}
 
+	// Under condor_master the command line belongs to DaemonCore, not to us, so
+	// the daemon runs without the CLI ever parsing it. See dispatchCondorDaemon.
+	if handled, err := dispatchCondorDaemon(); handled {
+		return err
+	}
+
 	// * We assume that os.Args should have minimum length of 1, so skipped empty check
 	// * Version flag is captured manually to ensure it's available to all the commands and subcommands
 	// 		This is because there's no gracefully way to do it through Cobra

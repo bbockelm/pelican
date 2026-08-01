@@ -60,7 +60,58 @@ var (
 	oncePrometheus sync.Once
 )
 
-func LaunchModules(ctx context.Context, modules server_structs.ServerType) (servers []server_structs.XRootDServer, shutdownCancel context.CancelFunc, err error) {
+// launchConfig collects the optional behaviors an embedder can adjust. The zero
+// value is the standalone default: bind our own listener and handle signals.
+type launchConfig struct {
+	listener      net.Listener
+	handleSignals bool
+}
+
+// LaunchOption adjusts how LaunchModules runs. See WithListener and
+// WithoutSignalHandling.
+type LaunchOption func(*launchConfig)
+
+// WithListener supplies the listener for the web engine instead of having
+// LaunchModules bind one from Server.WebHost and Server.WebPort. It lets an
+// embedder serve on a socket it obtained elsewhere -- one inherited from a
+// supervising process, or bound early to reserve a port.
+//
+// Server.WebPort and the URLs derived from it are updated from the listener's
+// address just as they are for an internally-bound socket, so a listener bound
+// to port 0 resolves the configuration to the real port either way.
+//
+// LaunchModules takes ownership of the listener in both cases: it is closed on
+// an error return, and otherwise handed to the web engine, which closes it at
+// shutdown.
+func WithListener(ln net.Listener) LaunchOption {
+	return func(c *launchConfig) { c.listener = ln }
+}
+
+// WithoutSignalHandling stops LaunchModules from installing its own
+// SIGINT/SIGTERM/SIGQUIT/SIGHUP handlers, leaving the process's signal
+// disposition to the caller. Shutdown is then driven by cancelling the context,
+// which still performs the same graceful teardown that a signal would.
+//
+// It exists because Pelican's signal semantics are not universal: SIGHUP here
+// means "restart the process", whereas a supervisor such as condor_master sends
+// SIGHUP to mean "reload configuration". An embedder that must honor its
+// supervisor's contract has to own signals itself, and two sets of handlers
+// racing over the same signal is not a workable arrangement.
+func WithoutSignalHandling() LaunchOption {
+	return func(c *launchConfig) { c.handleSignals = false }
+}
+
+// LaunchModules starts the requested server modules, binding the web engine to
+// a listener on Server.WebHost:Server.WebPort and handling termination signals
+// itself. Both behaviors can be overridden; see WithListener and
+// WithoutSignalHandling.
+func LaunchModules(ctx context.Context, modules server_structs.ServerType, opts ...LaunchOption) (servers []server_structs.XRootDServer, shutdownCancel context.CancelFunc, err error) {
+	cfg := launchConfig{handleSignals: true}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	ln := cfg.listener
+
 	egrp, ok := ctx.Value(config.EgrpKey).(*errgroup.Group)
 	if !ok {
 		egrp = &errgroup.Group{}
@@ -154,10 +205,15 @@ func LaunchModules(ctx context.Context, modules server_structs.ServerType) (serv
 	// Start listening on the socket.  If `Server.WebPort` is 0, then a random port will be
 	// selected and we'll update the configuration accordingly.  This needs to be done before
 	// the XRootD configuration is written as the Server.WebPort is incorporated into the issuer URL.
-	addr := fmt.Sprintf("%v:%v", param.Server_WebHost.GetString(), param.Server_WebPort.GetInt())
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return
+	// A caller-supplied listener is used as-is; the config update below applies to
+	// it just the same, so an injected port-0 listener resolves the configuration
+	// identically.
+	if ln == nil {
+		addr := fmt.Sprintf("%v:%v", param.Server_WebHost.GetString(), param.Server_WebPort.GetInt())
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			return
+		}
 	}
 	lnReference := ln
 	defer func() {
@@ -531,9 +587,17 @@ func LaunchModules(ctx context.Context, modules server_structs.ServerType) (serv
 	egrp.Go(func() error {
 		_ = config.RestartFlag
 		_ = config.ShutdownFlag
-		log.Debug("Will shutdown process on signal")
-		sigs := make(chan os.Signal, 1)
-		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
+		// sigs stays nil when the caller owns signal disposition; a receive on a
+		// nil channel blocks forever, so the select below simply never takes that
+		// branch and the remaining cases are unaffected.
+		var sigs chan os.Signal
+		if cfg.handleSignals {
+			log.Debug("Will shutdown process on signal")
+			sigs = make(chan os.Signal, 1)
+			signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP)
+		} else {
+			log.Debug("Signal handling left to the caller; will shutdown when the context is cancelled")
+		}
 		for {
 			select {
 			case sig := <-sigs:
@@ -560,6 +624,13 @@ func LaunchModules(ctx context.Context, modules server_structs.ServerType) (serv
 				shutdownCancel()
 				return ErrExitOnSignal
 			case <-ctx.Done():
+				// When the caller owns signals, cancelling the context is how a
+				// termination request reaches us, so it has to perform the same
+				// graceful teardown a SIGTERM would. With our own handlers
+				// installed the signal path above has already done it.
+				if !cfg.handleSignals {
+					handleGracefulShutdown(ctx, modules, servers)
+				}
 				return nil
 			}
 		}

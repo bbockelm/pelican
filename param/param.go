@@ -88,6 +88,21 @@ func Refresh() (*Config, error) {
 	return UnmarshalConfig()
 }
 
+// AllParameterNames returns the name of every known configuration parameter.
+//
+// The list is generated from docs/parameters.yaml, so it is the authoritative
+// answer to "what can be configured". It is exported for callers that need to
+// enumerate the whole parameter space rather than read one value -- notably the
+// HTCondor configuration layer, which derives a knob name from each parameter
+// name and so must not miss any.
+//
+// The returned slice is a copy; the caller cannot disturb the package's own.
+func AllParameterNames() []string {
+	out := make([]string, len(allParameterNames))
+	copy(out, allParameterNames)
+	return out
+}
+
 // BindAllParameters binds all known configuration keys to environment variables.
 //
 // Viper's AutomaticEnv() allows env vars to override Get* calls. However,

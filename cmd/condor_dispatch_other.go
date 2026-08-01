@@ -1,3 +1,5 @@
+//go:build (client || server) && (!server || windows)
+
 /***************************************************************
  *
  * Copyright (C) 2026, Pelican Project, Morgridge Institute for Research
@@ -18,19 +20,10 @@
 
 package main
 
-//go:generate go run ../generate
-
-// This should not be included in any release of pelican
-
-// Include more generator functions here but keep them encapsulated
-// in their separate files under `generate` package
-func main() {
-	GenParamEnum()
-	GenParamStruct()
-	GenDefaults()
-	GenSwaggerDoc()
-	GenTokenScope()
-	GenErrorCodes()
-	GenServerFeatures()
-	GenCondorObjectParams()
-}
+// dispatchCondorDaemon never handles anything in a client-only build, or on
+// Windows where running under condor_master is unsupported.
+//
+// The build constraint mirrors main.go's (client || server) so that this file
+// exists exactly where the CLI entry point does -- and no wider, since a stray
+// main package with no main function fails to build.
+func dispatchCondorDaemon() (bool, error) { return false, nil }

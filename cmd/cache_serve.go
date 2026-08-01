@@ -23,15 +23,9 @@ package main
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/pelicanplatform/pelican/launchers"
 	"github.com/pelicanplatform/pelican/server_structs"
 )
 
 func serveCache(cmd *cobra.Command, _ []string) error {
-	_, cancel, err := launchers.LaunchModules(cmd.Context(), server_structs.CacheType)
-	if err != nil {
-		cancel()
-	}
-
-	return err
+	return launchServer(cmd, server_structs.CacheType)
 }
