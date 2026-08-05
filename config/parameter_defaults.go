@@ -151,6 +151,18 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 		val = strings.ReplaceAll(val, "${Cache.StorageLocation}", v.GetString(param.Cache_StorageLocation.GetName()))
 		v.SetDefault(param.Cache_NamespaceLocation.GetName(), val)
 	}
+	// Cache.Throttle.EMAWindow
+	v.SetDefault(param.Cache_Throttle_EMAWindow.GetName(), "30s")
+	// Cache.Throttle.PendingBufferSize
+	v.SetDefault(param.Cache_Throttle_PendingBufferSize.GetName(), 200)
+	// Cache.Throttle.PerOriginActivePercent
+	v.SetDefault(param.Cache_Throttle_PerOriginActivePercent.GetName(), 90)
+	// Cache.Throttle.PerOriginPendingSize
+	v.SetDefault(param.Cache_Throttle_PerOriginPendingSize.GetName(), 50)
+	// Cache.Throttle.PerOriginStarvingPercent
+	v.SetDefault(param.Cache_Throttle_PerOriginStarvingPercent.GetName(), 25)
+	// Cache.Throttle.RetryAfter
+	v.SetDefault(param.Cache_Throttle_RetryAfter.GetName(), "60s")
 	// Cache.Url
 	{
 		val := "https://${Server.Hostname}:${Cache.Port}"
@@ -354,6 +366,10 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 		val = strings.ReplaceAll(val, "${LocalCache.RunLocation}", v.GetString(param.LocalCache_RunLocation.GetName()))
 		v.SetDefault(param.LocalCache_Socket.GetName(), val)
 	}
+	// Logging.Buffer.BatchLines
+	v.SetDefault(param.Logging_Buffer_BatchLines.GetName(), 10000)
+	// Logging.Buffer.MaxSize
+	v.SetDefault(param.Logging_Buffer_MaxSize.GetName(), "1MB")
 	// Logging.Cache.Http
 	v.SetDefault(param.Logging_Cache_Http.GetName(), "error")
 	// Logging.Cache.Lotman
@@ -390,6 +406,20 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Logging_Origin_Xrd.GetName(), "error")
 	// Logging.Origin.Xrootd
 	v.SetDefault(param.Logging_Origin_Xrootd.GetName(), "info")
+	// Logging.Rotation.Disable
+	v.SetDefault(param.Logging_Rotation_Disable.GetName(), false)
+	// Logging.Rotation.DisableCompress
+	v.SetDefault(param.Logging_Rotation_DisableCompress.GetName(), false)
+	// Logging.Rotation.FlushInterval
+	v.SetDefault(param.Logging_Rotation_FlushInterval.GetName(), "50ms")
+	// Logging.Rotation.Frequency
+	v.SetDefault(param.Logging_Rotation_Frequency.GetName(), "daily")
+	// Logging.Rotation.MaxRetentionPeriod
+	v.SetDefault(param.Logging_Rotation_MaxRetentionPeriod.GetName(), "720h")
+	// Logging.Rotation.MaxRetentionSize
+	v.SetDefault(param.Logging_Rotation_MaxRetentionSize.GetName(), "1GB")
+	// Logging.Rotation.MaxSize
+	v.SetDefault(param.Logging_Rotation_MaxSize.GetName(), "100MB")
 	// Lotman.DefaultLotDeletionLifetime
 	v.SetDefault(param.Lotman_DefaultLotDeletionLifetime.GetName(), "48h")
 	// Lotman.DefaultLotExpirationLifetime
@@ -538,6 +568,8 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Origin_EnablePublicReads.GetName(), false)
 	// Origin.EnableReads
 	v.SetDefault(param.Origin_EnableReads.GetName(), true)
+	// Origin.EnableStandaloneMode
+	v.SetDefault(param.Origin_EnableStandaloneMode.GetName(), false)
 	// Origin.EnableTLSClientAuth
 	v.SetDefault(param.Origin_EnableTLSClientAuth.GetName(), false)
 	// Origin.EnableTransferAPI
@@ -580,6 +612,18 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Origin_MultiuserUmask.GetName(), -1)
 	// Origin.MultiuserVarlinkSocketPath
 	v.SetDefault(param.Origin_MultiuserVarlinkSocketPath.GetName(), "/run/systemd/userdb/io.systemd.UserDatabase")
+	// Origin.PStoreDataScanInterval
+	v.SetDefault(param.Origin_PStoreDataScanInterval.GetName(), "24h")
+	// Origin.PStoreDataScanRate
+	v.SetDefault(param.Origin_PStoreDataScanRate.GetName(), "100MB/s")
+	// Origin.PStoreIndexCheckInterval
+	v.SetDefault(param.Origin_PStoreIndexCheckInterval.GetName(), "1h")
+	// Origin.PStoreInlineMaxBytes
+	v.SetDefault(param.Origin_PStoreInlineMaxBytes.GetName(), 0)
+	// Origin.PStoreMetadataBackupInterval
+	v.SetDefault(param.Origin_PStoreMetadataBackupInterval.GetName(), "6h")
+	// Origin.PStoreMetadataBackupsToKeep
+	v.SetDefault(param.Origin_PStoreMetadataBackupsToKeep.GetName(), 24)
 	// Origin.Port
 	v.SetDefault(param.Origin_Port.GetName(), 8443)
 	// Origin.RunLocation

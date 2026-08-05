@@ -59,6 +59,7 @@ import (
 
 	"github.com/pelicanplatform/pelican/client"
 	"github.com/pelicanplatform/pelican/config"
+	"github.com/pelicanplatform/pelican/metrics"
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/token_scopes"
@@ -90,7 +91,7 @@ func isEvictedError(err error) bool {
 
 // clientChecksumsToCache converts transfer-client checksums into the local
 // cache schema.  Server-supplied checksums are marked OriginVerified; client-
-// computed checksums are not.  Unrecognised algorithms are silently dropped.
+// computed checksums are not.  Unrecognized algorithms are silently dropped.
 func clientChecksumsToCache(result *client.TransferResults) []Checksum {
 	if result == nil {
 		return nil
@@ -134,7 +135,7 @@ func clientChecksumsToCache(result *client.TransferResults) []Checksum {
 // statChecksumsToCache converts the checksum map returned by client.DoStat
 // (HTTP digest name -> hex-encoded value) into the local cache schema.  These
 // come from the origin's HEAD response, so they are marked OriginVerified.
-// Unrecognised algorithms and malformed hex are silently skipped.
+// Unrecognized algorithms and malformed hex are silently skipped.
 func statChecksumsToCache(checksums map[string]string) []Checksum {
 	if len(checksums) == 0 {
 		return nil
@@ -176,6 +177,11 @@ type PersistentCache struct {
 
 	// Transfer engine for creating per-request clients
 	te *client.TransferEngine
+
+	// Optional fair scheduler installed on te. Held here so the
+	// per-origin monitoring publisher can Snapshot() it on a fixed
+	// cadence.  nil when Cache.Throttle.PendingBufferSize == 0.
+	scheduler *client.TagScheduler
 
 	// Federation configuration
 	directorURL *url.URL
@@ -243,6 +249,14 @@ type persistentDownload struct {
 	// Only the first caller consumes this; waiters receive ErrNoStoreRetry.
 	noStoreReader io.ReadCloser
 	noStoreMeta   *CacheMetadata
+
+	// forceNoStore streams the response through without persisting it, for
+	// reasons of our own rather than the origin's. A collection is the case
+	// that matters: an export with Listings enabled answers a collection GET
+	// with an index, which is worth showing a user but must never be written
+	// to disk as that path's object -- once stored, every later request for
+	// the path is served the index instead.
+	forceNoStore bool
 
 	// Background completion tracking (for non-blocking downloads)
 	completionDone chan struct{} // Closed when background finalization completes
@@ -519,11 +533,32 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 		return nil, errors.Wrap(err, "failed to initialize cache database")
 	}
 
+	// Claim the database for the cache so that a pstore origin pointed at the
+	// same directory refuses to open it rather than corrupting it.
+	if err := db.EnsureStoreMode(StoreModeCache); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	// Initialize storage manager — assigns storageIDs internally via UUIDs.
 	storage, err := NewStorageManager(db, dirPaths, cfg.InlineStorageMaxBytes, egrp)
 	if err != nil {
 		db.Close()
 		return nil, errors.Wrap(err, "failed to initialize storage manager")
+	}
+
+	// From here on the storage manager owns eviction-loop goroutines running on
+	// the caller's errgroup, and those loops only exit on Close() -- cancelling
+	// the context does not reach them. Every failure past this point therefore
+	// has to shut the storage manager down as well as the database, or the
+	// errgroup never drains: the caller is left waiting on workers belonging to
+	// a cache that was never returned. In `pelican cache serve` that wait
+	// happens before the logs are flushed and the exit code is chosen, so a
+	// startup failure would wedge the process without reporting anything.
+	failInit := func(err error) (*PersistentCache, error) {
+		storage.Close()
+		db.Close()
+		return nil, err
 	}
 
 	// Build eviction dir configs now that we know storageID → path mapping.
@@ -535,8 +570,7 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 		sd, ok := sdCfgByPath[basePath]
 		if !ok {
 			// Should not happen — every directory in GetDirs was passed in.
-			db.Close()
-			return nil, errors.Errorf("storage directory %q not found in config", basePath)
+			return failInit(errors.Errorf("storage directory %q not found in config", basePath))
 		}
 
 		// Resolve per-dir size.  0 means auto-detect from filesystem.
@@ -547,8 +581,7 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 		if maxSz == 0 {
 			cs, err := getCacheSize(sd.Path, db, id)
 			if err != nil {
-				db.Close()
-				return nil, errors.Wrapf(err, "failed to determine size for storage dir %q", sd.Path)
+				return failInit(errors.Wrapf(err, "failed to determine size for storage dir %q", sd.Path))
 			}
 			maxSz = cs
 		}
@@ -585,7 +618,7 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 	// integrity scan verifies each object's on-disk data a single time and
 	// then skips it, for deployments whose storage already guarantees at-rest
 	// integrity (e.g. ZFS).  Any value other than "once" keeps the default
-	// behaviour of re-verifying every object on each scan cycle.
+	// behavior of re-verifying every object on each scan cycle.
 	scanOnce := strings.EqualFold(param.Cache_DataScanMode.GetString(), "once")
 	consistency := NewConsistencyChecker(db, storage, ConsistencyConfig{
 		MinAgeForCleanup: -1, // Use default grace period
@@ -596,14 +629,12 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 	// Get federation info
 	fedInfo, err := config.GetFederation(ctx)
 	if err != nil {
-		db.Close()
-		return nil, errors.Wrap(err, "failed to get federation info")
+		return failInit(errors.Wrap(err, "failed to get federation info"))
 	}
 
 	directorURL, err := url.Parse(fedInfo.DirectorEndpoint)
 	if err != nil {
-		db.Close()
-		return nil, errors.Wrap(err, "failed to parse director URL")
+		return failInit(errors.Wrap(err, "failed to parse director URL"))
 	}
 
 	// Derive the default federation identity from the discovery endpoint.
@@ -623,27 +654,23 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 
 	// Initialize transfer engine
 	if err := config.InitClient(); err != nil {
-		db.Close()
-		return nil, errors.Wrap(err, "failed to initialize client")
+		return failInit(errors.Wrap(err, "failed to initialize client"))
 	}
 
-	// The cache server serves many clients concurrently, so it needs far more
-	// transfer workers than the command-line client's small default
-	// (Client.WorkerCount).  Use Cache.WorkerCount for the server; the
-	// client-side local cache keeps the client default.
+	// Initialize the transfer engine, sized and (for a cache server) governed
+	// by newCacheScheduler.
 	var te *client.TransferEngine
-	if cfg.Mode == CacheModeServer {
-		workers := param.Cache_WorkerCount.GetInt()
-		if workers <= 0 {
-			workers = 100
-		}
-		te, err = client.NewTransferEngineWithWorkers(ctx, workers)
-	} else {
+	workers, pcScheduler := newCacheScheduler(cfg.Mode)
+	switch {
+	case workers <= 0:
 		te, err = client.NewTransferEngine(ctx)
+	case pcScheduler != nil:
+		te, err = client.NewTransferEngine(ctx, client.WithWorkerCount(workers), client.WithScheduler(pcScheduler))
+	default:
+		te, err = client.NewTransferEngine(ctx, client.WithWorkerCount(workers))
 	}
 	if err != nil {
-		db.Close()
-		return nil, errors.Wrap(err, "failed to create transfer engine")
+		return failInit(errors.Wrap(err, "failed to create transfer engine"))
 	}
 
 	downloadCtx, downloadCancel := context.WithCancel(ctx)
@@ -657,6 +684,7 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 		eviction:        eviction,
 		consistency:     consistency,
 		te:              te,
+		scheduler:       pcScheduler,
 		directorURL:     directorURL,
 		defaultFed:      defaultFed,
 		ac:              newAuthConfig(ctx, egrp),
@@ -695,6 +723,13 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 		return nil
 	})
 
+	// Publish per-origin fair-scheduler metrics to Prometheus on a fixed
+	// cadence. Snapshot() is a channel round-trip through the scheduler
+	// goroutine, so it costs one context switch every tick.
+	if pcScheduler != nil {
+		egrp.Go(func() error { return pc.runSchedulerMetricsPublisher(ctx) })
+	}
+
 	// Register with config's pre-cleanup hook so that the temp-directory
 	// errgroup goroutine waits for BadgerDB to flush before it calls
 	// os.RemoveAll.  pc.Close() is wait-safe: if the errgroup goroutine
@@ -711,6 +746,111 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 	log.Infof("Persistent cache initialized: %s (%d storage dir(s))", cfg.BaseDir, len(storageDirs))
 
 	return pc, nil
+}
+
+// newCacheScheduler decides how the persistent cache's transfer engine is
+// sized and whether it gets a per-origin fair scheduler.
+//
+// A cache server serves many clients concurrently, so it needs far more
+// transfer workers than the command-line client's small default
+// (Client.WorkerCount); it uses Cache.WorkerCount instead. It also gets a
+// TagScheduler, so that one misbehaving upstream origin cannot hold the whole
+// worker pool on stalled connections and make the cache look unresponsive to
+// every client (see the Cache.Throttle.* parameters for the caps).
+//
+// The local (client-side) cache serves a single process rather than many
+// tenants, so it keeps the client defaults and runs unscheduled: a zero worker
+// count means "let the engine choose".
+//
+// Setting Cache.Throttle.PendingBufferSize to 0 is the operator's switch for
+// turning the scheduler off; the engine then runs on the plain
+// first-come-first-served channel.
+func newCacheScheduler(mode CacheMode) (workers int, sched *client.TagScheduler) {
+	workers, schedCfg := cacheSchedulerConfig(mode)
+	if workers <= 0 || schedCfg.PendingBufferSize <= 0 {
+		return workers, nil
+	}
+	return workers, client.NewTagScheduler(workers, schedCfg)
+}
+
+// cacheSchedulerConfig reads the worker count and the fair-scheduler settings
+// for `mode` out of the Cache.* parameters. Split out from newCacheScheduler
+// so the parameter-to-field mapping can be asserted directly: a scheduler that
+// has been handed the wrong knob still constructs and still looks healthy, so
+// nothing downstream would notice a transposed pair.
+//
+// A zero worker count means this mode runs unscheduled on the engine's own
+// default.
+func cacheSchedulerConfig(mode CacheMode) (workers int, cfg client.SchedulerConfig) {
+	if mode != CacheModeServer {
+		return 0, client.SchedulerConfig{}
+	}
+	workers = param.Cache_WorkerCount.GetInt()
+	if workers <= 0 {
+		workers = 100
+	}
+	return workers, client.SchedulerConfig{
+		PerTagStarvingPercent: param.Cache_Throttle_PerOriginStarvingPercent.GetInt(),
+		PerTagActivePercent:   param.Cache_Throttle_PerOriginActivePercent.GetInt(),
+		PendingBufferSize:     param.Cache_Throttle_PendingBufferSize.GetInt(),
+		PerTagPendingSize:     param.Cache_Throttle_PerOriginPendingSize.GetInt(),
+		EMAWindow:             param.Cache_Throttle_EMAWindow.GetDuration(),
+	}
+}
+
+// schedulerMetricsPublishInterval is how often the fair-scheduler
+// snapshot gets pushed into Prometheus gauges. Kept short enough
+// that a Prometheus scrape (default 15 s) always sees a fresh value.
+const schedulerMetricsPublishInterval = 5 * time.Second
+
+// runSchedulerMetricsPublisher periodically snapshots pc.scheduler
+// and translates it into the pelican_cache_scheduler_* Prometheus
+// metrics. Exits on ctx cancellation.
+func (pc *PersistentCache) runSchedulerMetricsPublisher(ctx context.Context) error {
+	ticker := time.NewTicker(schedulerMetricsPublishInterval)
+	defer ticker.Stop()
+	// The scheduler gauges describe instantaneous state; once this cache is
+	// gone they would otherwise keep reporting whatever was true at the last
+	// tick. Clearing them also resets the counter-delta bookkeeping, which
+	// matters when another cache is created in the same process (tests do
+	// this routinely).
+	defer metrics.ResetCacheSchedulerMetrics()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			snap := pc.scheduler.Snapshot(ctx)
+			// Snapshot returns zero when the scheduler is stopping;
+			// don't clobber the last-published gauges with zeroes.
+			if snap.Tags == nil && snap.Global.WorkerCount == 0 {
+				continue
+			}
+			global := metrics.SchedulerGlobalStats{
+				WorkerCount:        snap.Global.WorkerCount,
+				StarvingCap:        snap.Global.StarvingCap,
+				ActiveCap:          snap.Global.ActiveCap,
+				TotalPending:       snap.Global.TotalPending,
+				TotalTags:          snap.Global.TotalTags,
+				TotalAdmits:        snap.Global.TotalAdmits,
+				TotalRejects:       snap.Global.TotalRejects,
+				TotalRejectsGlobal: snap.Global.TotalRejectsGlobal,
+				TotalRejectsPerTag: snap.Global.TotalRejectsPerTag,
+			}
+			tags := make(map[string]metrics.SchedulerPerTagStats, len(snap.Tags))
+			for tag, s := range snap.Tags {
+				tags[tag] = metrics.SchedulerPerTagStats{
+					Pending:  s.Pending,
+					Active:   s.Active,
+					Starving: s.Starving,
+					EMA:      s.EMA,
+					Admits:   s.Admits,
+					Rejects:  s.Rejects,
+				}
+			}
+			metrics.PublishCacheSchedulerSnapshot(global, tags)
+		}
+	}
 }
 
 // Config configures the cache and starts periodic updates
@@ -1065,8 +1205,24 @@ func (pc *PersistentCache) newFetchingRangeReader(
 		dlClientDone = res.dl.RegisterClient()
 	}
 
+	// Pin the version for the life of the reader.  This is the cache's real
+	// serving path -- every HTTP GET arrives here via GetSeekableReader or
+	// GetRange -- so without a pin here the protection that
+	// StorageManager.EvictByLRU offers would only ever apply to the prestage
+	// worker's NewObjectReader.  Eviction removes an object's metadata, data
+	// key, and block state, none of which the open file descriptor replaces,
+	// so a reader that loses its object mid-stream fails the transfer.
+	//
+	// The release is chained into onClose below, and onClose is the same
+	// callback that already deregisters the download client and closes the
+	// lazy fetcher: if a caller leaks a RangeReader it leaks those too, so
+	// this adds no new lifetime requirement.  The pin's release function is
+	// idempotent, so a double Close is harmless.
+	unpin := pc.storage.PinObject(res.instanceHash)
+
 	rr, err := NewRangeReader(pc.storage, res.instanceHash, startByte, endByte, fetchCallback)
 	if err != nil {
+		unpin()
 		if dlClientDone != nil {
 			dlClientDone()
 		}
@@ -1099,6 +1255,7 @@ func (pc *PersistentCache) newFetchingRangeReader(
 		// reused-fetcher path (fetcher != nil), lazyBf is always nil
 		// so closeLazy is a no-op.
 		closeLazy()
+		unpin()
 	}
 
 	return rr, nil
@@ -1108,7 +1265,7 @@ func (pc *PersistentCache) newFetchingRangeReader(
 // This is designed for use with http.ServeContent which handles Range requests internally.
 //
 // When rangeOnly is true and the object is not yet cached, GetSeekableReader
-// uses a lightweight HEAD request to initialise on-disk storage instead of
+// uses a lightweight HEAD request to initialize on-disk storage instead of
 // starting a full sequential download.  This allows BlockFetcherV2 to fetch
 // only the blocks the caller actually reads, avoiding a potentially expensive
 // full transfer.  Callers should set rangeOnly when they know the request is
@@ -1318,7 +1475,7 @@ func (pc *PersistentCache) HeadObject(objectPath, token string) (*HeadResult, er
 	if ft := pc.getFedToken(); ft != "" {
 		opts = append(opts, client.WithFedToken(pc.fedTokenAsProvider()))
 	}
-	statInfo, err := client.DoStat(context.Background(), dUrl.String(), opts...)
+	statInfo, err := pc.te.Stat(context.Background(), dUrl.String(), opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1435,7 +1592,7 @@ func (pc *PersistentCache) stat(objectPath, token string, cachedOnly bool) (uint
 	if ft := pc.getFedToken(); ft != "" {
 		opts = append(opts, client.WithFedToken(pc.fedTokenAsProvider()))
 	}
-	statInfo, err := client.DoStat(context.Background(), dUrl.String(), opts...)
+	statInfo, err := pc.te.Stat(context.Background(), dUrl.String(), opts...)
 	if err != nil {
 		return 0, err
 	}
@@ -1494,9 +1651,14 @@ func (pc *PersistentCache) doInitObjectFromStat(
 	if ft := pc.getFedToken(); ft != "" {
 		opts = append(opts, client.WithFedToken(pc.fedTokenAsProvider()))
 	}
-	statInfo, err := client.DoStat(ctx, dUrl.String(), opts...)
+	statInfo, err := pc.te.Stat(ctx, dUrl.String(), opts...)
 	if err != nil {
 		return nil, errors.Wrap(err, "stat failed for range-on-miss")
+	}
+	// The stat already knows; refusing here costs nothing and keeps a
+	// collection from being initialized as an object on disk.
+	if statInfo.IsCollection {
+		return nil, errors.Errorf("%s is a collection and cannot be cached as an object", pelicanURL)
 	}
 
 	etag := statInfo.ETag
@@ -1710,6 +1872,17 @@ func (pc *PersistentCache) downloadObject(ctx context.Context, pelicanURL string
 	pc.activeDownloads[objectHash] = dl
 	pc.activeDownloadsMu.Unlock()
 
+	// Find out whether the source is a collection, because the answer decides
+	// whether what comes back may be written to disk. An export with Listings
+	// enabled serves an index for a collection, which is worth passing on to
+	// whoever asked but must never become this path's stored object --
+	// every later request would then be served the index.
+	//
+	// Deliberately after the mutex is released: this is a round trip to the
+	// origin, and holding the download registry across it would stall every
+	// other cache miss in the process behind one stat.
+	dl.forceNoStore = pc.sourceIsCollection(ctx, pelicanURL, token)
+
 	// Perform download (this will set dl.instanceHash and dl.etag)
 	err := pc.performDownload(ctx, dl, token)
 
@@ -1902,7 +2075,7 @@ func (pc *PersistentCache) performDownload(ctx context.Context, dl *persistentDo
 		ccDirectives := ParseCacheControl(dl.cacheControl)
 
 		// Check if object with this ETag already exists (only relevant for storable responses)
-		if ccDirectives.ShouldStore() {
+		if ccDirectives.ShouldStore() && !dl.forceNoStore {
 			existingMeta, err := pc.storage.GetMetadata(dl.instanceHash)
 			if err != nil {
 				log.Warnf("Failed to check existing metadata: %v", err)
@@ -1924,7 +2097,11 @@ func (pc *PersistentCache) performDownload(ctx context.Context, dl *persistentDo
 			// Origin says not to store — stream directly to the caller via
 			// an io.Pipe instead of buffering the entire response in memory
 			// (which could OOM on large objects).
-			log.Debugf("performDownload: Origin sent Cache-Control %q — will not persist", dl.cacheControl)
+			if dl.forceNoStore {
+				log.Debugln("performDownload: source is a collection — serving it through without persisting")
+			} else {
+				log.Debugf("performDownload: Origin sent Cache-Control %q — will not persist", dl.cacheControl)
+			}
 
 			pr, pw := io.Pipe()
 			buffered := dw.SetPipeMode(pw)
@@ -2004,7 +2181,7 @@ func (pc *PersistentCache) performDownload(ctx context.Context, dl *persistentDo
 				if fedTP != nil {
 					statOpts = append(statOpts, client.WithFedToken(fedTP))
 				}
-				if statInfo, statErr := client.DoStat(ctx, sourceURL.String(), statOpts...); statErr == nil && statInfo.Size > 0 {
+				if statInfo, statErr := pc.te.Stat(ctx, sourceURL.String(), statOpts...); statErr == nil && statInfo.Size > 0 {
 					// Verify that the HEAD and GET responses refer to the
 					// same object version before trusting the reported size.
 					if statInfo.ETag != "" && dl.etag != "" && statInfo.ETag != dl.etag {
@@ -2763,4 +2940,29 @@ type PersistentCacheStats struct {
 	DirStats         map[StorageID]DirEvictionStats
 	NamespaceUsage   map[string]int64
 	ConsistencyStats ConsistencyStats
+}
+
+// sourceIsCollection reports whether the object being fetched is a collection.
+//
+// A false answer covers both "it is an object" and "the origin would not say",
+// which is the right default here: the consequence of being wrong is that a
+// response gets cached that should not have been, and refusing to serve
+// anything an origin declined to describe would be a far larger blast radius
+// than the defect this guards against.
+func (pc *PersistentCache) sourceIsCollection(ctx context.Context, pelicanURL, token string) bool {
+	// pelicanURL is already a complete pelican:// URL (normalizePath returns
+	// one), unlike the bare object paths the other stat sites are handed.
+	opts := []client.TransferOption{
+		client.WithToken(token),
+		client.WithCacheEmbeddedClientMode(useEmbeddedCacheMode()),
+	}
+	if ft := pc.getFedToken(); ft != "" {
+		opts = append(opts, client.WithFedToken(pc.fedTokenAsProvider()))
+	}
+	statInfo, err := pc.te.Stat(ctx, pelicanURL, opts...)
+	if err != nil {
+		log.Debugln("Could not determine whether", pelicanURL, "is a collection:", err)
+		return false
+	}
+	return statInfo.IsCollection
 }

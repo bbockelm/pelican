@@ -22,6 +22,11 @@ export type StaticNavigationBaseItemProps = {
   // makes the item visible (logical OR with allowedRoles).
   anyScopes?: string[];
   allowedExportTypes?: ExportRes['type'][];
+  // federationOnly hides the item on a server that belongs to no federation
+  // (see ServerInfo.standaloneOrigin). Use it for pages whose only consumer is
+  // a Director or Registry -- rendering them standalone would offer the admin
+  // a control that can never take effect.
+  federationOnly?: boolean;
 };
 
 export type StaticNavigationChildItemProps = StaticNavigationBaseItemProps & {
@@ -35,12 +40,17 @@ export type StaticNavigationParentItemProps = StaticNavigationBaseItemProps & {
 export type NavigationItemProps = {
   exportType?: ExportRes['type'];
   role?: User['role'];
+  // scopes carries the caller's effective scope set so nav items marked
+  // with anyScopes can override an otherwise role-based rejection. Empty /
+  // undefined means "no scope-based override is possible for this caller".
+  scopes?: string[];
   config: StaticNavigationItemProps;
 };
 
 export type NavigationProps = {
   exportType?: ExportRes['type'];
   role?: User['role'];
+  scopes?: string[];
   config: StaticNavigationItemProps[];
   // topOffset (px) is the vertical space reserved above the navigation
   // by an out-of-flow banner sitting at the top of the viewport (e.g.
