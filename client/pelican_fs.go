@@ -116,7 +116,7 @@ func (pfs *PelicanFS) OpenFile(name string, flag int) (fs.File, error) {
 	operation := config.TokenRead
 	if writeMode && !rdwrMode {
 		httpMethod = http.MethodPut
-		operation = config.TokenWrite
+		operation = uploadTokenOperation()
 	}
 
 	dirResp, err := getDirectorInfoForPath(pfs.ctx, pUrl, httpMethod, "", false)
@@ -159,7 +159,7 @@ func (pfs *PelicanFS) OpenFile(name string, flag int) (fs.File, error) {
 				if err != nil {
 					return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 				}
-				token = NewTokenGenerator(pUrl, &dirResp, config.TokenWrite, true)
+				token = NewTokenGenerator(pUrl, &dirResp, uploadTokenOperation(), true)
 				for _, option := range pfs.options {
 					switch option.Ident() {
 					case identTransferOptionTokenLocation{}:

@@ -1854,6 +1854,19 @@ func (te *TransferEngine) runJobHandler() error {
 	}
 }
 
+// uploadTokenOperation returns the token operation used when acquiring a
+// credential for an upload. By default only object creation is needed
+// (storage.create); when Client.EnableOverwrites is set, an upload may
+// replace an existing object — an action that causes data loss and therefore
+// requires storage.modify, requested via the delete operation bit.
+func uploadTokenOperation() config.TokenOperation {
+	operation := config.TokenWrite
+	if param.Client_EnableOverwrites.GetBool() {
+		operation.Set(config.TokenDelete)
+	}
+	return operation
+}
+
 // Create a new transfer job for the client
 //
 // The returned object can be further customized as desired.
@@ -1878,7 +1891,7 @@ func (tc *TransferClient) NewTransferJob(ctx context.Context, remoteUrl *url.URL
 	}
 	operation := config.TokenRead
 	if upload {
-		operation = config.TokenWrite
+		operation = uploadTokenOperation()
 	}
 	tj = &TransferJob{
 		prefObjServers: tc.prefObjServers,
