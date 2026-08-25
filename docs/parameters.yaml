@@ -4976,6 +4976,52 @@ type: object
 default: []
 components: ["origin"]
 ---
+name: Issuer.DisableExternalTokenExchange
+description: |+
+  Disable exchanging access tokens issued by trusted external issuers for tokens minted by this
+  server's embedded issuer.
+
+  When true, the RFC 8693 token-exchange grant accepts only subject tokens this server itself
+  issued, regardless of any trusted external issuers configured in the database.
+
+  This is a kill switch, not the way to configure the feature. Trusted external issuers are
+  managed at runtime through the admin API (`/api/v1.0/issuer/admin/ns/<namespace>/external-issuers`),
+  the `pelican-server origin issuer external-issuer` commands, and the web UI. With no external
+  issuers configured, the feature is inert and this setting has no effect.
+type: bool
+default: false
+components: ["origin"]
+---
+name: Issuer.ExternalIssuers
+description: |+
+  Trusted external OAuth2/OIDC issuers whose access tokens may be exchanged (RFC 8693) at this
+  origin's embedded issuer for Pelican WLCG tokens. This is the global fallback; an export may
+  override it with its own `ExternalIssuers` under `Origin.Exports` (when an export sets its own
+  list, the global list is ignored for that namespace, mirroring `Issuer.AuthorizationTemplates`).
+
+  Each entry is an object describing one trusted issuer. Keys (CamelCase):
+
+  - `Name`: short label; also the default group-name prefix. Required.
+  - `IssuerURL`: the issuer URL, matched exactly against the token's `iss` claim. Required.
+  - `JWKSURL`: optional override; when unset the JWKS URI comes from OIDC discovery.
+  - `RequiredAudiences`: the subject token must carry at least one. Refused if empty unless
+    `AllowAnyAudience: true` is set (which accepts tokens minted for any audience).
+  - `RequiredScopes`, `RequiredClaims` (map of claim to required value): further preconditions.
+  - `AllowedAlgorithms`: permitted JWS algorithms (default RS256/ES256/PS256; asymmetric only).
+  - `SubjectClaim` (default "sub"), `UsernameClaims` (candidates used when enrolling).
+  - `AutoEnroll` (default true): create a Pelican account on first sight of an unknown identity.
+  - `GroupMode`: "claim" (namespace the token's groups behind `GroupPrefix`), "mapped" (use the
+    explicit `GroupMappings` table), or "ignore".
+  - `GroupPrefix` (default "<Name>:"), `AllowFlatGroups` (acknowledge an empty prefix),
+    `GroupClaim`, `GroupAllowPatterns`, `GroupMappings` (external-to-local map for "mapped").
+  - `IncludeLocalGroups` (default true), `AllowRefresh` (default false), `MaxTokenLifetimeSeconds`.
+
+  A client must additionally be blessed for external exchange (a per-client flag) before it may
+  present tokens from these issuers.
+type: object
+default: []
+components: ["origin"]
+---
 name: Issuer.RedirectUris
 description: |+
   The list of redirect URIs for Issuer Clients to use in the Authorization Code Flow. Used to enable the use of a

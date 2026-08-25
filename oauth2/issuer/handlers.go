@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,7 +33,6 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/pelicanplatform/pelican/database"
-	"github.com/pelicanplatform/pelican/oa4mp"
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/token_scopes"
@@ -127,9 +127,19 @@ func RegisterRoutesWithMiddleware(engine *gin.Engine, registry *ProviderRegistry
 // authorization) is applied through Gin's native route-group mechanism
 // rather than being invoked manually inside the dispatch handler.
 //
-// URL scheme: /api/v1.0/issuer/admin/ns/*namespace/clients[/{id}]
+// URL scheme:
+//
+//	/api/v1.0/issuer/admin/ns/*namespace/clients[/{id}]
+//	/api/v1.0/issuer/admin/ns/*namespace/external-issuers[/{id}[/probe|/dry-run|/group-maps[/{mapId}]]]
 func RegisterAdminRoutes(engine *gin.Engine, registry *ProviderRegistry, middleware ...gin.HandlerFunc) {
 	allMiddleware := append([]gin.HandlerFunc{NamespaceMiddleware(registry)}, middleware...)
+	// Namespace listing sits outside the /ns group because it is not scoped to
+	// one namespace — it is how a caller (the web UI in particular) discovers
+	// which namespaces have an issuer at all, since that depends on which
+	// exports need authentication rather than on any single config value.
+	engine.GET("/api/v1.0/issuer/admin/namespaces", append(append([]gin.HandlerFunc{}, middleware...),
+		handleAdminListNamespaces(registry))...)
+
 	adminGroup := engine.Group("/api/v1.0/issuer/admin/ns", allMiddleware...)
 	adminGroup.GET("/*namespace", handleAdminDispatch)
 	adminGroup.POST("/*namespace", handleAdminDispatch)
@@ -419,57 +429,13 @@ func handleAuthorize(provider *OIDCProvider) gin.HandlerFunc {
 			return
 		}
 
-		// Calculate allowed scopes for this user using per-namespace rules
-		// when available, falling back to the global rules.
-		var allowedScopes []string
-		var matchedGroups []string
-		if len(provider.AuthzRules) > 0 {
-			allowedScopes, matchedGroups = oa4mp.CalculateAllowedScopesWithRules(provider.AuthzRules, user, userID, groups)
-		} else {
-			allowedScopes, matchedGroups = oa4mp.CalculateAllowedScopes(user, userID, groups)
-		}
-		serverDB := database.ServerDatabase
-		if serverDB == nil {
-			serverDB = provider.storage.db
-		}
-		collectionScopes, collectionGroups, colErr := oa4mp.GetUserCollectionScopes(serverDB, user, userID, groups, provider.Namespace)
-		if colErr != nil {
-			log.WithError(colErr).Warn("Embedded issuer: failed to get collection scopes")
-		} else {
-			allowedScopes = append(allowedScopes, collectionScopes...)
-			matchedGroups = oa4mp.MergeGroups(matchedGroups, collectionGroups)
-		}
-
-		// Filter requested scopes to what the user is allowed.
-		// When a requested scope is broader than what's permitted,
-		// substitute in all narrower allowed scopes that fall under it.
-		//
-		// Standard OIDC scopes (openid, offline_access, wlcg, profile,
-		// email) are protocol-level and not governed by the user's data
-		// authorization rules. They bypass the user-authorization check
-		// but are still subject to the client's configured scope list so
-		// that operators can restrict which clients receive them.
-		clientScopes := ar.GetClient().GetScopes()
-		for _, scope := range ar.GetRequestedScopes() {
-			scope = cleanScopePath(scope)
-			var candidates []string
-			switch {
-			case scope == "pelican.transfer":
-				// Authorization-gated, not a free standard scope: granted only
-				// to users permitted to use the transfer API.
-				if transferAccessAllowed(serverDB, userID, groups) {
-					candidates = []string{scope}
-				}
-			case isStandardScope(scope) || scopeAllowed(scope, allowedScopes):
-				candidates = []string{scope}
-			default:
-				candidates = collectNarrowerScopes(scope, allowedScopes)
-			}
-			for _, s := range candidates {
-				if scopeAllowed(s, clientScopes) {
-					ar.GrantScope(s)
-				}
-			}
+		// Calculate what this user may be granted, then narrow the request to
+		// it. Shared with the device-code and token-exchange flows so that all
+		// three cannot drift apart; see scope_pipeline.go.
+		authz := provider.authorizeUser(user, userID, groups)
+		matchedGroups := authz.matchedGroups
+		for _, s := range authz.grantable(ar.GetRequestedScopes(), ar.GetClient().GetScopes()) {
+			ar.GrantScope(s)
 		}
 
 		// Grant the WLCG wildcard audience so that caches (and any
@@ -701,23 +667,10 @@ func handleDeviceVerifySubmit(provider *OIDCProvider) gin.HandlerFunc {
 			return
 		}
 
-		// Calculate allowed scopes using per-namespace rules when available
-		var allowedScopes []string
-		var matchedGroups []string
-		if len(provider.AuthzRules) > 0 {
-			allowedScopes, matchedGroups = oa4mp.CalculateAllowedScopesWithRules(provider.AuthzRules, user, userID, groups)
-		} else {
-			allowedScopes, matchedGroups = oa4mp.CalculateAllowedScopes(user, userID, groups)
-		}
-		serverDB := database.ServerDatabase
-		if serverDB == nil {
-			serverDB = provider.storage.db
-		}
-		collectionScopes, collectionGroups, colErr := oa4mp.GetUserCollectionScopes(serverDB, user, userID, groups, provider.Namespace)
-		if colErr == nil {
-			allowedScopes = append(allowedScopes, collectionScopes...)
-			matchedGroups = oa4mp.MergeGroups(matchedGroups, collectionGroups)
-		}
+		// Calculate what this user may be granted (see scope_pipeline.go —
+		// shared with the authorization-code and token-exchange flows).
+		authz := provider.authorizeUser(user, userID, groups)
+		matchedGroups := authz.matchedGroups
 
 		// Parse requested scopes from the device code session
 		var requestedScopes []string
@@ -725,30 +678,7 @@ func handleDeviceVerifySubmit(provider *OIDCProvider) gin.HandlerFunc {
 			requestedScopes = []string{}
 		}
 
-		// Filter scopes — when a requested scope is broader than what's
-		// permitted, substitute in all narrower allowed scopes.
-		// Standard OIDC scopes (openid, offline_access, etc.) bypass
-		// the user-authorization check (they are protocol-level, not
-		// data-access scopes) but are still filtered against the
-		// client's configured scope list in the second pass below.
-		grantedScopes := make([]string, 0)
-		for _, scope := range requestedScopes {
-			scope = cleanScopePath(scope)
-			switch {
-			case scope == "pelican.transfer":
-				// Authorization-gated, not a free standard scope: granted only
-				// to users permitted to use the transfer API.
-				if transferAccessAllowed(serverDB, userID, groups) {
-					grantedScopes = append(grantedScopes, scope)
-				}
-			case isStandardScope(scope) || scopeAllowed(scope, allowedScopes):
-				grantedScopes = append(grantedScopes, scope)
-			default:
-				grantedScopes = append(grantedScopes, collectNarrowerScopes(scope, allowedScopes)...)
-			}
-		}
-
-		// Also enforce the client's configured scope allow-list: a device
+		// Enforce the client's configured scope allow-list too: a device
 		// client limited to certain scopes must not obtain broader scopes
 		// even if the user's authorization rules would permit them.
 		clientObj, clientErr := provider.Storage().GetClient(ctx, dc.ClientID)
@@ -758,13 +688,7 @@ func handleDeviceVerifySubmit(provider *OIDCProvider) gin.HandlerFunc {
 			return
 		}
 		clientScopes := clientObj.GetScopes()
-		filteredScopes := make([]string, 0, len(grantedScopes))
-		for _, scope := range grantedScopes {
-			if scopeAllowed(scope, clientScopes) {
-				filteredScopes = append(filteredScopes, scope)
-			}
-		}
-		grantedScopes = filteredScopes
+		grantedScopes := authz.grantable(requestedScopes, clientScopes)
 
 		issuerURL := provider.Issuer()
 		session := DefaultOIDCSession(user, issuerURL, matchedGroups, grantedScopes)
@@ -1417,6 +1341,24 @@ func deviceViewURL(namespace, userCode string) string {
 // endpoints registered via RegisterAdminRoutes.  It is reached through
 // a Gin route group that already applied namespace resolution and admin
 // authentication middleware.
+// handleAdminListNamespaces reports the federation namespaces that have an
+// embedded issuer, so callers do not have to infer them from Origin.Exports and
+// the rules about which exports need authentication.
+//
+//	@Summary		List issuer namespaces
+//	@Description	Returns the federation namespaces that have an embedded OIDC issuer.
+//	@Tags			issuer-admin
+//	@Produce		json
+//	@Success		200	{array}	string
+//	@Router			/issuer/admin/namespaces [get]
+func handleAdminListNamespaces(registry *ProviderRegistry) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		ns := registry.Namespaces()
+		sort.Strings(ns)
+		ctx.JSON(http.StatusOK, ns)
+	}
+}
+
 func handleAdminDispatch(ctx *gin.Context) {
 	provider := GetProvider(ctx)
 	if provider == nil {
@@ -1427,6 +1369,27 @@ func handleAdminDispatch(ctx *gin.Context) {
 	action := strings.TrimPrefix(ActionSuffix(ctx), "/")
 
 	switch {
+	case action == "external-issuers" && ctx.Request.Method == http.MethodGet:
+		// External issuers are configured, not stored — this surface is
+		// read-only: list, and the probe/dry-run diagnostics addressed by the
+		// issuer's configured name.
+		handleAdminListExternalIssuers(provider)(ctx)
+	case strings.HasPrefix(action, "external-issuers/"):
+		rest := strings.TrimPrefix(action, "external-issuers/")
+		name := rest
+		sub := ""
+		if slash := strings.IndexByte(rest, '/'); slash >= 0 {
+			name, sub = rest[:slash], rest[slash+1:]
+		}
+		ctx.Params = append(ctx.Params, gin.Param{Key: "id", Value: name})
+		switch {
+		case sub == "probe" && ctx.Request.Method == http.MethodPost:
+			handleAdminProbeExternalIssuer(provider)(ctx)
+		case sub == "dry-run" && ctx.Request.Method == http.MethodPost:
+			handleAdminDryRunExternalIssuer(provider)(ctx)
+		default:
+			ctx.JSON(http.StatusNotFound, gin.H{"error": "not_found"})
+		}
 	case action == "clients" && ctx.Request.Method == http.MethodGet:
 		handleAdminListClients(provider)(ctx)
 	case action == "clients" && ctx.Request.Method == http.MethodPost:

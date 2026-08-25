@@ -1844,6 +1844,12 @@ definitions:
           type: string
       public:
         type: boolean
+      allow_external_token_exchange:
+        type: boolean
+        description: >-
+          Whether this client may exchange tokens from the namespace's configured
+          external issuers (all-or-none). Default false means it may exchange only
+          tokens this server itself issued.
       created_at:
         type: string
         description: When this client was created
@@ -1879,6 +1885,12 @@ definitions:
           type: string
       public:
         type: boolean
+      allow_external_token_exchange:
+        type: boolean
+        description: >-
+          Whether this client may exchange tokens from the namespace's configured
+          external issuers (all-or-none). Default false means it may exchange only
+          tokens this server itself issued.
   IssuerAdminUpdateClientRequest:
     type: object
     description: >-
@@ -1907,6 +1919,191 @@ definitions:
         description: Scopes the client is allowed to request
         items:
           type: string
+      allow_external_token_exchange:
+        type: boolean
+        description: >-
+          Whether this client may exchange tokens from the namespace's configured
+          external issuers (all-or-none). Default false means it may exchange only
+          tokens this server itself issued.
+  ExternalIssuerDetail:
+    type: object
+    description: >-
+      A trusted external OAuth2/OIDC issuer (from configuration) whose access
+      tokens may be exchanged (RFC 8693) for tokens minted by this server's
+      embedded issuer. The exchanged token's authorizations are always computed
+      from the mapped local Pelican user's own rules; the external token's scopes
+      are a precondition for accepting it, never a source of authority.
+    properties:
+      name:
+        type: string
+        description: Short admin label; also the default group-name prefix.
+        example: "keycloak"
+      issuer_url:
+        type: string
+        description: >-
+          Matched against the subject token's `iss` claim by exact string
+          equality (after trimming one trailing slash). No prefix or host-only
+          matching.
+        example: "https://keycloak.example.org/realms/project"
+      jwks_url:
+        type: string
+        description: Optional override; when empty the JWKS URI comes from OIDC discovery.
+      enabled:
+        type: boolean
+      required_audiences:
+        type: array
+        description: >-
+          The subject token must carry at least one of these in its `aud` claim.
+          Without it, every token the issuer mints for any of its clients would
+          be accepted here, which is why an empty list is refused unless
+          allow_any_audience is set.
+        items:
+          type: string
+      allow_any_audience:
+        type: boolean
+        description: Deliberate acknowledgment that tokens for any audience are accepted.
+      required_scopes:
+        type: array
+        description: >-
+          Scopes the subject token must carry to be eligible for exchange. These
+          gate acceptance only; they do not influence the scopes granted.
+        items:
+          type: string
+      required_claims:
+        type: object
+        description: Exact-match claim requirements, e.g. pinning `azp` to one client.
+        additionalProperties:
+          type: string
+      allowed_algorithms:
+        type: array
+        description: >-
+          Permitted JWS algorithms. Asymmetric only — an HMAC-accepting verifier
+          holding the issuer's public JWKS is a key-confusion hazard.
+        items:
+          type: string
+      subject_claim:
+        type: string
+      username_claims:
+        type: array
+        description: Ordered candidates for a username when enrolling a new account.
+        items:
+          type: string
+      auto_enroll:
+        type: boolean
+        description: Create a Pelican account on first sight of an unknown identity.
+      group_claim:
+        type: string
+      group_mode:
+        type: string
+        enum: ["ignore", "claim"]
+      group_prefix:
+        type: string
+        description: >-
+          Prefix applied to external group names. Group names are bearer
+          authority ($GROUP in Issuer.AuthorizationTemplates), so foreign names
+          are namespaced by default; an empty prefix requires allow_flat_groups.
+        example: "keycloak:"
+      allow_flat_groups:
+        type: boolean
+      group_allow_patterns:
+        type: array
+        description: Regular expressions; only matching external groups are kept.
+        items:
+          type: string
+      include_local_groups:
+        type: boolean
+        description: Union the mapped user's local Pelican group memberships.
+      allow_refresh:
+        type: boolean
+        description: >-
+          Whether an exchange may return a refresh token. Off by default: a
+          refresh token outlives the external session that justified it.
+      group_mappings:
+        type: object
+        description: External-to-local group table used when group_mode is "mapped".
+        additionalProperties:
+          type: string
+      max_token_lifetime_seconds:
+        type: integer
+        description: >-
+          Cap on the exchanged token's lifetime. The subject token's own
+          expiry caps it further, so a Pelican token never outlives the
+          assertion behind it.
+  ExternalIssuerProbeResponse:
+    type: object
+    description: Result of fetching an external issuer's discovery document and JWKS.
+    properties:
+      ok:
+        type: boolean
+      issuer_url:
+        type: string
+      jwks_url:
+        type: string
+      key_count:
+        type: integer
+      key_ids:
+        type: array
+        items:
+          type: string
+      algorithms:
+        type: array
+        items:
+          type: string
+      error:
+        type: string
+  ExternalIssuerDryRunRequest:
+    type: object
+    required:
+      - subject_token
+    properties:
+      subject_token:
+        type: string
+        description: A sample access token from the external issuer.
+      client_id:
+        type: string
+        description: >-
+          Evaluate against this client's scope allow-list, so the answer matches
+          what that client would actually receive.
+      scopes:
+        type: array
+        items:
+          type: string
+  ExternalIssuerDryRunResponse:
+    type: object
+    description: >-
+      What an exchange of the sample token would produce. Nothing is minted and
+      no state changes.
+    properties:
+      ok:
+        type: boolean
+      error:
+        type: string
+      external_issuer:
+        type: string
+      external_subject:
+        type: string
+      username:
+        type: string
+      user_id:
+        type: string
+      would_enroll:
+        type: boolean
+        description: True when no account is linked yet and one would be created.
+      groups:
+        type: array
+        items:
+          type: string
+      matched_groups:
+        type: array
+        description: The groups that actually drove an authorization.
+        items:
+          type: string
+      granted_scopes:
+        type: array
+        items:
+          type: string
+      lifetime_seconds:
+        type: integer
   CacheObjectInstance:
     type: object
     description: A cached instance of an object with a specific ETag
@@ -8009,6 +8206,131 @@ paths:
             $ref: "#/definitions/ErrorModelV2"
         "404":
           description: Client not found
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: Internal server error
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+  /issuer/admin/external-issuers:
+    get:
+      tags:
+        - issuer-admin
+      summary: List trusted external issuers
+      description: >-
+        `Admin privilege Required`.
+        Lists the external OAuth2/OIDC issuers whose access tokens may be exchanged
+        (RFC 8693) for tokens minted by this server's embedded issuer.
+      produces:
+        - application/json
+      responses:
+        "200":
+          description: List of trusted external issuers
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/ExternalIssuerDetail"
+        "401":
+          description: Authentication required
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: Admin privilege required
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: Internal server error
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+  /issuer/admin/external-issuers/{name}/probe:
+    post:
+      tags:
+        - issuer-admin
+      summary: Probe a trusted external issuer
+      description: >-
+        `Admin privilege Required`.
+        Performs OIDC discovery and fetches the issuer's JWKS immediately,
+        reporting key count and algorithms. Any cached key material for this
+        issuer is discarded first, so a probe always reflects the live state.
+
+
+        Use it to confirm connectivity and configuration without producing a token.
+      produces:
+        - application/json
+      parameters:
+        - in: path
+          name: name
+          type: string
+          required: true
+          description: Configured external issuer name
+      responses:
+        "200":
+          description: Probe result (check the `ok` field; a reachable failure is reported here, not as an error status)
+          schema:
+            $ref: "#/definitions/ExternalIssuerProbeResponse"
+        "404":
+          description: External issuer not found
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "401":
+          description: Authentication required
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: Admin privilege required
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: Internal server error
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+  /issuer/admin/external-issuers/{name}/dry-run:
+    post:
+      tags:
+        - issuer-admin
+      summary: Dry-run an external token exchange
+      description: >-
+        `Admin privilege Required`.
+        Evaluates a sample subject token through the same decision path a live
+        exchange takes, and reports the resolved Pelican user (or that one would
+        be enrolled), the groups, and the scopes that would be granted.
+
+
+        Nothing is minted and no state changes.
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      parameters:
+        - in: path
+          name: name
+          type: string
+          required: true
+          description: Configured external issuer name
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: "#/definitions/ExternalIssuerDryRunRequest"
+      responses:
+        "200":
+          description: Dry-run result (check the `ok` field; a refused token is reported here, not as an error status)
+          schema:
+            $ref: "#/definitions/ExternalIssuerDryRunResponse"
+        "400":
+          description: Missing subject_token or unknown client_id
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "404":
+          description: External issuer not found
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "401":
+          description: Authentication required
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: Admin privilege required
           schema:
             $ref: "#/definitions/ErrorModelV2"
         "500":

@@ -65,6 +65,27 @@ func IsACLGroupVirtual(name string) bool {
 	return name == AllAuthenticatedUsersACLGroup
 }
 
+// PersonalACLGroupPrefix is the prefix of the implicit per-user group every
+// account belongs to: ExpandCallerACLGroups synthesizes "user-<username>" so a
+// collection ACL can grant a role to one specific user. Because that name is
+// bearer authority derived purely from the caller's username, any OTHER source
+// of group names (notably a foreign identity provider's group claim) must never
+// be allowed to assert a "user-*" name — doing so would let it impersonate a
+// user's personal grants. See IsReservedACLGroupName.
+const PersonalACLGroupPrefix = "user-"
+
+// IsReservedACLGroupName reports whether `name` is a group name the ACL layer
+// treats as bearer authority tied to identity rather than to an ordinary,
+// admin-governed group: the all-authenticated sentinel, or a personal
+// "user-<username>" group. Group names arriving from outside the local group
+// system — an external issuer's token, above all — must be rejected when they
+// match, or they can inherit another principal's authority. This is the single
+// definition both the ACL synthesis (ExpandCallerACLGroups) and the external
+// group ingestion consult, so the two cannot drift.
+func IsReservedACLGroupName(name string) bool {
+	return name == AllAuthenticatedUsersACLGroup || strings.HasPrefix(name, PersonalACLGroupPrefix)
+}
+
 var (
 	ScopeToRole map[token_scopes.TokenScope][]AclRole = map[token_scopes.TokenScope][]AclRole{
 		token_scopes.Collection_Read:   {AclRoleRead, AclRoleWrite, AclRoleOwner},
@@ -168,7 +189,7 @@ func ExpandCallerACLGroups(db *gorm.DB, user, userID string, groups []string) []
 		}
 	}
 	if user != "" {
-		userGroup := "user-" + user
+		userGroup := PersonalACLGroupPrefix + user
 		if !slices.Contains(out, userGroup) {
 			out = append(out, userGroup)
 		}
@@ -506,6 +527,13 @@ const (
 	// created_by column. Treat as "we don't know" — not as a security
 	// claim about the account.
 	CreatorUnknown = "unknown"
+	// CreatorExternalExchange marks accounts auto-created when a token from
+	// a trusted external issuer was exchanged for a local one. Like
+	// CreatorSelfEnrolled the user enrolled themselves by authenticating,
+	// but the authentication happened at a foreign IdP, so these are kept
+	// distinguishable: an operator who mistrusts an external issuer after
+	// the fact needs to be able to find everything it enrolled.
+	CreatorExternalExchange = "external-exchange"
 )
 
 // Creator bundles the audit fields recorded at every record-creation

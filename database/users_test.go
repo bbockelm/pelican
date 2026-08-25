@@ -663,6 +663,31 @@ func TestDeleteUserIdentityAllowsUnlinkWhenAnotherRemains(t *testing.T) {
 	assert.Len(t, remaining, 1)
 }
 
+// TestLookupOrBootstrapUserWithCreatorStampsCreator verifies that accounts
+// enrolled through a path other than web login stay identifiable afterwards —
+// an operator who later mistrusts an external issuer needs to be able to find
+// everything it brought in.
+func TestLookupOrBootstrapUserWithCreatorStampsCreator(t *testing.T) {
+	db := setupCollectionTestDB(t)
+
+	creator := Creator{
+		UserID:       CreatorExternalExchange,
+		AuthMethod:   AuthMethodBearerJWT,
+		AuthMethodID: "issuer-row-id",
+	}
+	user, err := LookupOrBootstrapUserWithCreator(db, "kc-sub", "https://kc.example.org", "Bob",
+		[]string{"bob"}, creator)
+	require.NoError(t, err)
+	assert.Equal(t, CreatorExternalExchange, user.CreatedBy)
+	assert.Equal(t, "issuer-row-id", user.CreatorAuthMethodID)
+
+	// A return visit resolves the same account and does not re-stamp it.
+	again, err := LookupOrBootstrapUser(db, "kc-sub", "https://kc.example.org", "Bob", []string{"bob"})
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, again.ID)
+	assert.Equal(t, CreatorExternalExchange, again.CreatedBy)
+}
+
 // TestDeleteUserFreesIdentityForReEnrollment is the regression for the orphaned-
 // identity bug: DeleteUser soft-deletes the user row but must hard-delete its
 // identities, or the (sub, issuer) stays reserved by the non-partial unique

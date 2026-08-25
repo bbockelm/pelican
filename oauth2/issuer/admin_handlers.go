@@ -48,6 +48,10 @@ type AdminCreateClientRequest struct {
 	Scopes []string `json:"scopes"`
 	// Public indicates whether this client is a public (no secret) client.
 	Public bool `json:"public"`
+	// AllowExternalTokenExchange blesses this client to exchange tokens from the
+	// namespace's configured external issuers (all-or-none). False (default)
+	// means it may only exchange tokens this server issued.
+	AllowExternalTokenExchange bool `json:"allow_external_token_exchange"`
 }
 
 // AdminClientResponse is the JSON returned when listing or retrieving a client.
@@ -58,7 +62,10 @@ type AdminClientResponse struct {
 	ResponseTypes []string `json:"response_types"`
 	Scopes        []string `json:"scopes"`
 	Public        bool     `json:"public"`
-	CreatedAt     string   `json:"created_at"`
+	// AllowExternalTokenExchange reports whether this client may exchange tokens
+	// from the namespace's configured external issuers.
+	AllowExternalTokenExchange bool   `json:"allow_external_token_exchange"`
+	CreatedAt                  string `json:"created_at"`
 }
 
 // AdminCreateClientResponse extends AdminClientResponse with the plaintext
@@ -224,14 +231,28 @@ func handleAdminCreateClient(provider *OIDCProvider) gin.HandlerFunc {
 
 		resp := AdminCreateClientResponse{
 			AdminClientResponse: AdminClientResponse{
-				ClientID:      clientID,
-				RedirectURIs:  req.RedirectURIs,
-				GrantTypes:    req.GrantTypes,
-				ResponseTypes: req.ResponseTypes,
-				Scopes:        req.Scopes,
-				Public:        req.Public,
+				ClientID:                   clientID,
+				RedirectURIs:               req.RedirectURIs,
+				GrantTypes:                 req.GrantTypes,
+				ResponseTypes:              req.ResponseTypes,
+				Scopes:                     req.Scopes,
+				Public:                     req.Public,
+				AllowExternalTokenExchange: req.AllowExternalTokenExchange,
 			},
 			ClientSecret: clientSecret,
+		}
+
+		// fosite.DefaultClient has no field for this, so it is written as a
+		// follow-up update rather than threaded through CreateClient. Surface a
+		// failure instead of returning 201 with the flag that was never
+		// persisted.
+		if req.AllowExternalTokenExchange {
+			allow := true
+			if _, uErr := provider.Storage().UpdateClient(ctx, clientID, ClientUpdate{AllowExternalExchange: &allow}); uErr != nil {
+				log.WithError(uErr).Warn("Embedded issuer admin: failed to set allow_external_token_exchange on new client")
+				ctx.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "Client created, but failed to set allow_external_token_exchange"})
+				return
+			}
 		}
 
 		ctx.JSON(http.StatusCreated, resp)
@@ -271,10 +292,11 @@ func handleAdminDeleteClient(provider *OIDCProvider) gin.HandlerFunc {
 // AdminUpdateClientRequest is the JSON body for PUT /admin/clients/:id.
 // All fields are optional; only provided fields are updated.
 type AdminUpdateClientRequest struct {
-	RedirectURIs  *[]string `json:"redirect_uris"`
-	GrantTypes    *[]string `json:"grant_types"`
-	ResponseTypes *[]string `json:"response_types"`
-	Scopes        *[]string `json:"scopes"`
+	RedirectURIs               *[]string `json:"redirect_uris"`
+	GrantTypes                 *[]string `json:"grant_types"`
+	ResponseTypes              *[]string `json:"response_types"`
+	Scopes                     *[]string `json:"scopes"`
+	AllowExternalTokenExchange *bool     `json:"allow_external_token_exchange"`
 }
 
 // handleAdminUpdateClient updates mutable fields of an existing client.
@@ -319,10 +341,11 @@ func handleAdminUpdateClient(provider *OIDCProvider) gin.HandlerFunc {
 		}
 
 		update := ClientUpdate{
-			RedirectURIs:  req.RedirectURIs,
-			GrantTypes:    req.GrantTypes,
-			ResponseTypes: req.ResponseTypes,
-			Scopes:        req.Scopes,
+			RedirectURIs:          req.RedirectURIs,
+			GrantTypes:            req.GrantTypes,
+			ResponseTypes:         req.ResponseTypes,
+			Scopes:                req.Scopes,
+			AllowExternalExchange: req.AllowExternalTokenExchange,
 		}
 
 		updated, err := provider.Storage().UpdateClient(ctx, clientID, update)
@@ -409,16 +432,48 @@ func handleTokenExchange(ctx *gin.Context, provider *OIDCProvider) {
 	if subjectTokenType == "" {
 		subjectTokenType = "urn:ietf:params:oauth:token-type:access_token"
 	}
-	if subjectTokenType != "urn:ietf:params:oauth:token-type:access_token" {
+	// `jwt` is accepted alongside `access_token` because a bearer JWT from a
+	// foreign issuer is legitimately describable either way, and RFC 8693
+	// leaves the choice to the client. `id_token` is deliberately NOT accepted:
+	// an ID token is audienced to a *client*, not to a resource server, so
+	// honoring one here would invite confused-deputy problems.
+	if subjectTokenType != "urn:ietf:params:oauth:token-type:access_token" &&
+		subjectTokenType != "urn:ietf:params:oauth:token-type:jwt" {
 		ctx.JSON(http.StatusBadRequest, gin.H{
 			"error":             "invalid_request",
-			"error_description": "Only subject_token_type=urn:ietf:params:oauth:token-type:access_token is supported",
+			"error_description": "Only subject_token_type=urn:ietf:params:oauth:token-type:access_token or :jwt is supported",
 		})
 		return
 	}
 
-	// Introspect the subject token — this validates signature, expiry, etc.
 	issuerURL := IssuerURLForNamespace(provider.Namespace)
+
+	// Parse the requested scopes once; both the local and the external path
+	// need them.
+	requestedScopeStr := r.FormValue("scope")
+	var requestedScopes []string
+	if requestedScopeStr != "" {
+		requestedScopes = strings.Split(requestedScopeStr, " ")
+	}
+
+	// A subject token claiming an issuer other than our own is handled by the
+	// external path, which verifies it against a trusted external issuer's
+	// keys and derives authorizations from the mapped local user. Dispatching
+	// on the issuer up front — rather than trying local introspection and
+	// falling back — keeps a locally-issued token from ever being evaluated
+	// under foreign-issuer policy, or vice versa.
+	if subjectTokenIsExternal(subjectToken, issuerURL) {
+		clientDetail, cdErr := provider.Storage().GetClientDetail(rCtx, clientID)
+		if cdErr != nil {
+			log.WithError(cdErr).Warn("Embedded issuer: failed to load client for token exchange")
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "Failed to load client"})
+			return
+		}
+		handleExternalTokenExchange(ctx, provider, client, dc, clientDetail.AllowExternalExchange, subjectToken, requestedScopes)
+		return
+	}
+
+	// Introspect the subject token — this validates signature, expiry, etc.
 	introSession := DefaultOIDCSession("", issuerURL, nil, nil)
 	_, subjectAR, err := provider.Provider().IntrospectToken(rCtx, subjectToken, fosite.AccessToken, introSession)
 	if err != nil {
@@ -431,12 +486,6 @@ func handleTokenExchange(ctx *gin.Context, provider *OIDCProvider) {
 	}
 
 	// ---- Determine scopes for the exchanged token ----
-	requestedScopeStr := r.FormValue("scope")
-	var requestedScopes []string
-	if requestedScopeStr != "" {
-		requestedScopes = strings.Split(requestedScopeStr, " ")
-	}
-
 	// If no explicit scopes requested, inherit from the subject token.
 	subjectGrantedScopes := subjectAR.GetGrantedScopes()
 	if len(requestedScopes) == 0 {
@@ -507,6 +556,18 @@ func handleTokenExchange(ctx *gin.Context, provider *OIDCProvider) {
 	}
 
 	session := DefaultOIDCSession(subject, issuerURL, groups, grantedScopes)
+	// Preserve the act (RFC 8693 §4.1) claim across a local re-exchange so the
+	// provenance of an originally-external token is not laundered when its
+	// locally-issued product is exchanged again. A token minted directly here
+	// carries no act, so this is a no-op in the common case.
+	if ws, ok := subjectAR.GetSession().(*WLCGSession); ok && ws.JWTClaims != nil && ws.JWTClaims.Extra != nil {
+		if act, ok := ws.JWTClaims.Extra["act"]; ok && session.JWTClaims != nil {
+			if session.JWTClaims.Extra == nil {
+				session.JWTClaims.Extra = map[string]interface{}{}
+			}
+			session.JWTClaims.Extra["act"] = act
+		}
+	}
 	session.SetExpiresAt(fosite.AccessToken, time.Now().Add(provider.config.AccessTokenLifespan))
 	ar := fosite.NewAccessRequest(session)
 	ar.Client = client

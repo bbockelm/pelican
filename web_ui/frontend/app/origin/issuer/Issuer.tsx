@@ -43,6 +43,7 @@ import StatusSnackBar, {
   StatusSnackBarProps,
 } from '@/components/StatusSnackBar';
 import { ConfigDisplay } from '@/app/config/components';
+import { ExternalIssuers } from './components/ExternalIssuers';
 
 export function Issuer({ metadata }: { metadata: ParameterMetadataRecord }) {
   const [status, setStatus] = useState<StatusSnackBarProps | undefined>(
@@ -126,6 +127,14 @@ export function Issuer({ metadata }: { metadata: ParameterMetadataRecord }) {
                 metadata={metadata}
                 setPatch={setPatch}
               />
+            </Box>
+          )}
+          {/* Trusted external issuers are stored in the database and edited
+              live, not through the config file, so this sits outside the
+              config form and its save/restart cycle. */}
+          {configView?.['Origin.EnableIssuer'] && (
+            <Box pt={4}>
+              <ExternalIssuers />
             </Box>
           )}
           <Snackbar

@@ -541,6 +541,25 @@ func configureEmbeddedIssuer(ctx context.Context, egrp *errgroup.Group, engine *
 			provider.SetAuthzRules(rules)
 		}
 
+		// Trusted external issuers for token exchange: the export's own list
+		// overrides the global Issuer.ExternalIssuers, mirroring the
+		// AuthorizationTemplates precedence. Parsed and validated here so a bad
+		// configuration fails the launch with a clear error rather than at
+		// exchange time.
+		externalIssuerCfg := export.ExternalIssuers
+		if len(externalIssuerCfg) == 0 {
+			if err := param.Issuer_ExternalIssuers.Unmarshal(&externalIssuerCfg); err != nil {
+				return errors.Wrapf(err, "invalid Issuer.ExternalIssuers configuration")
+			}
+		}
+		if len(externalIssuerCfg) > 0 {
+			extIssuers, err := issuer.ParseExternalIssuers(externalIssuerCfg)
+			if err != nil {
+				return errors.Wrapf(err, "invalid ExternalIssuers configuration for namespace %s", namespace)
+			}
+			provider.SetExternalIssuers(extIssuers)
+		}
+
 		// Seed the pre-allocated public client for browser-based flows (PKCE).
 		if publicClientID != "" {
 			if err := provider.EnsurePublicClient(ctx, publicClientID, redirectURIs); err != nil {
@@ -578,6 +597,12 @@ func configureEmbeddedIssuer(ctx context.Context, egrp *errgroup.Group, engine *
 	if err := issuer.RegisterLocalProvider(ctx, egrp, registry, database.ServerDatabase, gracePeriod); err != nil {
 		return errors.Wrap(err, "failed to register local issuer")
 	}
+
+	// Bind the trusted-external-issuer JWKS cache to the server context so its
+	// background refresh goroutines are torn down on shutdown. This is a
+	// sync.Once; the first caller wins, so doing it here (with the real ctx)
+	// rather than lazily on the first exchange keeps teardown correct.
+	issuer.InitExternalKeyCache(ctx)
 
 	// Apply a non-aborting middleware to the issuer route group so that
 	// handlers which inspect ctx.GetString("User") (e.g., device-verify)

@@ -38,10 +38,86 @@ type OIDCClientRecord struct {
 	RegistrationIP          string
 	RegistrationAccessToken string
 	ClientName              string
-	CreatedAt               time.Time
+	// AllowExternalExchange blesses this client to exchange tokens from ANY of
+	// the namespace's configured external issuers (all-or-none). False (the
+	// default) means it may only exchange tokens this server issued.
+	AllowExternalExchange bool
+	CreatedAt             time.Time
 }
 
 func (OIDCClientRecord) TableName() string { return "oidc_clients" }
+
+// ExternalIssuerRecord maps to the oidc_external_issuers table: a foreign
+// OAuth2/OIDC issuer whose access tokens this server is willing to accept as
+// the subject_token of an RFC 8693 token exchange.
+//
+// The composite primary key (ID, Namespace) mirrors OIDCClientRecord so that a
+// multi-export origin can trust different identity providers for different
+// federation prefixes.
+//
+// JSON-encoded TEXT columns follow the convention already used for the client
+// record's RedirectURIs/GrantTypes/Scopes; use ExternalIssuerDetail (see
+// external_issuer.go) for the decoded, API-facing form.
+type ExternalIssuerRecord struct {
+	ID        string `gorm:"primaryKey"`
+	Namespace string `gorm:"primaryKey"`
+	Name      string
+	IssuerURL string
+	JWKSURL   string
+	Enabled   bool
+
+	// Preconditions on the subject token.
+	RequiredAudiences string // JSON []string
+	AllowAnyAudience  bool
+	RequiredScopes    string // JSON []string
+	RequiredClaims    string // JSON map[string]string
+	AllowedAlgorithms string // JSON []string
+
+	// Identity mapping.
+	SubjectClaim   string
+	UsernameClaims string // JSON []string
+	AutoEnroll     bool
+
+	// Group mapping.
+	GroupClaim         string
+	GroupMode          string
+	GroupPrefix        string
+	AllowFlatGroups    bool
+	GroupAllowPatterns string // JSON []string
+	IncludeLocalGroups bool
+
+	// Policy for the token minted in return.
+	AllowRefresh            bool
+	MaxTokenLifetimeSeconds int64
+
+	CreatedBy           string
+	CreatorAuthMethod   string
+	CreatorAuthMethodID string
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+func (ExternalIssuerRecord) TableName() string { return "oidc_external_issuers" }
+
+// ExternalGroupMapRecord maps to the oidc_external_group_maps table: one
+// external-group -> local-group correspondence for an issuer running in
+// "mapped" group mode.
+//
+// Unlike the prefixed names "claim" mode produces, a mapped local group is an
+// ordinary local group name and carries whatever that name carries. That is the
+// point of the mode, and the reason it is opt-in per issuer.
+type ExternalGroupMapRecord struct {
+	ID               string `gorm:"primaryKey"`
+	Namespace        string
+	ExternalIssuerID string
+	ExternalGroup    string
+	LocalGroup       string
+	CreatedBy        string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+func (ExternalGroupMapRecord) TableName() string { return "oidc_external_group_maps" }
 
 // OIDCTokenSession maps to the oidc_access_tokens, oidc_authorization_codes,
 // oidc_pkce_requests, and oidc_openid_sessions tables. It is also used to

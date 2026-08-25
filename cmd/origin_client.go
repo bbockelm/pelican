@@ -49,11 +49,12 @@ var (
 		Long:  `Provides commands to create, list, update, and delete OIDC clients configured on the origin's embedded token issuer.`,
 	}
 
-	issuerClientServerURL  string
-	issuerClientTokenPath  string
-	issuerClientNamespace  string
-	issuerClientGrantTypes string
-	issuerClientScopes     string
+	issuerClientServerURL             string
+	issuerClientTokenPath             string
+	issuerClientNamespace             string
+	issuerClientGrantTypes            string
+	issuerClientScopes                string
+	issuerClientAllowExternalExchange bool
 
 	originIssuerClientCreateCmd = &cobra.Command{
 		Use:   "create",
@@ -69,7 +70,11 @@ Accepted values (comma-separated):
 
 Example — create a token-exchange client:
   pelican-server origin issuer client create --server https://my-origin:8447 \
-    --grant-types "urn:ietf:params:oauth:grant-type:token-exchange,refresh_token"`,
+    --grant-types "urn:ietf:params:oauth:grant-type:token-exchange,refresh_token"
+
+The token-exchange grant by itself only permits exchanging tokens this server issued.
+To let a client present a token from a trusted external issuer, name that issuer with
+--allow-external-exchange (see "pelican-server origin issuer external-issuer list").`,
 		RunE: issuerClientCreateRun,
 	}
 
@@ -119,6 +124,7 @@ func init() {
 	originIssuerClientCmd.AddCommand(originIssuerClientCreateCmd)
 	originIssuerClientCreateCmd.Flags().StringVar(&issuerClientGrantTypes, "grant-types", "", "Comma-separated list of grant types (required)")
 	originIssuerClientCreateCmd.Flags().StringVar(&issuerClientScopes, "scopes", "", "Comma-separated list of scopes (optional; defaults to common WLCG scopes)")
+	originIssuerClientCreateCmd.Flags().BoolVar(&issuerClientAllowExternalExchange, "allow-external-exchange", false, "Bless this client to exchange tokens from the namespace's configured external issuers (all-or-none); default is local subject tokens only")
 	if err := originIssuerClientCreateCmd.MarkFlagRequired("grant-types"); err != nil {
 		log.Errorln("Failed to mark grant-types flag as required:", err)
 	}
@@ -131,6 +137,7 @@ func init() {
 	originIssuerClientUpdateCmd.Flags().StringVar(&issuerClientUpdateID, "id", "", "Client ID to update (required)")
 	originIssuerClientUpdateCmd.Flags().StringVar(&issuerClientGrantTypes, "grant-types", "", "Comma-separated list of grant types")
 	originIssuerClientUpdateCmd.Flags().StringVar(&issuerClientScopes, "scopes", "", "Comma-separated list of scopes")
+	originIssuerClientUpdateCmd.Flags().BoolVar(&issuerClientAllowExternalExchange, "allow-external-exchange", false, "Bless (true) or revoke (false) this client's ability to exchange tokens from the namespace's configured external issuers")
 	if err := originIssuerClientUpdateCmd.MarkFlagRequired("id"); err != nil {
 		log.Errorln("Failed to mark id flag as required:", err)
 	}
@@ -203,6 +210,9 @@ func issuerClientCreateRun(cmd *cobra.Command, args []string) error {
 	}
 	if len(scopes) > 0 {
 		payload["scopes"] = scopes
+	}
+	if cmd.Flags().Changed("allow-external-exchange") {
+		payload["allow_external_token_exchange"] = issuerClientAllowExternalExchange
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -353,9 +363,12 @@ func issuerClientUpdateRun(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("scopes") {
 		payload["scopes"] = splitAndTrim(issuerClientScopes)
 	}
+	if cmd.Flags().Changed("allow-external-exchange") {
+		payload["allow_external_token_exchange"] = issuerClientAllowExternalExchange
+	}
 
 	if len(payload) == 0 {
-		return errors.New("At least one of --grant-types or --scopes must be provided")
+		return errors.New("At least one of --grant-types, --scopes, or --allow-external-exchange must be provided")
 	}
 
 	targetURL, err := constructIssuerAdminURL(issuerClientServerURL, issuerAdminClientsAPIPath()+"/"+url.PathEscape(issuerClientUpdateID))
