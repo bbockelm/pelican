@@ -845,6 +845,12 @@ func registerCommonEndpoints(routerGroup *gin.RouterGroup) error {
 		userRouterGroup.GET("/:id/identities", handleListUserIdentities)
 		userRouterGroup.POST("/:id/identities", AdminAuthHandler, handleAddUserIdentity)
 		userRouterGroup.DELETE("/:id/identities/:identityId", AdminAuthHandler, handleDeleteUserIdentity)
+		// Adoption moves an EXISTING identity between accounts to fix a
+		// mis-enrollment. Unlike add/delete above it stays at the group's
+		// UserAdminAuthHandler level (a user-admin's routine correction task);
+		// the handler itself escalates to requiring a system admin whenever a
+		// system-admin account is the source or target of the move.
+		userRouterGroup.POST("/:id/identities/adopt", handleAdoptUserIdentity)
 	}
 
 	// Self-service endpoints for any authenticated user. These never accept a

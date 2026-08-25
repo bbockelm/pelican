@@ -1460,6 +1460,19 @@ definitions:
       updatedAt:
         type: string
         format: date-time
+  AdoptUserIdentityReq:
+    type: object
+    description: >-
+      The identity to move onto this user, taken from whichever account
+      currently holds it.
+    required:
+      - sub
+      - issuer
+    properties:
+      sub:
+        type: string
+      issuer:
+        type: string
   Me:
     description: >-
       The calling user's own record (returned by GET /me). Identical
@@ -7337,6 +7350,64 @@ paths:
             $ref: "#/definitions/ErrorModelV2"
         "404":
           description: Scope was not directly granted to this user
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: Internal server error
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+  /users/{id}/identities/adopt:
+    post:
+      tags:
+        - users
+      summary: Adopt an identity onto a user
+      description: >-
+        `User-admin privilege Required` (server.admin or server.user_admin);
+        `system-admin privilege Required` when a system-admin account is the
+        source or target of the move, since moving an identity can hand or
+        revoke a login that resolves to admin.
+        Moves an existing `(sub, issuer)` identity onto this user, taking it
+        from whichever account currently holds it.
+
+
+        This is the correction path for a mis-enrollment — most often an account
+        that auto-enrolled from an external issuer when it should have been a
+        link to the person's existing account. It is a single-row update, not a
+        delete: the losing account keeps everything it owns.
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      parameters:
+        - in: path
+          name: id
+          type: string
+          required: true
+          description: The user that should end up holding the identity
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: "#/definitions/AdoptUserIdentityReq"
+      responses:
+        "200":
+          description: The moved identity
+          schema:
+            $ref: "#/definitions/UserIdentity"
+        "404":
+          description: No such user, or no account holds that identity
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "401":
+          description: Authentication required
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: A user-admin attempted to move an identity involving a system-admin account
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "409":
+          description: The target user already has an identity at that issuer
           schema:
             $ref: "#/definitions/ErrorModelV2"
         "500":
