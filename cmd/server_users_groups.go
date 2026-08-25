@@ -912,6 +912,44 @@ var serverUserIdentityAddCmd = &cobra.Command{
 	},
 }
 
+var serverUserIdentityAdoptCmd = &cobra.Command{
+	Use:   "adopt <user-id>",
+	Short: "Move an identity from another account onto this user",
+	Long: `Move an existing (sub, issuer) identity onto the named user, taking it from
+whichever account currently holds it.
+
+This is the correction path for a mis-enrollment — most often an account that
+auto-enrolled from an external issuer when it should have been a link to the
+person's existing account. Nothing is deleted: the losing account keeps
+everything it owns, so anything it accumulated is still there to deal with.
+
+Refused if the target user already has an identity at that issuer, since a
+user may hold at most one identity per issuer.
+
+Example:
+  pelican-server user identity adopt <real-user-id> \
+      --sub 8f3c-... --issuer https://keycloak.example.org/realms/project`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		sub, _ := cmd.Flags().GetString("sub")
+		issuer, _ := cmd.Flags().GetString("issuer")
+		if sub == "" || issuer == "" {
+			return errors.New("--sub and --issuer are required")
+		}
+		body := map[string]string{"sub": sub, "issuer": issuer}
+		respBody, err := makeGroupAPICall("POST", "/api/v1.0/users/"+args[0]+"/identities/adopt", body)
+		if err != nil {
+			return err
+		}
+		if outputJSON {
+			fmt.Println(string(respBody))
+			return nil
+		}
+		fmt.Println("Identity moved successfully")
+		return nil
+	},
+}
+
 var serverUserIdentityRemoveCmd = &cobra.Command{
 	Use:   "remove <user-id> <identity-id>",
 	Short: "Remove an identity from a user",
@@ -1164,6 +1202,8 @@ func init() {
 
 	serverUserIdentityAddCmd.Flags().String("sub", "", "OIDC subject claim (required)")
 	serverUserIdentityAddCmd.Flags().String("issuer", "", "OIDC issuer URL (required)")
+	serverUserIdentityAdoptCmd.Flags().String("sub", "", "OIDC subject claim of the identity to move (required)")
+	serverUserIdentityAdoptCmd.Flags().String("issuer", "", "OIDC issuer URL of the identity to move (required)")
 
 	// Scope grant flags. The route accepts any token_scopes string and
 	// the DB layer enforces the user-grantable allowlist, so we keep
@@ -1214,6 +1254,7 @@ func init() {
 
 	serverUserIdentityCmd.AddCommand(serverUserIdentityListCmd)
 	serverUserIdentityCmd.AddCommand(serverUserIdentityAddCmd)
+	serverUserIdentityCmd.AddCommand(serverUserIdentityAdoptCmd)
 	serverUserIdentityCmd.AddCommand(serverUserIdentityRemoveCmd)
 
 	serverUserScopeCmd.AddCommand(serverUserScopeListCmd)

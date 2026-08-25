@@ -68,6 +68,11 @@ type (
 		// for this export's namespace.
 		AuthorizationTemplates []interface{} `json:"authorizationTemplates,omitempty" mapstructure:"authorizationtemplates" yaml:"AuthorizationTemplates"`
 
+		// ExternalIssuers are the trusted external OAuth2/OIDC issuers whose
+		// tokens may be exchanged (RFC 8693) for this export's namespace. When
+		// set, these override the global Issuer.ExternalIssuers.
+		ExternalIssuers []interface{} `json:"externalIssuers,omitempty" mapstructure:"externalissuers" yaml:"ExternalIssuers"`
+
 		// Metadata holds per-export overrides for the object-commit publisher.
 		// When unset, the origin-wide Origin.Metadata.* settings apply.
 		Metadata *OriginExportMetadata `json:"metadata,omitempty" mapstructure:"metadata" yaml:"Metadata"`

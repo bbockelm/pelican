@@ -74,6 +74,11 @@ type OIDCProvider struct {
 	// oa4mp.InitAuthzRules().
 	AuthzRules []*oa4mp.CompiledAuthz
 
+	// externalIssuers is the namespace's trusted external issuers, parsed and
+	// validated from configuration at startup (never from the database). The
+	// exchange path resolves a subject token's iss against this list.
+	externalIssuers []ExternalIssuerDetail
+
 	// DeviceCodeHandler handles RFC 8628 device authorization grant.
 	DeviceCodeHandler *DeviceCodeHandler
 
@@ -443,6 +448,16 @@ func (p *OIDCProvider) EnsureClient(ctx context.Context, clientID, secret string
 // compiled by oa4mp.InitAuthzRules().
 func (p *OIDCProvider) SetAuthzRules(rules []*oa4mp.CompiledAuthz) {
 	p.AuthzRules = rules
+}
+
+// SetExternalIssuers stores the namespace's configured trusted external issuers.
+func (p *OIDCProvider) SetExternalIssuers(issuers []ExternalIssuerDetail) {
+	p.externalIssuers = issuers
+}
+
+// ExternalIssuers returns the namespace's configured trusted external issuers.
+func (p *OIDCProvider) ExternalIssuers() []ExternalIssuerDetail {
+	return p.externalIssuers
 }
 
 // Issuer returns the canonical issuer URL ("iss" claim / discovery base) for

@@ -659,10 +659,9 @@ func ensureTestUserRow(t *testing.T, userID string) {
 	}
 	_, aupVersion, _ := CurrentAUPVersion()
 	err := database.ServerDatabase.Clauses(clause.OnConflict{DoNothing: true}).Create(&database.User{
-		ID:         userID,
-		Username:   userID,
-		Sub:        userID,
-		Issuer:     "https://example.com",
+		ID:       userID,
+		Username: userID,
+
 		Status:     database.UserStatusActive,
 		AUPVersion: aupVersion,
 	}).Error
@@ -1549,4 +1548,174 @@ func TestIsSafeRedirectURL(t *testing.T) {
 			assert.Equal(t, tt.safe, got, "url=%q", tt.url)
 		})
 	}
+}
+
+// TestUserIdentityAdoptAPI exercises the identity-correction path end to end
+// through the HTTP surface: the case an admin actually hits when auto-enroll
+// created an account that should have been a link to an existing one.
+func TestUserIdentityAdoptAPI(t *testing.T) {
+	t.Cleanup(test_utils.SetupTestLogging(t))
+	route := gin.New()
+	routeGroup := route.Group("/api/v1.0")
+	require.NoError(t, registerCommonEndpoints(routeGroup))
+	ctx, cancel, egrp := test_utils.TestContext(context.Background(), t)
+	defer func() { require.NoError(t, egrp.Wait()) }()
+	defer cancel()
+
+	dirName := t.TempDir()
+	server_utils.ResetTestState()
+	defer server_utils.ResetTestState()
+	require.NoError(t, param.ConfigBase.Set(dirName))
+	require.NoError(t, param.Server_UIAdminUsers.Set([]string{"admin-user"}))
+
+	test_utils.MockFederationRoot(t, nil, nil)
+	require.NoError(t, config.InitServer(ctx, server_structs.OriginType))
+
+	mockDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	database.ServerDatabase = mockDB
+	migrateTestDB(t)
+	ensureTestUserRow(t, "admin-user")
+
+	const kcIssuer = "https://keycloak.example.org/realms/project"
+
+	// The person's real account, and the stray one auto-enroll created.
+	alice, err := database.CreateUser(database.ServerDatabase, "alice", "alice@cilogon", "https://cilogon.org",
+		database.Creator{UserID: "admin-user"})
+	require.NoError(t, err)
+	stray, err := database.LookupOrBootstrapUserWithCreator(database.ServerDatabase, "kc-sub", kcIssuer,
+		"Alice", []string{"alice-kc"}, database.Creator{UserID: database.CreatorExternalExchange})
+	require.NoError(t, err)
+	require.NotEqual(t, alice.ID, stray.ID)
+
+	adminToken := generateTestAdminUserToken(t)
+	post := func(t *testing.T, path string, body map[string]string) *httptest.ResponseRecorder {
+		t.Helper()
+		encoded, err := json.Marshal(body)
+		require.NoError(t, err)
+		req, err := http.NewRequest("POST", path, bytes.NewReader(encoded))
+		require.NoError(t, err)
+		req.AddCookie(&http.Cookie{Name: "login", Value: adminToken})
+		req.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		route.ServeHTTP(recorder, req)
+		return recorder
+	}
+
+	t.Run("linking a claimed identity is refused with a pointer to adopt", func(t *testing.T) {
+		rec := post(t, "/api/v1.0/users/"+alice.ID+"/identities",
+			map[string]string{"sub": "kc-sub", "issuer": kcIssuer})
+		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "adopt")
+	})
+
+	t.Run("adopt moves the identity", func(t *testing.T) {
+		rec := post(t, "/api/v1.0/users/"+alice.ID+"/identities/adopt",
+			map[string]string{"sub": "kc-sub", "issuer": kcIssuer})
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		got, err := database.GetUserByIdentity(database.ServerDatabase, "kc-sub", kcIssuer)
+		require.NoError(t, err)
+		assert.Equal(t, alice.ID, got.ID)
+
+		// Adoption is not a delete: the stray account survives with whatever
+		// it owns, for the admin to handle separately.
+		_, err = database.GetUserByID(database.ServerDatabase, stray.ID)
+		assert.NoError(t, err)
+	})
+
+	t.Run("adopting onto a user who already has that issuer conflicts", func(t *testing.T) {
+		bob, err := database.CreateUser(database.ServerDatabase, "bob", "bob-kc", kcIssuer,
+			database.Creator{UserID: "admin-user"})
+		require.NoError(t, err)
+
+		rec := post(t, "/api/v1.0/users/"+bob.ID+"/identities/adopt",
+			map[string]string{"sub": "kc-sub", "issuer": kcIssuer})
+		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("adopting an identity nobody holds is a 404", func(t *testing.T) {
+		rec := post(t, "/api/v1.0/users/"+alice.ID+"/identities/adopt",
+			map[string]string{"sub": "nobody", "issuer": kcIssuer})
+		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+	})
+}
+
+// TestUserIdentityAdoptAuthorization pins the adopt authorization model: a
+// user-admin may move an identity between ordinary accounts, but moving one
+// onto or off of a system-admin account requires full system admin — moving an
+// identity is otherwise an elevation path (it can hand or revoke a login that
+// resolves to admin).
+func TestUserIdentityAdoptAuthorization(t *testing.T) {
+	t.Cleanup(test_utils.SetupTestLogging(t))
+	route := gin.New()
+	routeGroup := route.Group("/api/v1.0")
+	require.NoError(t, registerCommonEndpoints(routeGroup))
+	ctx, cancel, egrp := test_utils.TestContext(context.Background(), t)
+	defer func() { require.NoError(t, egrp.Wait()) }()
+	defer cancel()
+
+	dirName := t.TempDir()
+	server_utils.ResetTestState()
+	defer server_utils.ResetTestState()
+	require.NoError(t, param.ConfigBase.Set(dirName))
+	// "sysadmin" is a full system admin; "useradmin" is only a user-admin.
+	require.NoError(t, param.Server_UIAdminUsers.Set([]string{"sysadmin"}))
+	require.NoError(t, param.Server_UserAdminUsers.Set([]string{"useradmin"}))
+
+	test_utils.MockFederationRoot(t, nil, nil)
+	require.NoError(t, config.InitServer(ctx, server_structs.OriginType))
+
+	mockDB, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	database.ServerDatabase = mockDB
+	migrateTestDB(t)
+	ensureTestUserRow(t, "sysadmin")
+	ensureTestUserRow(t, "useradmin")
+
+	const kc = "https://kc.example.org/realms/proj"
+	// Ordinary accounts and a stray holder for the identity being moved.
+	alice, err := database.CreateUser(database.ServerDatabase, "alice", "alice@cilogon", "https://cilogon.org", database.Creator{UserID: "sysadmin"})
+	require.NoError(t, err)
+	stray, err := database.LookupOrBootstrapUserWithCreator(database.ServerDatabase, "kc-sub", kc, "Alice", []string{"alice-kc"}, database.Creator{UserID: database.CreatorExternalExchange})
+	require.NoError(t, err)
+	require.NotEqual(t, alice.ID, stray.ID)
+	// Give the system-admin account an identity of its own, for the source test.
+	_, err = database.CreateUserIdentity(database.ServerDatabase, "sysadmin", "sys-sub", kc)
+	require.NoError(t, err)
+
+	userAdminToken := generateToken(t, []token_scopes.TokenScope{token_scopes.WebUi_Access}, "useradmin")
+	adopt := func(t *testing.T, token, targetID, sub, issuer string) int {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"sub": sub, "issuer": issuer})
+		req, err := http.NewRequest("POST", "/api/v1.0/users/"+targetID+"/identities/adopt", bytes.NewReader(body))
+		require.NoError(t, err)
+		req.AddCookie(&http.Cookie{Name: "login", Value: token})
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		route.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	t.Run("user-admin may move between ordinary accounts", func(t *testing.T) {
+		assert.Equal(t, http.StatusOK, adopt(t, userAdminToken, alice.ID, "kc-sub", kc))
+	})
+
+	t.Run("user-admin may not move an identity ONTO a system admin", func(t *testing.T) {
+		// alice now holds kc-sub; try to move it onto the sysadmin account.
+		assert.Equal(t, http.StatusForbidden, adopt(t, userAdminToken, "sysadmin", "kc-sub", kc))
+	})
+
+	t.Run("user-admin may not move an identity OFF a system admin", func(t *testing.T) {
+		assert.Equal(t, http.StatusForbidden, adopt(t, userAdminToken, alice.ID, "sys-sub", kc))
+	})
+
+	t.Run("system admin may move an identity off a system admin", func(t *testing.T) {
+		// A fresh target with no identity at this issuer, so the move is judged
+		// on authorization, not on an issuer-collision (alice already holds one).
+		carol, err := database.CreateUser(database.ServerDatabase, "carol", "carol@cilogon", "https://cilogon.org", database.Creator{UserID: "sysadmin"})
+		require.NoError(t, err)
+		sysadminToken := generateToken(t, []token_scopes.TokenScope{token_scopes.WebUi_Access}, "sysadmin")
+		assert.Equal(t, http.StatusOK, adopt(t, sysadminToken, carol.ID, "sys-sub", kc))
+	})
 }

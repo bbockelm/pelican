@@ -20,6 +20,16 @@ export type {
   UserScopeGrant,
   GroupScopeGrant,
 } from './Scope';
+export { ExternalIssuerService } from './ExternalIssuer';
+export type {
+  ExternalIssuer,
+  ExternalIssuerDryRun,
+  ExternalIssuerPost,
+  ExternalIssuerProbe,
+  GroupMode,
+  IssuerClient,
+} from './ExternalIssuer';
+export { TOKEN_EXCHANGE_GRANT } from './ExternalIssuer';
 export { CollectionService } from './Collection';
 export type {
   CollectionAcl,

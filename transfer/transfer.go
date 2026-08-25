@@ -82,6 +82,12 @@ func RegisterLocalIssuer(ctx context.Context, egrp *errgroup.Group, engine *gin.
 
 	registry := issuer.NewProviderRegistry()
 	if err := issuer.RegisterLocalProvider(ctx, egrp, registry, db, gracePeriod); err != nil {
+
+		// Bind the trusted-external-issuer JWKS cache to the server context so its
+		// background refresh goroutines are torn down on shutdown. This is a
+		// sync.Once; the first caller wins, so doing it here (with the real ctx)
+		// rather than lazily on the first exchange keeps teardown correct.
+		issuer.InitExternalKeyCache(ctx)
 		return errors.Wrap(err, "failed to register local issuer provider")
 	}
 

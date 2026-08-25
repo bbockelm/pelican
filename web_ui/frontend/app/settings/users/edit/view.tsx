@@ -2,7 +2,7 @@
 
 import React, { useContext, useState } from 'react';
 
-import { alertOnError } from '@/helpers/util';
+import { alertOnError, errorToString } from '@/helpers/util';
 import UserForm from '../components/UserForm';
 import { AlertDispatchContext } from '@/components/AlertProvider';
 import SettingHeader from '@/app/settings/components/SettingHeader';
@@ -506,12 +506,15 @@ const ScopesSection: React.FC<{ userId: string }> = ({ userId }) => {
   );
 };
 
-// IdentitiesSection lists the user's *secondary* OIDC identities (rows
-// in user_identities) and lets the admin unlink any of them. The
-// user's *primary* identity is on the User row itself and isn't
-// removable here — admins manage that via /users/{id} PATCH (which
-// only allows username, not sub/issuer; primary identity rotation is
-// out of scope for the admin UI).
+// IdentitiesSection lists every identity linked to the account and lets an
+// admin link, move, or unlink one.
+//
+// All identities are equal — there is no distinguished "primary" any more, so
+// any of them can be removed, subject to the server's rule that an account
+// must keep some way to sign in. Linking an identity another account already
+// holds is refused with a 409; that is the case the "move it here" flow below
+// exists for, and it is how a mis-enrollment gets corrected without deleting
+// the account that wrongly holds the identity.
 const IdentitiesSection: React.FC<{ userId: string }> = ({ userId }) => {
   const dispatch = useContext(AlertDispatchContext);
   const { data: identities, mutate } = useSWR<UserIdentity[] | undefined>(
@@ -525,6 +528,60 @@ const IdentitiesSection: React.FC<{ userId: string }> = ({ userId }) => {
     { fallbackData: [] }
   );
   const [busy, setBusy] = useState<string | null>(null);
+  const [sub, setSub] = useState('');
+  const [issuer, setIssuer] = useState('');
+  const [linking, setLinking] = useState(false);
+  // Set when a link attempt came back 409 because another account holds the
+  // identity, which turns the button into an explicit "move it here".
+  const [claimed, setClaimed] = useState(false);
+
+  const notify = (message: string) =>
+    dispatch({
+      type: 'openAlert',
+      payload: {
+        onClose: () => dispatch({ type: 'closeAlert' }),
+        message,
+        autoHideDuration: 3000,
+        alertProps: { severity: 'success' },
+      },
+    });
+
+  const link = async (adopt: boolean) => {
+    if (!sub.trim() || !issuer.trim()) return;
+    setLinking(true);
+    let success = false;
+    try {
+      await alertOnError(
+        () =>
+          adopt
+            ? UserService.adoptIdentity(userId, sub.trim(), issuer.trim())
+            : UserService.linkIdentity(userId, sub.trim(), issuer.trim()),
+        adopt ? 'Failed to move identity' : 'Failed to link identity',
+        dispatch,
+        true
+      );
+      success = true;
+    } catch (e) {
+      // A 409 naming another owner is not a dead end — offer the move. The
+      // server's hint ("...use ...adopt...") is on the wrapped error's cause
+      // chain, which errorToString flattens; String(e) would only show the
+      // outer "Fetch to API Failed" wrapper and never match.
+      if (
+        !adopt &&
+        e instanceof Error &&
+        errorToString(e as Error & { cause?: Error }).includes('adopt')
+      ) {
+        setClaimed(true);
+      }
+    }
+    setLinking(false);
+    if (!success) return;
+    setSub('');
+    setIssuer('');
+    setClaimed(false);
+    notify(adopt ? 'Identity moved to this user' : 'Identity linked');
+    mutate();
+  };
 
   const unlink = async (identity: UserIdentity) => {
     setBusy(identity.id);
@@ -542,15 +599,7 @@ const IdentitiesSection: React.FC<{ userId: string }> = ({ userId }) => {
     }
     setBusy(null);
     if (!success) return;
-    dispatch({
-      type: 'openAlert',
-      payload: {
-        onClose: () => dispatch({ type: 'closeAlert' }),
-        message: 'Identity unlinked',
-        autoHideDuration: 3000,
-        alertProps: { severity: 'success' },
-      },
-    });
+    notify('Identity unlinked');
     mutate();
   };
 
@@ -560,12 +609,13 @@ const IdentitiesSection: React.FC<{ userId: string }> = ({ userId }) => {
         Linked identities
       </Typography>
       <Typography variant='body2' color='text.secondary' sx={{ mb: 2 }}>
-        Secondary OIDC identities the user has linked. The primary identity
-        (shown above on the form) is not unlinkable from here.
+        Every identity this account can sign in with. An account must keep at
+        least one identity, or a password, so the last one cannot be unlinked
+        from an account with no password set.
       </Typography>
       {!identities || identities.length === 0 ? (
         <Typography variant='body2' color='text.secondary' fontStyle='italic'>
-          No secondary identities linked.
+          No identities linked.
         </Typography>
       ) : (
         <Stack spacing={1}>
@@ -611,6 +661,64 @@ const IdentitiesSection: React.FC<{ userId: string }> = ({ userId }) => {
           ))}
         </Stack>
       )}
+
+      <Box
+        sx={{ mt: 3, pt: 2, borderTop: '1px solid', borderColor: 'divider' }}
+      >
+        <Typography variant='subtitle2' sx={{ mb: 1 }}>
+          Link an identity
+        </Typography>
+        <Typography variant='body2' color='text.secondary' sx={{ mb: 2 }}>
+          Use this to attach an external identity to an existing account — for
+          example so a collaborator signs in through their home identity
+          provider and lands on this account instead of enrolling a new one. The
+          subject must be exactly what the issuer asserts.
+        </Typography>
+        <Stack
+          direction={{ xs: 'column', sm: 'row' }}
+          spacing={1}
+          alignItems='flex-start'
+        >
+          <TextField
+            size='small'
+            label='Subject (sub)'
+            value={sub}
+            onChange={(e) => {
+              setSub(e.target.value);
+              setClaimed(false);
+            }}
+            fullWidth
+            slotProps={{ htmlInput: { 'aria-label': 'Identity subject' } }}
+          />
+          <TextField
+            size='small'
+            label='Issuer URL'
+            value={issuer}
+            onChange={(e) => {
+              setIssuer(e.target.value);
+              setClaimed(false);
+            }}
+            fullWidth
+            slotProps={{ htmlInput: { 'aria-label': 'Identity issuer' } }}
+          />
+          <Button
+            variant='contained'
+            size='medium'
+            disabled={linking || !sub.trim() || !issuer.trim()}
+            onClick={() => link(claimed)}
+            sx={{ whiteSpace: 'nowrap' }}
+          >
+            {claimed ? 'Move it here' : 'Link'}
+          </Button>
+        </Stack>
+        {claimed && (
+          <Typography variant='body2' color='warning.main' sx={{ mt: 1 }}>
+            Another account already holds that identity. &ldquo;Move it
+            here&rdquo; reassigns it to this user; the other account is kept,
+            along with anything it owns.
+          </Typography>
+        )}
+      </Box>
     </Box>
   );
 };

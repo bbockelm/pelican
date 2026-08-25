@@ -18,6 +18,19 @@ type UserApiService = ApiService<User, UserPost, UserPatch> & {
   // re-prompt every user on the server). Admin-only.
   clearAUP: (id: string) => Promise<void>;
   listIdentities: (id: string) => Promise<UserIdentity[]>;
+  linkIdentity: (
+    userId: string,
+    sub: string,
+    issuer: string
+  ) => Promise<UserIdentity>;
+  // adoptIdentity moves an identity that another account currently holds.
+  // It is the correction path for a mis-enrollment: nothing is deleted, so
+  // whatever the losing account owns survives.
+  adoptIdentity: (
+    userId: string,
+    sub: string,
+    issuer: string
+  ) => Promise<UserIdentity>;
   unlinkIdentity: (userId: string, identityId: string) => Promise<void>;
 };
 
@@ -94,6 +107,39 @@ const UserService = {
   listIdentities: async (id: string): Promise<UserIdentity[]> => {
     const r = await fetchApi(() =>
       fetch(`${API_V1_BASE_URL}/users/${id}/identities`)
+    );
+    return await r.json();
+  },
+  linkIdentity: async (
+    userId: string,
+    sub: string,
+    issuer: string
+  ): Promise<UserIdentity> => {
+    const r = await fetchApi(
+      async () =>
+        await secureFetch(`${API_V1_BASE_URL}/users/${userId}/identities`, {
+          method: 'POST',
+          body: JSON.stringify({ sub, issuer }),
+          headers: { 'Content-Type': 'application/json' },
+        })
+    );
+    return await r.json();
+  },
+  adoptIdentity: async (
+    userId: string,
+    sub: string,
+    issuer: string
+  ): Promise<UserIdentity> => {
+    const r = await fetchApi(
+      async () =>
+        await secureFetch(
+          `${API_V1_BASE_URL}/users/${userId}/identities/adopt`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ sub, issuer }),
+            headers: { 'Content-Type': 'application/json' },
+          }
+        )
     );
     return await r.json();
   },

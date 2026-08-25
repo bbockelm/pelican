@@ -168,8 +168,10 @@ type Config struct {
 		AuthenticationSource string `mapstructure:"authenticationsource" yaml:"AuthenticationSource"`
 		AuthorizationCodeLifetime time.Duration `mapstructure:"authorizationcodelifetime" yaml:"AuthorizationCodeLifetime"`
 		AuthorizationTemplates any `mapstructure:"authorizationtemplates" yaml:"AuthorizationTemplates"`
+		DisableExternalTokenExchange bool `mapstructure:"disableexternaltokenexchange" yaml:"DisableExternalTokenExchange"`
 		DynamicClientStaleTimeout time.Duration `mapstructure:"dynamicclientstaletimeout" yaml:"DynamicClientStaleTimeout"`
 		DynamicClientUnusedTimeout time.Duration `mapstructure:"dynamicclientunusedtimeout" yaml:"DynamicClientUnusedTimeout"`
+		ExternalIssuers any `mapstructure:"externalissuers" yaml:"ExternalIssuers"`
 		GroupFile string `mapstructure:"groupfile" yaml:"GroupFile"`
 		GroupRequirements []string `mapstructure:"grouprequirements" yaml:"GroupRequirements"`
 		GroupSource string `mapstructure:"groupsource" yaml:"GroupSource"`
@@ -757,8 +759,10 @@ type configWithType struct {
 		AuthenticationSource struct { Type string; Value string }
 		AuthorizationCodeLifetime struct { Type string; Value time.Duration }
 		AuthorizationTemplates struct { Type string; Value any }
+		DisableExternalTokenExchange struct { Type string; Value bool }
 		DynamicClientStaleTimeout struct { Type string; Value time.Duration }
 		DynamicClientUnusedTimeout struct { Type string; Value time.Duration }
+		ExternalIssuers struct { Type string; Value any }
 		GroupFile struct { Type string; Value string }
 		GroupRequirements struct { Type string; Value []string }
 		GroupSource struct { Type string; Value string }

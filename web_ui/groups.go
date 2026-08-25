@@ -211,7 +211,6 @@ func handleListGroups(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   callerGroups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 	isAdmin, _ := CheckAdmin(identity)
 	isUserAdmin, _ := CheckUserAdmin(identity)
@@ -305,7 +304,6 @@ func handleGetGroup(ctx *gin.Context) {
 		Username: caller,
 		ID:       callerID,
 		Groups:   callerGroups,
-		Sub:      ctx.GetString("OIDCSub"),
 	})
 	if !database.CanSeeGroup(database.ServerDatabase, group, callerID, isAdmin, callerGroups) {
 		ctx.JSON(http.StatusNotFound, server_structs.SimpleApiResp{
@@ -370,7 +368,6 @@ func handleCreateGroup(ctx *gin.Context) {
 		Username: caller,
 		ID:       userId,
 		Groups:   callerGroups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 	// Group creation is open to any authenticated user — the design
 	// (docs/user-group-design.md) calls this out so users can mint
@@ -465,7 +462,6 @@ func handleUpdateGroup(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 	isAdmin, _ := CheckAdmin(identity)
 	isUserAdmin, _ := CheckUserAdmin(identity)
@@ -554,7 +550,6 @@ func handleListGroupMembers(ctx *gin.Context) {
 		Username: caller,
 		ID:       callerID,
 		Groups:   callerGroups,
-		Sub:      ctx.GetString("OIDCSub"),
 	})
 	if !database.CanSeeGroup(database.ServerDatabase, group, callerID, isAdmin, callerGroups) {
 		ctx.JSON(http.StatusNotFound, server_structs.SimpleApiResp{
@@ -620,7 +615,6 @@ func handleAddGroupMember(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 	isAdmin, _ := CheckAdmin(identity)
 
@@ -816,7 +810,6 @@ func handleRemoveGroupMember(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 	isAdmin, _ := CheckAdmin(identity)
 
@@ -990,7 +983,6 @@ func handleUpdateUser(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 	isSystemAdmin, _ := CheckAdmin(identity)
 	if !isSystemAdmin && IsSystemAdminUserID(database.ServerDatabase, id) {
@@ -1018,11 +1010,10 @@ func handleUpdateUser(ctx *gin.Context) {
 	}
 
 	if req.Username != nil {
-		// RenameUser keeps the local-issuer invariant intact (sub == username
-		// for locally-authenticated accounts) so password login keeps
-		// working after the rename. OIDC accounts have their sub left alone.
-		localIssuer := param.Server_ExternalWebUrl.GetString()
-		if err := database.RenameUser(database.ServerDatabase, id, *req.Username, localIssuer); err != nil {
+		// Only the username changes. Identities keep the subs their issuers
+		// gave them, and password login resolves by username, so there is no
+		// longer an invariant to maintain across the rename.
+		if err := database.RenameUser(database.ServerDatabase, id, *req.Username); err != nil {
 			if errors.Is(err, database.ErrInvalidIdentifier) {
 				ctx.JSON(http.StatusBadRequest, server_structs.SimpleApiResp{
 					Status: server_structs.RespFailed,
@@ -1094,7 +1085,6 @@ func handleDeleteGroup(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	})
 
 	if err := database.DeleteGroup(database.ServerDatabase, id, userId, isAdmin); err != nil {
@@ -1156,7 +1146,6 @@ func handleDeleteUser(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 
 	// Allow system admins or user admins
@@ -1249,7 +1238,6 @@ func handleUpdateGroupOwnership(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	})
 
 	if err := database.UpdateGroupOwnership(database.ServerDatabase, id, req.OwnerID, req.AdminID, req.AdminType, userId, isAdmin); err != nil {
@@ -1342,7 +1330,6 @@ func handleCreateGroupInviteLink(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	})
 
 	authMethod, authMethodID := captureAuthMethod(ctx)
@@ -1416,7 +1403,6 @@ func handleListGroupInviteLinks(ctx *gin.Context) {
 		Username: caller,
 		ID:       callerID,
 		Groups:   callerGroups,
-		Sub:      ctx.GetString("OIDCSub"),
 	})
 	group, err := database.GetGroupWithMembers(database.ServerDatabase, groupID)
 	if err != nil {
@@ -1532,7 +1518,6 @@ func handleRevokeGroupInviteLink(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	})
 
 	if err := database.RevokeGroupInviteLink(database.ServerDatabase, linkID, userId, isAdmin); err != nil {
@@ -1591,24 +1576,16 @@ func handleRedeemGroupInviteLink(ctx *gin.Context) {
 		return
 	}
 
-	// Extract OIDC identity from context for auto-creation
+	// A redeemer is always already authenticated, so GetUserGroups above gives a
+	// non-empty userId and RedeemGroupInviteLink resolves the account by ID. The
+	// (sub, issuer) auto-create branch is only for a caller with no userId, which
+	// does not occur here — and there is no longer an OIDC subject on the login
+	// cookie to feed it. Pass empty identity fields; userId is authoritative.
 	var sub, issuer, username string
-	if v, exists := ctx.Get("OIDCSub"); exists {
-		sub, _ = v.(string)
-	}
-	if v, exists := ctx.Get("OIDCIss"); exists {
-		issuer, _ = v.(string)
-	}
-
-	// Use the authenticated user's display name as the username for auto-creation
 	if user, exists := ctx.Get("User"); exists {
 		if userStr, ok := user.(string); ok && userStr != "" {
 			username = userStr
 		}
-	}
-	// If username is still empty, derive from sub
-	if username == "" && sub != "" {
-		username = sub
 	}
 
 	groupID, _, err := database.RedeemGroupInviteLink(database.ServerDatabase, req.Token, userId, sub, issuer, username)
@@ -1748,7 +1725,6 @@ func handleUpdateUserStatus(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 	isUserAdmin, msg := CheckUserAdmin(identity)
 	if !isUserAdmin {
@@ -1881,7 +1857,6 @@ func handleClearAUPAgreement(ctx *gin.Context) {
 		Username: caller,
 		ID:       callerID,
 		Groups:   callerGroups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 	isAdmin, _ := CheckAdmin(identity)
 	if !isAdmin && IsSystemAdminUserID(database.ServerDatabase, id) {
@@ -1990,12 +1965,25 @@ func handleAddUserIdentity(ctx *gin.Context) {
 
 	identity, err := database.CreateUserIdentity(database.ServerDatabase, id, req.Sub, req.Issuer)
 	if err != nil {
-		if strings.Contains(err.Error(), "already associated") {
+		switch {
+		case errors.Is(err, database.ErrIdentityClaimed):
+			// Recoverable, and the admin needs to know how: the identity has an
+			// owner, and taking it is a deliberate second step.
+			ctx.JSON(http.StatusConflict, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    err.Error() + "; use POST /users/{id}/identities/adopt to move it",
+			})
+		case errors.Is(err, database.ErrIdentityAlreadyLinked), errors.Is(err, database.ErrIssuerAlreadyLinked):
 			ctx.JSON(http.StatusConflict, server_structs.SimpleApiResp{
 				Status: server_structs.RespFailed,
 				Msg:    err.Error(),
 			})
-		} else {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			ctx.JSON(http.StatusNotFound, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    "user not found",
+			})
+		default:
 			ctx.JSON(http.StatusInternalServerError, server_structs.SimpleApiResp{
 				Status: server_structs.RespFailed,
 				Msg:    fmt.Sprintf("Failed to add identity: %v", err),
@@ -2005,6 +1993,125 @@ func handleAddUserIdentity(ctx *gin.Context) {
 	}
 
 	ctx.JSON(http.StatusCreated, identity)
+}
+
+// AdoptUserIdentityReq is the body for POST /users/:id/identities/adopt.
+type AdoptUserIdentityReq struct {
+	Sub    string `json:"sub"`
+	Issuer string `json:"issuer"`
+}
+
+// handleAdoptUserIdentity moves an existing (sub, issuer) identity from
+// whichever account currently holds it onto the target user. It is the
+// correction path for a mis-enrollment — most often an account that
+// auto-enrolled from an external issuer when it should have been a link to a
+// person's existing account — and is a single-row update rather than a delete,
+// so anything the losing account owns is preserved.
+//
+// Authorization: the route (POST /users/:id/identities/adopt) is gated by
+// UserAdminAuthHandler, so the caller holds server.admin OR server.user_admin.
+// Moving an identity onto or off of a *system-admin* account is an elevation
+// (it can hand or revoke a login that resolves to admin), so this handler
+// additionally requires the caller to be a full system admin whenever either
+// the target or the current holder is a system-admin account. The inline
+// CheckUserAdmin below re-derives the group-level gate for the per-target
+// checks; it is not the primary gate (the route middleware is).
+func handleAdoptUserIdentity(ctx *gin.Context) {
+	id := ctx.Param("id")
+	if id == "" {
+		ctx.JSON(http.StatusBadRequest, server_structs.SimpleApiResp{
+			Status: server_structs.RespFailed,
+			Msg:    "user id is required",
+		})
+		return
+	}
+
+	user, userId, groups, verifyErr := GetUserGroups(ctx)
+	if verifyErr != nil || userId == "" {
+		ctx.JSON(http.StatusInternalServerError, server_structs.SimpleApiResp{
+			Status: server_structs.RespFailed,
+			Msg:    "Failed to identify user",
+		})
+		return
+	}
+	callerIdentity := UserIdentity{Username: user, ID: userId, Groups: groups}
+	if isUserAdmin, msg := CheckUserAdmin(callerIdentity); !isUserAdmin {
+		ctx.JSON(http.StatusForbidden, server_structs.SimpleApiResp{
+			Status: server_structs.RespFailed,
+			Msg:    msg,
+		})
+		return
+	}
+
+	var req AdoptUserIdentityReq
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, server_structs.SimpleApiResp{
+			Status: server_structs.RespFailed,
+			Msg:    "Invalid request body",
+		})
+		return
+	}
+	if req.Sub == "" || req.Issuer == "" {
+		ctx.JSON(http.StatusBadRequest, server_structs.SimpleApiResp{
+			Status: server_structs.RespFailed,
+			Msg:    "sub and issuer are required",
+		})
+		return
+	}
+
+	// Capture the current holder up front: it is needed both for the
+	// system-admin escalation check (moving an identity off an admin account is
+	// as sensitive as moving one onto one) and for the post-move
+	// stranded-account warning.
+	var sourceID string
+	if prev, lookupErr := database.GetUserByIdentity(database.ServerDatabase, req.Sub, req.Issuer); lookupErr == nil {
+		sourceID = prev.ID
+	}
+
+	// Elevation guard: a user-admin may not move an identity involving a system
+	// admin — neither onto one (grants admin login) nor off one (revokes it).
+	if callerIsSystemAdmin, _ := CheckAdmin(callerIdentity); !callerIsSystemAdmin {
+		if IsSystemAdminUserID(database.ServerDatabase, id) ||
+			(sourceID != "" && IsSystemAdminUserID(database.ServerDatabase, sourceID)) {
+			ctx.JSON(http.StatusForbidden, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    "moving an identity involving a system admin account requires system admin privileges",
+			})
+			return
+		}
+	}
+
+	identity, err := database.AdoptUserIdentity(database.ServerDatabase, id, req.Sub, req.Issuer)
+	if err != nil {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			ctx.JSON(http.StatusNotFound, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    "no such user, or no account holds that identity",
+			})
+		case errors.Is(err, database.ErrIssuerAlreadyLinked):
+			ctx.JSON(http.StatusConflict, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    err.Error(),
+			})
+		default:
+			ctx.JSON(http.StatusInternalServerError, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    fmt.Sprintf("Failed to adopt identity: %v", err),
+			})
+		}
+		return
+	}
+
+	log.Infof("Admin moved identity (%s @ %s) to user %s", req.Sub, req.Issuer, id)
+	if sourceID != "" && sourceID != id {
+		if remaining, cErr := database.ListUserIdentities(database.ServerDatabase, sourceID); cErr == nil && len(remaining) == 0 {
+			if src, gErr := database.GetUserByID(database.ServerDatabase, sourceID); gErr == nil && !src.HasLocalPassword() {
+				log.Warnf("Account %s has no identities and no password after the adoption; it can no longer sign in — delete it or link a new identity", sourceID)
+			}
+		}
+	}
+	ctx.JSON(http.StatusOK, identity)
 }
 
 func handleDeleteUserIdentity(ctx *gin.Context) {
@@ -2037,6 +2144,13 @@ func handleDeleteUserIdentity(ctx *gin.Context) {
 			ctx.JSON(http.StatusNotFound, server_structs.SimpleApiResp{
 				Status: server_structs.RespFailed,
 				Msg:    "identity not found",
+			})
+		} else if errors.Is(err, database.ErrLastCredential) {
+			// Not a server error: the request is coherent, the outcome would
+			// just lock the account out.
+			ctx.JSON(http.StatusConflict, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    err.Error(),
 			})
 		} else {
 			ctx.JSON(http.StatusInternalServerError, server_structs.SimpleApiResp{
@@ -2080,7 +2194,6 @@ func handleCreateUserOnboardingInvite(ctx *gin.Context) {
 		Username: user,
 		ID:       userId,
 		Groups:   groups,
-		Sub:      ctx.GetString("OIDCSub"),
 	}
 	isUserAdmin, msg := CheckUserAdmin(identity)
 	if !isUserAdmin {

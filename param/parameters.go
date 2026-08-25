@@ -226,8 +226,10 @@ var runtimeConfigurableMap = map[string]bool{
 	"Issuer.AuthenticationSource": false,
 	"Issuer.AuthorizationCodeLifetime": false,
 	"Issuer.AuthorizationTemplates": false,
+	"Issuer.DisableExternalTokenExchange": false,
 	"Issuer.DynamicClientStaleTimeout": false,
 	"Issuer.DynamicClientUnusedTimeout": false,
+	"Issuer.ExternalIssuers": false,
 	"Issuer.GroupFile": false,
 	"Issuer.GroupRequirements": false,
 	"Issuer.GroupSource": false,
@@ -1122,6 +1124,7 @@ var boolAccessors = map[string]func(*Config) bool{
 	"Director.FilterCachesInErrorState": func(c *Config) bool { return c.Director.FilterCachesInErrorState },
 	"DisableHttpProxy": func(c *Config) bool { return c.DisableHttpProxy },
 	"DisableProxyFallback": func(c *Config) bool { return c.DisableProxyFallback },
+	"Issuer.DisableExternalTokenExchange": func(c *Config) bool { return c.Issuer.DisableExternalTokenExchange },
 	"Issuer.OIDCPreferClaimsFromIDToken": func(c *Config) bool { return c.Issuer.OIDCPreferClaimsFromIDToken },
 	"Issuer.UserStripDomain": func(c *Config) bool { return c.Issuer.UserStripDomain },
 	"Logging.Client.DisableProgressBars": func(c *Config) bool { return c.Logging.Client.DisableProgressBars },
@@ -1534,8 +1537,10 @@ var allParameterNames = []string{
 	"Issuer.AuthenticationSource",
 	"Issuer.AuthorizationCodeLifetime",
 	"Issuer.AuthorizationTemplates",
+	"Issuer.DisableExternalTokenExchange",
 	"Issuer.DynamicClientStaleTimeout",
 	"Issuer.DynamicClientUnusedTimeout",
+	"Issuer.ExternalIssuers",
 	"Issuer.GroupFile",
 	"Issuer.GroupRequirements",
 	"Issuer.GroupSource",
@@ -2282,6 +2287,7 @@ var (
 	Director_FilterCachesInErrorState = BoolParam{"Director.FilterCachesInErrorState"}
 	DisableHttpProxy = BoolParam{"DisableHttpProxy"}
 	DisableProxyFallback = BoolParam{"DisableProxyFallback"}
+	Issuer_DisableExternalTokenExchange = BoolParam{"Issuer.DisableExternalTokenExchange"}
 	Issuer_OIDCPreferClaimsFromIDToken = BoolParam{"Issuer.OIDCPreferClaimsFromIDToken"}
 	Issuer_UserStripDomain = BoolParam{"Issuer.UserStripDomain"}
 	Logging_Client_DisableProgressBars = BoolParam{"Logging.Client.DisableProgressBars"}
@@ -2452,6 +2458,7 @@ var (
 var (
 	GeoIPOverrides = ObjectParam{"GeoIPOverrides"}
 	Issuer_AuthorizationTemplates = ObjectParam{"Issuer.AuthorizationTemplates"}
+	Issuer_ExternalIssuers = ObjectParam{"Issuer.ExternalIssuers"}
 	Issuer_OIDCAuthenticationRequirements = ObjectParam{"Issuer.OIDCAuthenticationRequirements"}
 	LocalCache_StorageDirs = ObjectParam{"LocalCache.StorageDirs"}
 	Lotman_PolicyDefinitions = ObjectParam{"Lotman.PolicyDefinitions"}
@@ -2823,6 +2830,7 @@ func init() {
 		"Director.FilterCachesInErrorState": Director_FilterCachesInErrorState,
 		"DisableHttpProxy": DisableHttpProxy,
 		"DisableProxyFallback": DisableProxyFallback,
+		"Issuer.DisableExternalTokenExchange": Issuer_DisableExternalTokenExchange,
 		"Issuer.OIDCPreferClaimsFromIDToken": Issuer_OIDCPreferClaimsFromIDToken,
 		"Issuer.UserStripDomain": Issuer_UserStripDomain,
 		"Logging.Client.DisableProgressBars": Logging_Client_DisableProgressBars,
@@ -2987,6 +2995,7 @@ func init() {
 		"Xrootd.ShutdownTimeout": Xrootd_ShutdownTimeout,
 		"GeoIPOverrides": GeoIPOverrides,
 		"Issuer.AuthorizationTemplates": Issuer_AuthorizationTemplates,
+		"Issuer.ExternalIssuers": Issuer_ExternalIssuers,
 		"Issuer.OIDCAuthenticationRequirements": Issuer_OIDCAuthenticationRequirements,
 		"LocalCache.StorageDirs": LocalCache_StorageDirs,
 		"Lotman.PolicyDefinitions": Lotman_PolicyDefinitions,

@@ -399,7 +399,10 @@ type ClientDetail struct {
 	Scopes                []string `json:"scopes"`
 	Public                bool     `json:"public"`
 	DynamicallyRegistered bool     `json:"dynamically_registered"`
-	CreatedAt             string   `json:"created_at"`
+	// AllowExternalExchange blesses this client to exchange tokens from the
+	// namespace's configured external issuers (all-or-none).
+	AllowExternalExchange bool   `json:"allow_external_token_exchange"`
+	CreatedAt             string `json:"created_at"`
 }
 
 // ListClients returns all registered OIDC clients for this namespace.
@@ -421,6 +424,7 @@ func (s *OIDCStorage) ListClients(ctx context.Context) ([]ClientDetail, error) {
 		_ = json.Unmarshal([]byte(r.GrantTypes), &cd.GrantTypes)
 		_ = json.Unmarshal([]byte(r.ResponseTypes), &cd.ResponseTypes)
 		_ = json.Unmarshal([]byte(r.Scopes), &cd.Scopes)
+		cd.AllowExternalExchange = r.AllowExternalExchange
 
 		clients = append(clients, cd)
 	}
@@ -450,6 +454,7 @@ func (s *OIDCStorage) GetClientDetail(ctx context.Context, clientID string) (*Cl
 	_ = json.Unmarshal([]byte(record.GrantTypes), &cd.GrantTypes)
 	_ = json.Unmarshal([]byte(record.ResponseTypes), &cd.ResponseTypes)
 	_ = json.Unmarshal([]byte(record.Scopes), &cd.Scopes)
+	cd.AllowExternalExchange = record.AllowExternalExchange
 
 	return cd, nil
 }
@@ -482,6 +487,10 @@ func (s *OIDCStorage) UpdateClient(ctx context.Context, clientID string, update 
 	if update.Scopes != nil {
 		scopes = *update.Scopes
 	}
+	allowExternalExchange := existing.AllowExternalExchange
+	if update.AllowExternalExchange != nil {
+		allowExternalExchange = *update.AllowExternalExchange
+	}
 
 	redirectJSON, _ := json.Marshal(redirectURIs)
 	grantJSON, _ := json.Marshal(grantTypes)
@@ -490,10 +499,11 @@ func (s *OIDCStorage) UpdateClient(ctx context.Context, clientID string, update 
 
 	err = s.db.WithContext(ctx).Model(&OIDCClientRecord{}).Where("id = ? AND namespace = ?", clientID, s.Namespace).
 		Updates(map[string]interface{}{
-			"redirect_uris":  string(redirectJSON),
-			"grant_types":    string(grantJSON),
-			"response_types": string(responseJSON),
-			"scopes":         string(scopesJSON),
+			"redirect_uris":           string(redirectJSON),
+			"grant_types":             string(grantJSON),
+			"response_types":          string(responseJSON),
+			"scopes":                  string(scopesJSON),
+			"allow_external_exchange": allowExternalExchange,
 		}).Error
 	if err != nil {
 		return nil, err
@@ -506,10 +516,11 @@ func (s *OIDCStorage) UpdateClient(ctx context.Context, clientID string, update 
 // ClientUpdate carries the fields that may be changed via the admin update API.
 // Pointer-to-slice fields distinguish "omitted" (nil) from "set to empty" (non-nil, len 0).
 type ClientUpdate struct {
-	RedirectURIs  *[]string
-	GrantTypes    *[]string
-	ResponseTypes *[]string
-	Scopes        *[]string
+	RedirectURIs          *[]string
+	GrantTypes            *[]string
+	ResponseTypes         *[]string
+	Scopes                *[]string
+	AllowExternalExchange *bool
 }
 
 // DeleteClient removes a client by ID. Returns true if a row was deleted.
