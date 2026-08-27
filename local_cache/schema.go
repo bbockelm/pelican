@@ -23,10 +23,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/url"
 	"path"
 	"strings"
 	"time"
+
+	"golang.org/x/net/idna"
 
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/utils"
@@ -42,7 +45,13 @@ type ObjectHash string
 // accidental confusion with ObjectHash or arbitrary strings.
 type InstanceHash string
 
-// Key prefixes for BadgerDB
+// Key prefixes for BadgerDB.
+//
+// This block is the authoritative registry of every key namespace used in
+// the cache database; when adding a new namespace, document it here (and add
+// a key constructor next to the others below).  Per-object keys must also be
+// removed in deleteObjectInTxn and PurgeStorageID or they will leak on
+// eviction / storage recycling.
 const (
 	// PrefixMeta stores CacheMetadata (headers, validation info, storage mode)
 	PrefixMeta = "m:"
@@ -62,10 +71,106 @@ const (
 	PrefixETag = "e:"
 	// PrefixNamespace stores namespace prefix -> ID mappings: n:<prefix> -> uint32
 	PrefixNamespace = "n:"
+	// PrefixAppendIntent records that an AppendWriter is part-way through
+	// building an object: aw:<instance_hash> -> msgpack(AppendIntent).
+	//
+	// A streaming append charges capacity for every chunk it allocates but has
+	// no LRU entry until it finishes, so an interrupted one would otherwise be
+	// invisible to both eviction and the consistency checker -- it has metadata
+	// *and* files, so neither half of RunMetadataScan fires.  This marker is
+	// the reclamation handle: NewAppendWriter writes it, Finalize and Abort
+	// remove it, and anything left over belongs to a writer that did not
+	// survive.  See StorageManager.ReclaimAbandonedAppends.
+	PrefixAppendIntent = "aw:"
+	// PrefixS3Upload tracks in-progress uploads to S3 storage targets:
+	// up:<instance_hash> -> msgpack(S3UploadIntent).  An intent is written
+	// before the first byte reaches S3 and removed only after the object
+	// has been relocated (or the partial upload aborted), so a crash never
+	// leaves untracked objects in the bucket.
+	PrefixS3Upload = "up:"
+	// PrefixPresign records when a pre-signed URL was last handed out for
+	// an object: ps:<instance_hash> -> 8-byte big-endian UnixNano.
+	// Eviction skips objects with a recent presign timestamp.
+	PrefixPresign = "ps:"
+	// The keys below describe the database as a whole rather than any one
+	// object.  They are single, underscore-prefixed keys, they are written at
+	// open before any consumer touches a record, and none of them is ever
+	// evicted; the prefixes above never collide with them.
+
 	// KeySalt is the single DB key that stores the random salt used when
 	// hashing object/instance names.  The salt prevents an attacker with
 	// DB access from correlating hashes with known URLs.
 	KeySalt = "_salt"
+
+	// KeyStoreMode records whether this database belongs to a cache or to a
+	// pstore-backed origin.  The two share this key space, so opening one as
+	// the other would silently corrupt it; both check this marker on open.
+	KeyStoreMode = "_mode"
+
+	// KeySchemaVersion records the layout of the records in this database:
+	// which keys exist, how their values are encoded, and how the hashes that
+	// name them are derived.  The value is the decimal ASCII form of a
+	// SchemaVersion, so a dump of the database reads plainly.
+	//
+	// KeyStoreMode says *who* owns the database; this says *what layout* the
+	// owner wrote.  See CurrentSchemaVersion and CacheDB.ensureSchemaVersion.
+	KeySchemaVersion = "_schema"
+)
+
+// SchemaVersion identifies one revision of the on-disk layout of a block store
+// database (both the cache and the pstore origin backend share it, since they
+// share the key space).
+type SchemaVersion uint32
+
+const (
+	// CurrentSchemaVersion is the layout this binary reads and writes.
+	//
+	// Bump it whenever a change makes records written by an older binary
+	// unreadable — or, worse, silently misread — by a newer one: a new or
+	// renamed key prefix, a different value encoding, or a change to how
+	// object/instance hashes are derived — normalizeURL, which decides which
+	// spellings of a URL name one object, is exactly that sort of key
+	// derivation, and a change there has no other way to announce itself.
+	// Purely additive changes that older binaries can ignore do not need a
+	// bump.
+	//
+	// Whoever bumps it is responsible for teaching migrateSchema how to bring
+	// a database written under every still-supported older version forward.
+	//
+	// Version 2 added the S3 storage-target layout: the up: and ps: prefixes
+	// and DiskMapping.Backend.  Nothing needs rewriting to read it -- both
+	// prefixes are additive and an absent Backend means BackendPosix -- but
+	// the bump is not cosmetic.  It is what stops a version-1 binary from
+	// opening the database: that binary's FindRecyclableStorageID predates
+	// the "never recycle a non-POSIX mapping" rule, so it would hand an S3
+	// target's storage ID to a local directory and PurgeStorageID would take
+	// every tiered object's metadata with it.  Refusing the database is the
+	// mechanism that turns a silent, unrecoverable data loss into a
+	// startup error telling the operator to upgrade again.
+	CurrentSchemaVersion SchemaVersion = 2
+)
+
+// Prefixes reserved by the pstore origin backend (see docs/pstore-design.md).
+// A pstore shares this key space but never opens a cache database and vice
+// versa (enforced via KeyStoreMode), so the prefixes cannot collide at
+// runtime.  They are declared here so that future cache features do not claim
+// them.
+const (
+	// PrefixDirent stores pstore directory entries, keyed by parent path and
+	// name: pd:<parent path>\x00<name>
+	PrefixDirent = "pd:"
+	// PrefixGarbage stores pstore instances and subtrees awaiting reclamation
+	PrefixGarbage = "pg:"
+)
+
+// StoreMode identifies which subsystem owns a database.
+type StoreMode string
+
+const (
+	// StoreModeCache marks a database owned by the local cache.
+	StoreModeCache StoreMode = "cache"
+	// StoreModePStore marks a database owned by a pstore origin backend.
+	StoreModePStore StoreMode = "pstore"
 )
 
 // StorageID identifies a storage location.  0 means inline (data in BadgerDB),
@@ -128,7 +233,16 @@ type StorageDirConfig struct {
 //
 // Returns nil (not an error) when the key is unset or empty.
 func ParseStorageDirsConfig() ([]StorageDirConfig, error) {
-	raw := param.LocalCache_StorageDirs.GetRaw()
+	return ParseStorageDirsValue(param.LocalCache_StorageDirs.GetRaw(), param.LocalCache_StorageDirs.GetName())
+}
+
+// ParseStorageDirsValue parses an already-fetched StorageDirs setting.  It
+// exists so another subsystem configuring the same block store -- the pstore
+// origin backend, via Origin.PStoreStorageDirs -- accepts exactly the same two
+// formats without duplicating the parsing.
+//
+// name identifies the setting in error messages.
+func ParseStorageDirsValue(raw any, name string) ([]StorageDirConfig, error) {
 	if raw == nil {
 		return nil, nil
 	}
@@ -144,12 +258,12 @@ func ParseStorageDirsConfig() ([]StorageDirConfig, error) {
 			case string:
 				// Plain string path (backward-compat format)
 				if e == "" {
-					return nil, fmt.Errorf("LocalCache.StorageDirs[%d]: empty path", i)
+					return nil, fmt.Errorf("%s[%d]: empty path", name, i)
 				}
 				configs = append(configs, StorageDirConfig{Path: e})
 			case map[string]interface{}:
 				// Structured entry
-				cfg, err := parseStorageDirEntry(i, e)
+				cfg, err := parseStorageDirEntry(name, i, e)
 				if err != nil {
 					return nil, err
 				}
@@ -160,13 +274,13 @@ func ParseStorageDirsConfig() ([]StorageDirConfig, error) {
 				for k, val := range e {
 					converted[fmt.Sprint(k)] = val
 				}
-				cfg, err := parseStorageDirEntry(i, converted)
+				cfg, err := parseStorageDirEntry(name, i, converted)
 				if err != nil {
 					return nil, err
 				}
 				configs = append(configs, cfg)
 			default:
-				return nil, fmt.Errorf("LocalCache.StorageDirs[%d]: unsupported type %T", i, elem)
+				return nil, fmt.Errorf("%s[%d]: unsupported type %T", name, i, elem)
 			}
 		}
 		return configs, nil
@@ -178,18 +292,18 @@ func ParseStorageDirsConfig() ([]StorageDirConfig, error) {
 		configs := make([]StorageDirConfig, len(v))
 		for i, p := range v {
 			if p == "" {
-				return nil, fmt.Errorf("LocalCache.StorageDirs[%d]: empty path", i)
+				return nil, fmt.Errorf("%s[%d]: empty path", name, i)
 			}
 			configs[i] = StorageDirConfig{Path: p}
 		}
 		return configs, nil
 	default:
-		return nil, fmt.Errorf("LocalCache.StorageDirs: unsupported type %T; expected list of paths or objects", raw)
+		return nil, fmt.Errorf("%s: unsupported type %T; expected list of paths or objects", name, raw)
 	}
 }
 
 // parseStorageDirEntry converts a map entry into a StorageDirConfig.
-func parseStorageDirEntry(idx int, m map[string]interface{}) (StorageDirConfig, error) {
+func parseStorageDirEntry(name string, idx int, m map[string]interface{}) (StorageDirConfig, error) {
 	var cfg StorageDirConfig
 
 	// Path (required)
@@ -203,7 +317,7 @@ func parseStorageDirEntry(idx int, m map[string]interface{}) (StorageDirConfig, 
 		}
 	}
 	if cfg.Path == "" {
-		return cfg, fmt.Errorf("LocalCache.StorageDirs[%d]: missing or empty Path", idx)
+		return cfg, fmt.Errorf("%s[%d]: missing or empty Path", name, idx)
 	}
 
 	// MaxSize (optional, string like "500GB" or number of bytes)
@@ -218,7 +332,7 @@ func parseStorageDirEntry(idx int, m map[string]interface{}) (StorageDirConfig, 
 			if s != "" && s != "0" {
 				n, err := utils.ParseBytes(s)
 				if err != nil {
-					return cfg, fmt.Errorf("LocalCache.StorageDirs[%d].MaxSize: %w", idx, err)
+					return cfg, fmt.Errorf("%s[%d].MaxSize: %w", name, idx, err)
 				}
 				cfg.MaxSize = n
 			}
@@ -574,7 +688,7 @@ func (m *CacheMetadata) ResponseCacheControl() string {
 	// If the origin specified Cache-Control, build the response header.
 	if cc := m.GetCacheControlHeader(); cc != "" {
 		// When the origin sets max-age, also advertise s-maxage with the
-		// same value so that downstream shared caches honour the
+		// same value so that downstream shared caches honor the
 		// directive (RFC 7234 §5.2.2.9).  Skip if s-maxage is already
 		// present or the response should not be stored.
 		if m.CCMaxAge > 0 && m.CCFlags&ccNoStore == 0 {
@@ -622,13 +736,62 @@ func (m *CacheMetadata) EnsureExpires() {
 	}
 }
 
+// Backend types for DiskMapping.  The zero value ("") means a local POSIX
+// directory for backward compatibility with existing databases.
+const (
+	// BackendPosix is a local directory-backed storage target.
+	BackendPosix = ""
+	// BackendS3 is an S3 bucket-backed storage target.
+	BackendS3 = "s3"
+)
+
 // DiskMapping stores the mapping of a storage ID to its directory path
 // and UUID.  The UUID file is dropped in the directory root so that
 // directories can be remounted at different paths and re-associated.
+//
+// For S3 targets (Backend == BackendS3), Directory holds a display URL
+// (s3://<endpoint-host>/<bucket>/<prefix>) and the UUID is stored in an
+// identity object inside the bucket, so the same re-association logic
+// applies when a bucket is reconfigured under a different endpoint.
 type DiskMapping struct {
 	ID        StorageID `msgpack:"id"`
 	UUID      string    `msgpack:"uuid"`
 	Directory string    `msgpack:"dir"`
+	Backend   string    `msgpack:"be,omitempty"`
+}
+
+// S3UploadIntent records an in-progress upload of a completed object to an
+// S3 storage target.  Serialized with msgpack under up:<instance_hash>.
+type S3UploadIntent struct {
+	// TargetStorageID is the S3 storage target being uploaded to.
+	TargetStorageID StorageID `msgpack:"tid"`
+	// OriginalStorageID is the local (POSIX) storage the object's base
+	// (chunk 0) lives on; used by crash recovery to clean up the local
+	// file(s) when the upload committed but local deletion did not happen.
+	OriginalStorageID StorageID `msgpack:"oid"`
+	// OriginalChunkSizeCode and OriginalChunkLocations capture the object's
+	// pre-relocation chunk layout so crash recovery can delete every local
+	// chunk file after relocation flattened the metadata to a single S3
+	// object.  Both are zero/empty for non-chunked objects.
+	OriginalChunkSizeCode  ChunkSizeCode   `msgpack:"ocsc,omitempty"`
+	OriginalChunkLocations []ChunkLocation `msgpack:"ocl,omitempty"`
+	// Key is the full object key inside the bucket (including prefix).
+	Key string `msgpack:"key"`
+	// Size is the object ContentLength at upload time.
+	Size int64 `msgpack:"sz"`
+	// NamespaceID for usage accounting.
+	NamespaceID NamespaceID `msgpack:"ns"`
+	// StartedAt is when the upload began.
+	StartedAt time.Time `msgpack:"st"`
+	// RelocatedAt is set once the relocation transaction has committed, i.e.
+	// once the bucket copy -- not the local one -- is the object's
+	// authoritative storage.  It is what lets crash recovery tell the two
+	// halves of the lifecycle apart when the metadata record is gone: before
+	// relocation the bucket bytes and their capacity charge belong to this
+	// intent and must be reclaimed, while afterwards they belong to the
+	// object, so whatever deleted it has already accounted for them and only
+	// the leftover local copy needs cleaning up.  Zero means "not yet".
+	RelocatedAt time.Time `msgpack:"rat,omitempty"`
 }
 
 // MasterKeyFile represents the encrypted master key file format
@@ -667,7 +830,15 @@ func ComputeInstanceHash(salt []byte, etag string, objectHash ObjectHash) Instan
 	return InstanceHash(hex.EncodeToString(h.Sum(nil)))
 }
 
-// normalizeURL normalizes a pelican URL for consistent hashing
+// normalizeURL normalizes a pelican URL for consistent hashing.
+//
+// Only the scheme and host are folded.  Those are case-insensitive per
+// RFC 3986 §6.2.2.1, so folding them makes equivalent URLs hash alike.  The
+// path is left exactly as written: object paths are case-sensitive on every
+// backend Pelican serves (POSIX, S3, HTTPS), so /ns/Data.txt and /ns/data.txt
+// are different objects, and folding them together would give them one cache
+// entry from which whichever was fetched last is served for both — a
+// collision nothing on the read path detects.  See docs/pstore-design.md §12.
 func normalizeURL(pelicanURL string) string {
 	// Parse the URL
 	u, err := url.Parse(pelicanURL)
@@ -677,8 +848,57 @@ func normalizeURL(pelicanURL string) string {
 	}
 
 	// Rebuild with normalized components
-	normalized := u.Scheme + "://" + u.Host + path.Clean(u.Path)
-	return strings.ToLower(normalized)
+	return strings.ToLower(u.Scheme) + "://" + normalizeHost(u.Host) + path.Clean(u.Path)
+}
+
+// normalizeHost folds the authority of a URL so that every spelling of one
+// host hashes to one object.
+//
+// strings.ToLower is the right fold only for an ASCII host.  A domain name may
+// be internationalized, and an IDN has two equally valid spellings — the
+// Unicode form and its punycode A-label — that no amount of lowercasing brings
+// together, with a case fold of its own that IDNA defines and ASCII does not.
+// idna.Lookup.ToASCII collapses all of them, so BÜCHER.example,
+// bücher.example, and xn--bcher-kva.example name the same cached object.
+//
+// Three things are deliberately kept away from IDNA:
+//
+//   - The port is not part of the domain name.  It is split off, left exactly
+//     as written, and reattached.
+//   - IP literals are not domain names.  A bracketed IPv6 literal in
+//     particular is rejected outright by IDNA (both the brackets and the
+//     colons are disallowed runes), so literals are only lowercased.
+//   - A host IDNA rejects for any other reason — an underscore, say — is
+//     lowercased instead.  This function has no error to return and must
+//     answer deterministically; a name that cannot be an IDN has no
+//     alternative spelling to collapse in the first place.
+func normalizeHost(host string) string {
+	if host == "" {
+		return ""
+	}
+
+	hostname, port := host, ""
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		hostname, port = h, ":"+p
+		// SplitHostPort strips the brackets from an IPv6 literal; the host
+		// is not spellable without them, so put them back.
+		if strings.ContainsRune(hostname, ':') {
+			return "[" + strings.ToLower(hostname) + "]" + port
+		}
+	} else if strings.HasPrefix(hostname, "[") {
+		// A bracketed IPv6 literal carrying no port.
+		return strings.ToLower(hostname)
+	}
+
+	if net.ParseIP(hostname) != nil {
+		return strings.ToLower(hostname) + port
+	}
+
+	ascii, err := idna.Lookup.ToASCII(hostname)
+	if err != nil {
+		return strings.ToLower(hostname) + port
+	}
+	return ascii + port
 }
 
 // GetInstanceStoragePath returns the 2-level directory path for storing a file
@@ -714,6 +934,19 @@ func ETagKey(objectHash ObjectHash) []byte {
 // NamespaceKey returns the BadgerDB key for a namespace prefix mapping
 func NamespaceKey(prefix string) []byte {
 	return []byte(PrefixNamespace + prefix)
+}
+
+// AppendIntentKey returns the BadgerDB key for an in-flight streaming append.
+func AppendIntentKey(instanceHash InstanceHash) []byte {
+	return []byte(PrefixAppendIntent + string(instanceHash))
+}
+
+// AppendIntent is the record written while an AppendWriter is building an
+// object.  StartedAt lets a reclamation pass leave very recent appends alone
+// even when it cannot consult the in-process registry of live writers.
+type AppendIntent struct {
+	StartedAt   time.Time   `msgpack:"started_at"`
+	NamespaceID NamespaceID `msgpack:"namespace_id"`
 }
 
 // LRUKey returns the BadgerDB key for LRU tracking
@@ -830,4 +1063,191 @@ func ContentOffsetWithinBlock(contentOffset int64) int {
 // PurgeFirstKey returns the BadgerDB key for purge first tracking
 func PurgeFirstKey(instanceHash InstanceHash) []byte {
 	return []byte(PrefixPurgeFirst + string(instanceHash))
+}
+
+// S3UploadIntentKey returns the BadgerDB key tracking an in-progress upload
+// of an object to an S3 storage target.
+func S3UploadIntentKey(instanceHash InstanceHash) []byte {
+	return []byte(PrefixS3Upload + string(instanceHash))
+}
+
+// PresignKey returns the BadgerDB key recording the last time a pre-signed
+// URL was handed out for an object.
+func PresignKey(instanceHash InstanceHash) []byte {
+	return []byte(PrefixPresign + string(instanceHash))
+}
+
+// S3TargetConfig describes one S3 bucket used as a cache storage target.
+type S3TargetConfig struct {
+	// ServiceUrl is the S3 endpoint (e.g. https://s3.us-east-1.amazonaws.com).
+	ServiceUrl string
+	// Region is the S3 region; defaults to us-east-1 when empty.
+	Region string
+	// Bucket is the bucket name.
+	Bucket string
+	// Prefix is an optional key prefix under which cache objects live.
+	Prefix string
+	// UrlStyle is "path" (default) or "virtual".
+	UrlStyle string
+	// AccessKeyfile / SecretKeyfile point at files holding static
+	// credentials.  Both must be set together; when empty the ambient AWS
+	// credential chain is used.
+	AccessKeyfile string
+	SecretKeyfile string
+	// MaxSize is the maximum bytes of cache data stored in the bucket.
+	// Required — bucket capacity cannot be auto-detected.
+	MaxSize uint64
+	// Watermark overrides (percent of MaxSize); 0 means use the global default.
+	HighWaterMarkPercentage int
+	LowWaterMarkPercentage  int
+}
+
+// ServiceUrlScheme returns the URL scheme of the configured endpoint,
+// defaulting to https when the endpoint carries none.
+func (c *S3TargetConfig) ServiceUrlScheme() string {
+	if u, err := url.Parse(c.ServiceUrl); err == nil && u.Scheme != "" {
+		return strings.ToLower(u.Scheme)
+	}
+	return "https"
+}
+
+// DisplayURL returns a human-readable identity string for the target,
+// stored in the DiskMapping.Directory field.
+func (c *S3TargetConfig) DisplayURL() string {
+	host := c.ServiceUrl
+	if u, err := url.Parse(c.ServiceUrl); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	s := "s3://" + host + "/" + c.Bucket
+	if c.Prefix != "" {
+		s += "/" + strings.Trim(c.Prefix, "/")
+	}
+	return s
+}
+
+// ParseS3TargetsConfig reads the Cache.S3StorageTargets setting and returns
+// the parsed target configurations.  Returns nil (not an error) when the key
+// is unset or empty.
+func ParseS3TargetsConfig() ([]S3TargetConfig, error) {
+	raw := param.Cache_S3StorageTargets.GetRaw()
+	if raw == nil {
+		return nil, nil
+	}
+
+	list, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("Cache.S3StorageTargets: unsupported type %T; expected a list of objects", raw)
+	}
+	configs := make([]S3TargetConfig, 0, len(list))
+	for i, elem := range list {
+		var m map[string]interface{}
+		switch e := elem.(type) {
+		case map[string]interface{}:
+			m = e
+		case map[interface{}]interface{}:
+			m = make(map[string]interface{}, len(e))
+			for k, val := range e {
+				m[fmt.Sprint(k)] = val
+			}
+		default:
+			return nil, fmt.Errorf("Cache.S3StorageTargets[%d]: unsupported type %T; expected an object", i, elem)
+		}
+		cfg, err := parseS3TargetEntry(i, m)
+		if err != nil {
+			return nil, err
+		}
+		configs = append(configs, cfg)
+	}
+	return configs, nil
+}
+
+// s3EntryString fetches a string-valued key from an S3 target entry,
+// falling back to the all-lowercase key name (viper lowercases keys in
+// some code paths).
+func s3EntryString(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	if v, ok := m[strings.ToLower(key)].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// s3EntryInt fetches an integer-valued key with lowercase fallback.
+func s3EntryInt(m map[string]interface{}, key string) int {
+	v, ok := m[key]
+	if !ok {
+		v, ok = m[strings.ToLower(key)]
+	}
+	if !ok || v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	}
+	return 0
+}
+
+// parseS3TargetEntry converts a map entry into an S3TargetConfig.
+func parseS3TargetEntry(idx int, m map[string]interface{}) (S3TargetConfig, error) {
+	cfg := S3TargetConfig{
+		ServiceUrl:              s3EntryString(m, "ServiceUrl"),
+		Region:                  s3EntryString(m, "Region"),
+		Bucket:                  s3EntryString(m, "Bucket"),
+		Prefix:                  strings.Trim(s3EntryString(m, "Prefix"), "/"),
+		UrlStyle:                s3EntryString(m, "UrlStyle"),
+		AccessKeyfile:           s3EntryString(m, "AccessKeyfile"),
+		SecretKeyfile:           s3EntryString(m, "SecretKeyfile"),
+		HighWaterMarkPercentage: s3EntryInt(m, "HighWaterMarkPercentage"),
+		LowWaterMarkPercentage:  s3EntryInt(m, "LowWaterMarkPercentage"),
+	}
+	if cfg.ServiceUrl == "" {
+		return cfg, fmt.Errorf("Cache.S3StorageTargets[%d]: missing required ServiceUrl", idx)
+	}
+	if cfg.Bucket == "" {
+		return cfg, fmt.Errorf("Cache.S3StorageTargets[%d]: missing required Bucket", idx)
+	}
+	if cfg.Region == "" {
+		cfg.Region = "us-east-1"
+	}
+	if cfg.UrlStyle == "" {
+		cfg.UrlStyle = "path"
+	}
+	if (cfg.AccessKeyfile == "") != (cfg.SecretKeyfile == "") {
+		return cfg, fmt.Errorf("Cache.S3StorageTargets[%d]: AccessKeyfile and SecretKeyfile must be set together", idx)
+	}
+
+	// MaxSize (required, string like "5TB" or a byte count)
+	var rawSize interface{}
+	if v, ok := m["MaxSize"]; ok {
+		rawSize = v
+	} else if v, ok := m["maxsize"]; ok {
+		rawSize = v
+	}
+	switch s := rawSize.(type) {
+	case string:
+		if s != "" && s != "0" {
+			n, err := utils.ParseBytes(s)
+			if err != nil {
+				return cfg, fmt.Errorf("Cache.S3StorageTargets[%d].MaxSize: %w", idx, err)
+			}
+			cfg.MaxSize = n
+		}
+	case int:
+		cfg.MaxSize = uint64(s)
+	case int64:
+		cfg.MaxSize = uint64(s)
+	case float64:
+		cfg.MaxSize = uint64(s)
+	}
+	if cfg.MaxSize == 0 {
+		return cfg, fmt.Errorf("Cache.S3StorageTargets[%d]: MaxSize is required for S3 targets (bucket capacity cannot be auto-detected)", idx)
+	}
+	return cfg, nil
 }

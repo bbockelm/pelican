@@ -18,7 +18,7 @@ Pelican is a data federation platform that allows users to serve and access data
 
 ### Backend (Go)
 
-- **Language**: Go 1.25+
+- **Language**: Go 1.26+
 - **Web Framework**: Gin (HTTP server)
 - **CLI Framework**: Cobra
 - **Configuration**: Viper
@@ -149,7 +149,7 @@ go test -tags client ./...
 To run the widest possible set of unit tests locally (a superset of both CI passes), use:
 
 ```bash
-go test -tags "client server" ./...
+go test -tags "client,server" ./...
 ```
 
 **Test individual modules (use whichever tags apply to that module):**
@@ -174,6 +174,13 @@ npm test
 golangci-lint run
 ```
 
+The `client` and `server` build tags come from `.golangci.yaml`, so the command above already covers all of package `cmd`. CI additionally lints the platform-specific files, which are invisible on Linux. The whole-program `unused` linter is turned off there because a symbol's only callers often sit in files that the other GOOS excludes:
+
+```bash
+GOOS=darwin golangci-lint run --disable=unused
+GOOS=windows golangci-lint run --disable=unused
+```
+
 **Go formatting:**
 
 ```bash
@@ -184,16 +191,18 @@ gofmt -w .
 
 ```bash
 cd web_ui/frontend
-npm run lint
+pnpm run lint
 ```
 
 **Frontend formatting:**
 
 ```bash
 cd web_ui/frontend
-npm run format        # Check formatting
-npm run format:fix    # Fix formatting
+pnpm run format        # Check formatting
+pnpm run format:fix    # Fix formatting
 ```
+
+The frontend uses pnpm, not npm; the version is pinned by the `packageManager` field in `web_ui/frontend/package.json`. Use `pnpm install --frozen-lockfile` (the `npm ci` equivalent) for a non-mutating install.
 
 ## Code Conventions
 
@@ -354,6 +363,7 @@ API endpoints are documented using OpenAPI V2.0 (Swagger). The specification liv
 - Parameter reference: `docs/parameters.yaml`
 - HTTP headers: `docs/pelican-http-headers.md`
 - Error codes: `docs/error_codes.yaml`
+- `object get` / `object put` source and destination semantics: `docs/object-transfer-semantics.md`
 
 ## Common Gotchas
 

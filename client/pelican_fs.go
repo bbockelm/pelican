@@ -72,6 +72,16 @@ func NewPelicanFSWithPrefix(ctx context.Context, urlPrefix string, options ...Tr
 	}
 }
 
+// Engine returns the transfer engine backing this filesystem.  Callers that
+// also make one-off client calls (Stat, List) can pass it to the engine-aware
+// variants so those share this filesystem's director-response cache instead
+// of querying the director again.
+func (pfs *PelicanFS) Engine() *TransferEngine {
+	pfs.mu.Lock()
+	defer pfs.mu.Unlock()
+	return pfs.transferEngine
+}
+
 // Open opens the named file for reading and returns a fs.File that also
 // implements io.ReaderAt, io.Seeker, io.Writer (for write mode), and
 // fs.ReadDirFile (for directories).
@@ -119,9 +129,26 @@ func (pfs *PelicanFS) OpenFile(name string, flag int) (fs.File, error) {
 		operation = config.TokenWrite
 	}
 
-	dirResp, err := getDirectorInfoForPath(pfs.ctx, pUrl, httpMethod, "", false)
-	if err != nil {
-		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
+	// Opens reuse the engine's cached director response (5 min TTL):
+	// filesystem-oriented callers open many objects under one namespace in
+	// quick succession and should neither pay a director round trip per
+	// open nor couple every operation to the director's availability.
+	// Reads and writes cache separately -- the flavor carries the verb, so
+	// a writer is never handed the caches a read was told to use -- as does
+	// each distinct query (?directread and friends steer matchmaking).
+	var dirResp server_structs.DirectorResponse
+	var err2 error
+	if pfs.transferEngine != nil && pfs.transferEngine.dirRespCache != nil {
+		flavor := NewDirRespFlavor(httpMethod, false, pUrl.RawQuery)
+		dirResp, err2 = pfs.transferEngine.dirRespCache.LookupOrLoad(pfs.ctx, pUrl.FedInfo.DiscoveryEndpoint, flavor, pUrl.Path, func(ctx context.Context) (server_structs.DirectorResponse, string, error) {
+			resp, qErr := getDirectorInfoForPath(ctx, pUrl, httpMethod, "", false)
+			return resp, resp.XPelNsHdr.Namespace, qErr
+		})
+	} else {
+		dirResp, err2 = getDirectorInfoForPath(pfs.ctx, pUrl, httpMethod, "", false)
+	}
+	if err2 != nil {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: err2}
 	}
 
 	token := newTokenGenerator(pUrl, &dirResp, operation, true)
@@ -148,7 +175,7 @@ func (pfs *PelicanFS) OpenFile(name string, flag int) (fs.File, error) {
 	// For O_RDWR, try to stat first. If file doesn't exist, switch to write-only mode.
 	var fileInfo *FileInfo
 	if readMode {
-		fi, err := statHttp(pUrl, dirResp, token, nil)
+		fi, err := statHttp(pfs.ctx, pUrl, dirResp, token, nil)
 		if err != nil {
 			if rdwrMode {
 				// File doesn't exist in RDWR mode - switch to write-only
@@ -312,8 +339,11 @@ func (pf *PelicanFile) startTransferRead(p []byte) (int, error) {
 	pf.transferStarted = true
 	pf.transferOffset = 0
 
-	// Create a transfer job with the pipe writer
-	tj, err := pf.transferClient.NewTransferJob(pf.ctx, pf.pUrl.GetRawUrl(), "", false, false, WithWriter(pw))
+	// Create a transfer job with the pipe writer, forwarding the
+	// filesystem-level transfer options (checksum preferences, etc.).
+	opts := append([]TransferOption{}, pf.options...)
+	opts = append(opts, WithWriter(pw))
+	tj, err := pf.transferClient.NewTransferJob(pf.ctx, pf.pUrl.GetRawUrl(), "", false, false, opts...)
 	if err != nil {
 		pw.Close()
 		return 0, err
@@ -556,8 +586,11 @@ func (pf *PelicanFile) startTransferWrite() error {
 	pf.transferStarted = true
 	pf.writePosition = 0
 
-	// Create a transfer job with the pipe reader
-	tj, err := pf.transferClient.NewTransferJob(pf.ctx, pf.pUrl.GetRawUrl(), "", true, false, WithReader(pr))
+	// Create a transfer job with the pipe reader, forwarding the
+	// filesystem-level transfer options (checksum preferences, etc.).
+	opts := append([]TransferOption{}, pf.options...)
+	opts = append(opts, WithReader(pr))
+	tj, err := pf.transferClient.NewTransferJob(pf.ctx, pf.pUrl.GetRawUrl(), "", true, false, opts...)
 	if err != nil {
 		pr.Close()
 		pw.Close()
