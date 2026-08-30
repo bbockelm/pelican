@@ -3,7 +3,7 @@ module github.com/pelicanplatform/pelican
 // Unpublish Go package as we are not intended to allow users us import our packages for now
 retract [v1.0.0, v1.0.5]
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/JGLTechnologies/gin-rate-limit v1.5.4
@@ -18,6 +18,7 @@ require (
 	github.com/cyphar/filepath-securejoin v0.4.1
 	github.com/dgraph-io/badger/v4 v4.9.1
 	github.com/dgraph-io/ristretto/v2 v2.2.0
+	github.com/dunglas/httpsfv v1.1.0
 	github.com/ebitengine/purego v0.8.3
 	github.com/fatih/color v1.18.0
 	github.com/gin-gonic/gin v1.9.1
@@ -42,6 +43,7 @@ require (
 	github.com/opensciencegrid/xrootd-monitoring-shoveler v1.3.0
 	github.com/ory/fosite v0.49.0
 	github.com/oschwald/geoip2-golang/v2 v2.0.0-beta.4
+	github.com/pierrec/lz4/v4 v4.1.27
 	github.com/pkg/errors v0.9.1
 	github.com/pkg/xattr v0.4.12
 	github.com/pressly/goose/v3 v3.18.0
@@ -292,7 +294,7 @@ require (
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0
 	golang.org/x/sync v0.19.0
 	golang.org/x/text v0.32.0
-	golang.org/x/time v0.14.0
+	golang.org/x/time v0.15.0
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	kernel.org/pub/linux/libs/security/libcap/psx v1.2.69 // indirect

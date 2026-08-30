@@ -15,6 +15,9 @@ on:
     - cron: "0 6 * * *"  # at 06:00 every day
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   collect:
     name: Collect coverage (${{ matrix.binary_name }})
@@ -33,22 +36,41 @@ jobs:
             tags: server
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
-
-      # actions/setup-node downloads its own Node.js binary, which (as of
-      # Node 24) dynamically links libatomic.so.1. The AlmaLinux-based container
-      # image may not ship it yet, so install it before setup-node runs Node.
-      # TODO: remove once the pelican-test image includes libatomic.
-      - name: Install libatomic (Node.js >= 24 runtime dependency)
-        run: dnf install -y libatomic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: "web_ui/frontend/package.json"
-          cache: "npm"
-          cache-dependency-path: "web_ui/frontend/package-lock.json"
           check-latest: true
+
+      # pnpm/action-setup is deliberately not used here: it bootstraps itself by
+      # shelling out to "npm ci", which dies with "spawn npm ENOENT" in
+      # container-based jobs, where the Actions-provided Node.js is not
+      # co-located with an npm. Installing pnpm with the npm that setup-node has
+      # just put on PATH sidesteps that. The version comes from the
+      # "packageManager" field, so it always matches the lockfile.
+      - name: Set up pnpm
+        id: pnpm
+        working-directory: web_ui/frontend
+        run: |
+          npm install -g "$(node -p "require('./package.json').packageManager")"
+          # Resolve the store path in its own assignment rather than inline in
+          # the echo, so that a failure aborts the step instead of quietly
+          # caching an empty path. pnpm chooses the store location based on the
+          # working directory's filesystem, so resolve it where installs run.
+          store="$(pnpm store path)"
+          echo "store=${store}" >> "$GITHUB_OUTPUT"
+
+      # Replaces setup-node's "cache: pnpm", which cannot be used because it
+      # requires pnpm to already be installed when setup-node runs.
+      - name: Cache the pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('web_ui/frontend/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
 
       - name: Set Go version
         id: go-version
@@ -57,7 +79,7 @@ jobs:
           echo "version=${version}.x" >> $GITHUB_OUTPUT
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: "${{ steps.go-version.outputs.version }}"
           check-latest: true
@@ -95,7 +117,7 @@ jobs:
 
       - name: Upload coverage function report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: coverage-func-${{ matrix.binary_name }}
           path: coverage-func-${{ matrix.binary_name }}.txt
@@ -106,9 +128,12 @@ jobs:
     if: ${{ !cancelled() }}
     needs: [collect]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read  # "gh run download" reads the Actions API
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Download coverage reports
         env:
@@ -126,7 +151,7 @@ jobs:
             coverage.json
 
       - name: Upload coverage JSON
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: code-coverage-json
           path: coverage.json

@@ -496,6 +496,24 @@ func IsServerEnabled(testServer server_structs.ServerType) bool {
 	return enabledServers.IsEnabled(testServer)
 }
 
+// IsStandaloneOrigin reports whether this process is running an origin that has
+// opted out of the federation entirely via Origin.EnableStandaloneMode.
+//
+// Every federation touchpoint the origin would otherwise use -- registering at
+// the registry, advertising to (and being tested by) the director, discovering
+// directors, brokering connections, mirroring downtime -- is skipped when this
+// is true.  Callers should prefer this helper over reading the parameter
+// directly so that the "origin module is actually enabled" half of the
+// condition can never be forgotten (a cache-only process must not be treated as
+// a standalone origin just because the origin knob is set in a shared config).
+//
+// This is the origin counterpart of Cache.EnableSiteLocalMode, but it is
+// stricter: a site-local cache still uses the director as a client, whereas a
+// standalone origin contacts no federation service at all.
+func IsStandaloneOrigin() bool {
+	return enabledServers.IsEnabled(server_structs.OriginType) && param.Origin_EnableStandaloneMode.GetBool()
+}
+
 // Returns the version of the current binary
 func GetVersion() string {
 	return version.GetVersion()
@@ -706,6 +724,19 @@ func validateDiscoveryUrl(discUrlStr string) (*url.URL, error) {
 func discoverFederationImpl(ctx context.Context) (fedInfo pelican_url.FederationDiscovery, err error) {
 	federationStr := param.Federation_DiscoveryUrl.GetString()
 	externalUrlStr := param.Server_ExternalWebUrl.GetString()
+
+	// A standalone origin has no federation to discover, but a populated
+	// discovery endpoint is still required below -- it doubles as the federation
+	// issuer.  Stand in for it with our own external web URL, which makes the
+	// auto-discovery step below a no-op and leaves the director, registry, and
+	// broker endpoints empty.  This is resolved here rather than at InitServer
+	// time because Server.ExternalWebUrl is not final until the web engine has
+	// bound its port (Server.WebPort may be 0).
+	if federationStr == "" && IsStandaloneOrigin() {
+		log.Debugln("Origin is standalone; using its own external web URL as the federation discovery URL")
+		federationStr = externalUrlStr
+	}
+
 	defer func() {
 		// Set default guesses if these values are still unset.
 		if fedInfo.DirectorEndpoint == "" && enabledServers.IsEnabled(server_structs.DirectorType) {
@@ -1613,7 +1644,7 @@ func GetComponentConfig(component string) (map[string]interface{}, error) {
 // filterConfigRecursive is a helper function for GetComponentConfig.
 // It recursively creates a nested config map of the parameters that relate to the given component.
 func filterConfigRecursive(v reflect.Value, currentPath string, component string) (*interface{}, bool) {
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		v = v.Elem()
 	}
 
@@ -1685,6 +1716,7 @@ const runtimeDirCleanupKey = "runtimeDirCleanupInternal"
 
 func ensureRuntimeDir(v *viper.Viper) (string, bool, error) {
 	if runtimeDir := v.GetString(param.RuntimeDir.GetName()); runtimeDir != "" {
+		log.Debugf("Runtime directory already configured as %q", runtimeDir)
 		return runtimeDir, v.GetBool(runtimeDirCleanupKey), nil
 	}
 
@@ -1692,6 +1724,7 @@ func ensureRuntimeDir(v *viper.Viper) (string, bool, error) {
 		runtimeDir := filepath.Join("/run", "pelican")
 		v.Set(param.RuntimeDir.GetName(), runtimeDir)
 		v.Set(runtimeDirCleanupKey, false)
+		log.Debugf("Runtime directory set to %q (root execution)", runtimeDir)
 		return runtimeDir, false, nil
 	}
 
@@ -1699,17 +1732,45 @@ func ensureRuntimeDir(v *viper.Viper) (string, bool, error) {
 		runtimeDir := filepath.Join(userRuntimeDir, "pelican")
 		v.Set(param.RuntimeDir.GetName(), runtimeDir)
 		v.Set(runtimeDirCleanupKey, false)
+		log.Debugf("Runtime directory set to %q (from XDG_RUNTIME_DIR)", runtimeDir)
 		return runtimeDir, false, nil
 	}
 
-	runtimeDir, err := os.MkdirTemp("", "pelican-xrootd-*")
+	// Base directory for the MkdirTemp'd runtime dir. Empty means "use
+	// os.TempDir()" (the standard behavior). Overridden per-OS in
+	// config_default.go: macOS's $TMPDIR resolves to a deeply-nested
+	// /var/folders/xx/yy/T/ path that eats most of the 104-byte AF_UNIX
+	// socket-path budget before XRootD gets to append "xrootd/<role>/.xrd/",
+	// so darwin steers this to a short alternate ("/tmp") instead.
+	runtimeDir, err := os.MkdirTemp(osShortRuntimeTempBase(), "pelican-xrootd-*")
 	if err != nil {
 		return "", false, errors.Wrap(err, "Failed to create temporary runtime directory for Pelican")
 	}
 	// Temporary runtime directories are cleaned up on shutdown.
 	v.Set(param.RuntimeDir.GetName(), runtimeDir)
 	v.Set(runtimeDirCleanupKey, true)
+	log.Debugf("Runtime directory set to %q (temporary; XDG_RUNTIME_DIR is unset, cleaned up on shutdown)", runtimeDir)
 	return runtimeDir, true, nil
+}
+
+// runtimeEnvValue resolves an environment-variable reference embedded in a
+// generated parameter default (see the generated SetParameterDefaults). It
+// exists for XDG_RUNTIME_DIR: that variable is unset on macOS and on
+// non-systemd Linux sessions, and substituting the empty string collapses a
+// default like "$XDG_RUNTIME_DIR/pelican/cache" to the unwritable
+// "/pelican/cache". When XDG_RUNTIME_DIR is unset, fall back to a subtree of
+// the OS temp directory so the per-directory runtime defaults (Cache/Origin
+// RunLocation, etc.) land somewhere writable — mirroring the temp-dir fallback
+// ensureRuntimeDir already uses for RuntimeDir itself. Any other environment
+// reference passes through unchanged.
+func runtimeEnvValue(name string) string {
+	if val := os.Getenv(name); val != "" {
+		return val
+	}
+	if name == "XDG_RUNTIME_DIR" {
+		return strings.TrimRight(os.TempDir(), string(os.PathSeparator))
+	}
+	return ""
 }
 
 // ComputeExternalWebUrl computes the Server.ExternalWebUrl if not explicitly set.
@@ -1831,10 +1892,25 @@ func SetServerDefaults(v *viper.Viper) error {
 	}
 
 	// Create runtime directory (side effect: creates dirs on filesystem).
-	_, _, err := ensureRuntimeDir(v)
+	runtimeDir, _, err := ensureRuntimeDir(v)
 	if err != nil {
 		return err
 	}
+
+	// On platforms where the generated $XDG_RUNTIME_DIR-derived defaults
+	// expanded to a broken "/pelican/..." root path (macOS or Windows
+	// without XDG_RUNTIME_DIR set), rebase those sub-paths so they live
+	// under the RuntimeDir we just picked. This runs AFTER
+	// ensureRuntimeDir so it can piggyback on whatever cleanup
+	// behavior that function attached (MkdirTemp'd runtime dirs get
+	// scheduled for shutdown cleanup by cleanupDirOnShutdown; per-user
+	// XDG dirs don't need cleanup at all). Linux with a working
+	// XDG_RUNTIME_DIR sees no broken paths and this is a no-op.
+	//
+	// Called from SetServerDefaults (not SetBaseDefaultsInConfig) so the
+	// client, which does not need any of these paths and does not call
+	// ensureRuntimeDir, never even computes the alternate locations.
+	ApplyOSDefaultsOverride(v, runtimeDir)
 	// When Lotman manages the cache's space, xrootd's pfc.diskusage requires the
 	// "files" purge band (base < nominal < max). Rather than make operators hand-size
 	// three more values just to turn Lotman on, default them as percentages of total
@@ -2055,7 +2131,7 @@ func InitServer(ctx context.Context, currentServers server_structs.ServerType) e
 	// POSIX-like backend (posix, posixv2). Disable them on remote-protocol backends.
 	if currentServers.IsEnabled(server_structs.OriginType) {
 		storageType := server_structs.OriginStorageType(param.Origin_StorageType.GetString())
-		if !storageType.IsPosixLike() {
+		if !storageType.SupportsSelfTest() {
 			updates := make(map[string]interface{})
 			if param.Origin_SelfTest.GetBool() {
 				log.Warningf("%s may not be enabled when the origin is configured with non-POSIX-like backends. Turning off...", param.Origin_SelfTest.GetName())
@@ -2102,6 +2178,9 @@ func InitServer(ctx context.Context, currentServers server_structs.ServerType) e
 	// Flush logs only after we potentially ingest changes from the web UI. This must
 	// be done in sequence because the web UI may change the log location.
 	logging.FlushLogs(true)
+
+	// The in-memory log ring buffer is server-only.
+	StartLogRingBuffer(ctx)
 
 	runtimeDir, cleanupRuntimeDir, err := ensureRuntimeDir(viper.GetViper())
 	if err != nil {
@@ -2455,6 +2534,15 @@ func InitServer(ctx context.Context, currentServers server_structs.ServerType) e
 		viper.SetDefault(param.Federation_RegistryUrl.GetName(), param.Server_ExternalWebUrl.GetString())
 	}
 
+	if currentServers.IsEnabled(server_structs.OriginType) && param.Origin_EnableStandaloneMode.GetBool() {
+		if err := validateStandaloneOrigin(currentServers); err != nil {
+			return err
+		}
+		// Note: the stand-in federation discovery URL is filled in lazily by
+		// discoverFederationImpl rather than here, because Server.ExternalWebUrl
+		// is not final until the web engine has bound its port.
+	}
+
 	if currentServers.IsEnabled(server_structs.BrokerType) {
 		viper.SetDefault(param.Federation_BrokerUrl.GetName(), param.Server_ExternalWebUrl.GetString())
 	}
@@ -2731,6 +2819,11 @@ func ClearServerAds() {
 
 // This function resets most states for test cases, including 1. viper settings, 2. preferred prefix, 3. transport object, 4. Federation metadata back to their default
 func ResetConfig() {
+	// Detach the in-memory log ring buffer (hook + compression worker) so a
+	// subsequent InitServer installs a fresh one and tests don't accumulate
+	// hooks or leak the compression goroutine across cases.
+	StopLogRingBuffer()
+
 	// Close any open log files and reset logger output
 	logging.CloseLogger()
 	if err := param.Reset(); err != nil {

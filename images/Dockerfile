@@ -73,7 +73,7 @@ ARG TOMCAT_GID=10443
 #     WARNING: When building an RPM from source, the version the built RPM
 #     claims to be will *always* come from the .spec file. The upstream Git
 #     repository must have a correct .spec file, or confusion will ensue.
-ARG LOTMAN_SRC_BUILD=true
+ARG LOTMAN_SRC_BUILD=false
 ARG LOTMAN_VER=0.1.0
 ARG LOTMAN_RELEASE=
 # ARG LOTMAN_RELEASE=".osg${OSG_SERIES}.${BASE_OS}"
@@ -81,15 +81,15 @@ ARG LOTMAN_RELEASE=
 # Until the two places are programmatically synchronized, please double-check by hand
 # when doing version changes.
 ARG XRDCL_PELICAN_SRC_BUILD=false
-ARG XRDCL_PELICAN_VER=1.7.1
+ARG XRDCL_PELICAN_VER=1.8.1
 ARG XRDCL_PELICAN_RELEASE=
 # ARG XRDCL_PELICAN_RELEASE="1.osg${OSG_SERIES}.${BASE_OS}"
-ARG XROOTD_LOTMAN_SRC_BUILD=true
+ARG XROOTD_LOTMAN_SRC_BUILD=false
 ARG XROOTD_LOTMAN_VER=0.1.0
 ARG XROOTD_LOTMAN_RELEASE=
 # ARG XROOTD_LOTMAN_RELEASE="1.1.osg${OSG_SERIES}.${BASE_OS}"
-ARG XROOTD_S3_HTTP_SRC_BUILD=true
-ARG XROOTD_S3_HTTP_VER=0.6.7
+ARG XROOTD_S3_HTTP_SRC_BUILD=false
+ARG XROOTD_S3_HTTP_VER=0.6.9
 ARG XROOTD_S3_HTTP_RELEASE=
 # ARG XROOTD_S3_HTTP_RELEASE=".osg${OSG_SERIES}.${BASE_OS}"
 ARG XRDHTTP_PELICAN_SRC_BUILD=false
@@ -171,6 +171,13 @@ RUN --mount=type=bind,source=go.mod,target=/context/go.mod \
   dnf remove -y npm
   npm install -g npm@latest
   n prune
+
+  # The web UI is built with pnpm. Install the exact version pinned by the
+  # "packageManager" field so this image, CI, and the lockfile all agree.
+  # Corepack used to provide this shim but is no longer bundled with current
+  # Node releases, so install it through npm instead.
+
+  npm install -g "$(jq < /context/package.json -r .packageManager)"
 ENDRUN
 
 # Make sure that the version of Go we just installed comes first.
@@ -197,7 +204,7 @@ COPY . .
 
 RUN --mount=type=cache,id=go-cache,target=/root/.cache/go-build,sharing=shared \
     --mount=type=cache,id=go-mod-cache-${TARGETPLATFORM},target=/root/go,sharing=locked \
-    --mount=type=cache,id=npm-${TARGETPLATFORM},target=/root/.npm,sharing=locked \
+    --mount=type=cache,id=pnpm-store-${TARGETPLATFORM},target=/root/.local/share/pnpm/store,sharing=locked \
     --mount=type=cache,id=node-modules-${TARGETPLATFORM},target=/pelican-build/web_ui/frontend/node_modules,sharing=locked \
     --mount=type=cache,id=nextjs-cache-${TARGETPLATFORM},target=/pelican-build/web_ui/frontend/.next/cache,sharing=locked \
     <<ENDRUN
@@ -413,7 +420,7 @@ RUN --mount=type=cache,id=dnf-${TARGETPLATFORM},target=/var/cache/dnf,sharing=lo
 
   install_requirements() {
     if ! ${have_requirements}; then
-      dnf install -y --enablerepo=osg-contrib \
+      dnf install -y \
             cmake3 \
             gcc-c++ \
             git \
@@ -856,6 +863,13 @@ RUN --mount=type=bind,source=go.mod,target=/context/go.mod \
   npm install -g npm@latest
   n prune
 
+  # The web UI is built with pnpm. Install the exact version pinned by the
+  # "packageManager" field so this image, CI, and the lockfile all agree.
+  # Corepack used to provide this shim but is no longer bundled with current
+  # Node releases, so install it through npm instead.
+
+  npm install -g "$(jq < /context/package.json -r .packageManager)"
+
   # Install gotestsum for better test output formatting.
   # Make a copy of the binary so that non-root users can use it.
 
@@ -864,7 +878,7 @@ RUN --mount=type=bind,source=go.mod,target=/context/go.mod \
 
   # Install a kitchen sink's worth of development tools and libraries.
 
-  dnf install -y --enablerepo=osg-contrib \
+  dnf install -y \
         cmake3 \
         delve \
         docker \

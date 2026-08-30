@@ -239,7 +239,13 @@ func getEnabledServers(ctx *gin.Context) {
 		return
 	}
 
-	ctx.JSON(200, gin.H{"servers": enabledServers})
+	// standaloneOrigin tells the web UI that this server deliberately has no
+	// federation behind it, so it can drop the registration status, downtime, and
+	// federation-overview affordances instead of rendering them as broken.
+	ctx.JSON(200, gin.H{
+		"servers":          enabledServers,
+		"standaloneOrigin": config.IsStandaloneOrigin(),
+	})
 }
 
 func getVersionHandler(ctx *gin.Context) {
@@ -685,6 +691,20 @@ func registerCommonEndpoints(routerGroup *gin.RouterGroup) error {
 		loggingAPI.DELETE("/level/:changeId", HandleDeleteLogLevel)
 	}
 
+	// In-memory log buffer viewer/download API. Gated by the dedicated
+	// pelican.log_read scope so a triage user can be granted read-only access
+	// without also picking up admin privileges (or vice versa -- an admin
+	// keeps access via CheckAdmin inside LogReadAuthHandler).
+	//
+	// The public surface is intentionally two endpoints: tail (with an
+	// opaque cursor) and download. Internal structure (batches, LZ4
+	// compression, pending buffer) is not part of the API contract.
+	logBufferAPI := routerGroup.Group("/logs", AuthHandler, LogReadAuthHandler)
+	{
+		logBufferAPI.GET("/tail", HandleLogTail)
+		logBufferAPI.GET("/download", HandleLogTailDownload)
+	}
+
 	downtimeAPI := routerGroup.Group("/downtime")
 	{
 		downtimeAPI.POST("", DowntimeAuthHandler, HandleCreateDowntime)
@@ -1042,6 +1062,10 @@ func waitUntilLogin(ctx context.Context) error {
 //
 // You need to mount the static resources for UI in a separate function
 func ConfigureServerWebAPI(ctx context.Context, engine *gin.Engine, egrp *errgroup.Group) error {
+	// Call out admin-list entries that can never match a username (e.g. CILogon
+	// OIDC subjects in Server.UIAdminUsers carried over from pre-v7.27 configs).
+	warnNonUsernameAdminEntries()
+
 	// start the cache for verified API keys
 	egrp.Go(func() error {
 		api_token.VerifiedKeysCache.Start()

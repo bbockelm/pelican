@@ -1,5 +1,3 @@
-//go:build client && server
-
 /***************************************************************
  *
  * Copyright (C) 2026, Pelican Project, Morgridge Institute for Research
@@ -18,9 +16,11 @@
  *
  ***************************************************************/
 
-package main
+import { test } from '@playwright/test';
+import { registerLogViewerTests } from '../shared_tests/logViewerTests';
+import { registerLogViewerAccessTests } from '../shared_tests/logViewerAccessTests';
 
-// docBinaryName defaults to "pelican" when the binary is built with both the
-// client and server tags simultaneously (e.g. in integration-test builds that
-// combine all commands into a single binary).
-const docBinaryName = "pelican"
+test.describe('Cache Server Logs', () => {
+  registerLogViewerTests('./view/settings/logs/');
+  registerLogViewerAccessTests('./view/settings/logs/');
+});

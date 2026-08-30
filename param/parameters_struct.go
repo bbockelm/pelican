@@ -73,6 +73,14 @@ type Config struct {
 		SelfTestMaxAge time.Duration `mapstructure:"selftestmaxage" yaml:"SelfTestMaxAge"`
 		SentinelLocation string `mapstructure:"sentinellocation" yaml:"SentinelLocation"`
 		StorageLocation string `mapstructure:"storagelocation" yaml:"StorageLocation"`
+		Throttle struct {
+			EMAWindow time.Duration `mapstructure:"emawindow" yaml:"EMAWindow"`
+			PendingBufferSize int `mapstructure:"pendingbuffersize" yaml:"PendingBufferSize"`
+			PerOriginActivePercent int `mapstructure:"peroriginactivepercent" yaml:"PerOriginActivePercent"`
+			PerOriginPendingSize int `mapstructure:"peroriginpendingsize" yaml:"PerOriginPendingSize"`
+			PerOriginStarvingPercent int `mapstructure:"peroriginstarvingpercent" yaml:"PerOriginStarvingPercent"`
+			RetryAfter time.Duration `mapstructure:"retryafter" yaml:"RetryAfter"`
+		} `mapstructure:"throttle" yaml:"Throttle"`
 		Url string `mapstructure:"url" yaml:"Url"`
 		WorkerCount int `mapstructure:"workercount" yaml:"WorkerCount"`
 		XRootDPrefix string `mapstructure:"xrootdprefix" yaml:"XRootDPrefix"`
@@ -201,6 +209,10 @@ type Config struct {
 		StorageDirs any `mapstructure:"storagedirs" yaml:"StorageDirs"`
 	} `mapstructure:"localcache" yaml:"LocalCache"`
 	Logging struct {
+		Buffer struct {
+			BatchLines int `mapstructure:"batchlines" yaml:"BatchLines"`
+			MaxSize string `mapstructure:"maxsize" yaml:"MaxSize"`
+		} `mapstructure:"buffer" yaml:"Buffer"`
 		Cache struct {
 			Http string `mapstructure:"http" yaml:"Http"`
 			Lotman string `mapstructure:"lotman" yaml:"Lotman"`
@@ -228,6 +240,15 @@ type Config struct {
 			Xrd string `mapstructure:"xrd" yaml:"Xrd"`
 			Xrootd string `mapstructure:"xrootd" yaml:"Xrootd"`
 		} `mapstructure:"origin" yaml:"Origin"`
+		Rotation struct {
+			Disable bool `mapstructure:"disable" yaml:"Disable"`
+			DisableCompress bool `mapstructure:"disablecompress" yaml:"DisableCompress"`
+			FlushInterval time.Duration `mapstructure:"flushinterval" yaml:"FlushInterval"`
+			Frequency string `mapstructure:"frequency" yaml:"Frequency"`
+			MaxRetentionPeriod time.Duration `mapstructure:"maxretentionperiod" yaml:"MaxRetentionPeriod"`
+			MaxRetentionSize string `mapstructure:"maxretentionsize" yaml:"MaxRetentionSize"`
+			MaxSize string `mapstructure:"maxsize" yaml:"MaxSize"`
+		} `mapstructure:"rotation" yaml:"Rotation"`
 	} `mapstructure:"logging" yaml:"Logging"`
 	Lotman struct {
 		DbLocation string `mapstructure:"dblocation" yaml:"DbLocation"`
@@ -303,6 +324,7 @@ type Config struct {
 		EnableOIDC bool `mapstructure:"enableoidc" yaml:"EnableOIDC"`
 		EnablePublicReads bool `mapstructure:"enablepublicreads" yaml:"EnablePublicReads"`
 		EnableReads bool `mapstructure:"enablereads" yaml:"EnableReads"`
+		EnableStandaloneMode bool `mapstructure:"enablestandalonemode" yaml:"EnableStandaloneMode"`
 		EnableTLSClientAuth bool `mapstructure:"enabletlsclientauth" yaml:"EnableTLSClientAuth"`
 		EnableTransferAPI bool `mapstructure:"enabletransferapi" yaml:"EnableTransferAPI"`
 		EnableVoms bool `mapstructure:"enablevoms" yaml:"EnableVoms"`
@@ -329,6 +351,39 @@ type Config struct {
 		HttpAuthTokenPassthrough bool `mapstructure:"httpauthtokenpassthrough" yaml:"HttpAuthTokenPassthrough"`
 		HttpServiceUrl string `mapstructure:"httpserviceurl" yaml:"HttpServiceUrl"`
 		IssuerMode string `mapstructure:"issuermode" yaml:"IssuerMode"`
+		Metadata struct {
+			AccessFlushInterval time.Duration `mapstructure:"accessflushinterval" yaml:"AccessFlushInterval"`
+			AllowMultipart bool `mapstructure:"allowmultipart" yaml:"AllowMultipart"`
+			BatchBufferSize int `mapstructure:"batchbuffersize" yaml:"BatchBufferSize"`
+			BatchFlushInterval time.Duration `mapstructure:"batchflushinterval" yaml:"BatchFlushInterval"`
+			Enabled bool `mapstructure:"enabled" yaml:"Enabled"`
+			Endpoint string `mapstructure:"endpoint" yaml:"Endpoint"`
+			ErrorAfter time.Duration `mapstructure:"errorafter" yaml:"ErrorAfter"`
+			EtagPolicy string `mapstructure:"etagpolicy" yaml:"EtagPolicy"`
+			History struct {
+				PruneBatchSize int `mapstructure:"prunebatchsize" yaml:"PruneBatchSize"`
+				PruneInterval time.Duration `mapstructure:"pruneinterval" yaml:"PruneInterval"`
+				RetentionDays int `mapstructure:"retentiondays" yaml:"RetentionDays"`
+			} `mapstructure:"history" yaml:"History"`
+			MaxBackoff time.Duration `mapstructure:"maxbackoff" yaml:"MaxBackoff"`
+			MaxInflight int `mapstructure:"maxinflight" yaml:"MaxInflight"`
+			MaxMetadataBytes int `mapstructure:"maxmetadatabytes" yaml:"MaxMetadataBytes"`
+			MaxQueuedBytesPerNamespace int `mapstructure:"maxqueuedbytespernamespace" yaml:"MaxQueuedBytesPerNamespace"`
+			MaxQueuedPerNamespace int `mapstructure:"maxqueuedpernamespace" yaml:"MaxQueuedPerNamespace"`
+			MetadataPartName string `mapstructure:"metadatapartname" yaml:"MetadataPartName"`
+			MinBackoff time.Duration `mapstructure:"minbackoff" yaml:"MinBackoff"`
+			Mode string `mapstructure:"mode" yaml:"Mode"`
+			ObjectPartName string `mapstructure:"objectpartname" yaml:"ObjectPartName"`
+			RatePerSecond int `mapstructure:"ratepersecond" yaml:"RatePerSecond"`
+			ReconcileEnabled bool `mapstructure:"reconcileenabled" yaml:"ReconcileEnabled"`
+			ReconcileInterval time.Duration `mapstructure:"reconcileinterval" yaml:"ReconcileInterval"`
+			ReconcileSettleWindow time.Duration `mapstructure:"reconcilesettlewindow" yaml:"ReconcileSettleWindow"`
+			RequestTimeout time.Duration `mapstructure:"requesttimeout" yaml:"RequestTimeout"`
+			TokenLifetime time.Duration `mapstructure:"tokenlifetime" yaml:"TokenLifetime"`
+			TrackAccess bool `mapstructure:"trackaccess" yaml:"TrackAccess"`
+			TrackExtra bool `mapstructure:"trackextra" yaml:"TrackExtra"`
+			WarnAfter time.Duration `mapstructure:"warnafter" yaml:"WarnAfter"`
+		} `mapstructure:"metadata" yaml:"Metadata"`
 		Mode string `mapstructure:"mode" yaml:"Mode"`
 		Multiuser bool `mapstructure:"multiuser" yaml:"Multiuser"`
 		MultiuserMinID int `mapstructure:"multiuserminid" yaml:"MultiuserMinID"`
@@ -336,7 +391,22 @@ type Config struct {
 		MultiuserVarlinkSocketPath string `mapstructure:"multiuservarlinksocketpath" yaml:"MultiuserVarlinkSocketPath"`
 		NamespacePrefix string `mapstructure:"namespaceprefix" yaml:"NamespacePrefix"`
 		ObjectProviderURL string `mapstructure:"objectproviderurl" yaml:"ObjectProviderURL"`
+		PStoreDataScanInterval time.Duration `mapstructure:"pstoredatascaninterval" yaml:"PStoreDataScanInterval"`
+		PStoreDataScanRate byte_rate.ByteRate `mapstructure:"pstoredatascanrate" yaml:"PStoreDataScanRate"`
+		PStoreIndexCheckInterval time.Duration `mapstructure:"pstoreindexcheckinterval" yaml:"PStoreIndexCheckInterval"`
+		PStoreInlineMaxBytes int `mapstructure:"pstoreinlinemaxbytes" yaml:"PStoreInlineMaxBytes"`
+		PStoreLocation string `mapstructure:"pstorelocation" yaml:"PStoreLocation"`
+		PStoreMetadataBackupInterval time.Duration `mapstructure:"pstoremetadatabackupinterval" yaml:"PStoreMetadataBackupInterval"`
+		PStoreMetadataBackupLocation string `mapstructure:"pstoremetadatabackuplocation" yaml:"PStoreMetadataBackupLocation"`
+		PStoreMetadataBackupsToKeep int `mapstructure:"pstoremetadatabackupstokeep" yaml:"PStoreMetadataBackupsToKeep"`
+		PStoreStorageDirs any `mapstructure:"pstorestoragedirs" yaml:"PStoreStorageDirs"`
 		Port int `mapstructure:"port" yaml:"Port"`
+		Posc struct {
+			Enabled bool `mapstructure:"enabled" yaml:"Enabled"`
+			FileTimeout time.Duration `mapstructure:"filetimeout" yaml:"FileTimeout"`
+			KeepaliveInterval time.Duration `mapstructure:"keepaliveinterval" yaml:"KeepaliveInterval"`
+			Prefix string `mapstructure:"prefix" yaml:"Prefix"`
+		} `mapstructure:"posc" yaml:"Posc"`
 		RunLocation string `mapstructure:"runlocation" yaml:"RunLocation"`
 		S3AccessKeyfile string `mapstructure:"s3accesskeyfile" yaml:"S3AccessKeyfile"`
 		S3Bucket string `mapstructure:"s3bucket" yaml:"S3Bucket"`
@@ -377,6 +447,11 @@ type Config struct {
 		SelfTest bool `mapstructure:"selftest" yaml:"SelfTest"`
 		SelfTestInterval time.Duration `mapstructure:"selftestinterval" yaml:"SelfTestInterval"`
 		SelfTestMaxAge time.Duration `mapstructure:"selftestmaxage" yaml:"SelfTestMaxAge"`
+		StorageCacheDefaultMaxAge time.Duration `mapstructure:"storagecachedefaultmaxage" yaml:"StorageCacheDefaultMaxAge"`
+		StorageCacheLocation string `mapstructure:"storagecachelocation" yaml:"StorageCacheLocation"`
+		StorageCacheMaxConcurrentFetches int `mapstructure:"storagecachemaxconcurrentfetches" yaml:"StorageCacheMaxConcurrentFetches"`
+		StorageCacheRevalidationJitter int `mapstructure:"storagecacherevalidationjitter" yaml:"StorageCacheRevalidationJitter"`
+		StorageCacheSize string `mapstructure:"storagecachesize" yaml:"StorageCacheSize"`
 		StoragePrefix string `mapstructure:"storageprefix" yaml:"StoragePrefix"`
 		StorageType string `mapstructure:"storagetype" yaml:"StorageType"`
 		SupportedChecksumTypes []string `mapstructure:"supportedchecksumtypes" yaml:"SupportedChecksumTypes"`
@@ -592,6 +667,14 @@ type configWithType struct {
 		SelfTestMaxAge struct { Type string; Value time.Duration }
 		SentinelLocation struct { Type string; Value string }
 		StorageLocation struct { Type string; Value string }
+		Throttle struct {
+			EMAWindow struct { Type string; Value time.Duration }
+			PendingBufferSize struct { Type string; Value int }
+			PerOriginActivePercent struct { Type string; Value int }
+			PerOriginPendingSize struct { Type string; Value int }
+			PerOriginStarvingPercent struct { Type string; Value int }
+			RetryAfter struct { Type string; Value time.Duration }
+		}
 		Url struct { Type string; Value string }
 		WorkerCount struct { Type string; Value int }
 		XRootDPrefix struct { Type string; Value string }
@@ -720,6 +803,10 @@ type configWithType struct {
 		StorageDirs struct { Type string; Value any }
 	}
 	Logging struct {
+		Buffer struct {
+			BatchLines struct { Type string; Value int }
+			MaxSize struct { Type string; Value string }
+		}
 		Cache struct {
 			Http struct { Type string; Value string }
 			Lotman struct { Type string; Value string }
@@ -746,6 +833,15 @@ type configWithType struct {
 			Scitokens struct { Type string; Value string }
 			Xrd struct { Type string; Value string }
 			Xrootd struct { Type string; Value string }
+		}
+		Rotation struct {
+			Disable struct { Type string; Value bool }
+			DisableCompress struct { Type string; Value bool }
+			FlushInterval struct { Type string; Value time.Duration }
+			Frequency struct { Type string; Value string }
+			MaxRetentionPeriod struct { Type string; Value time.Duration }
+			MaxRetentionSize struct { Type string; Value string }
+			MaxSize struct { Type string; Value string }
 		}
 	}
 	Lotman struct {
@@ -822,6 +918,7 @@ type configWithType struct {
 		EnableOIDC struct { Type string; Value bool }
 		EnablePublicReads struct { Type string; Value bool }
 		EnableReads struct { Type string; Value bool }
+		EnableStandaloneMode struct { Type string; Value bool }
 		EnableTLSClientAuth struct { Type string; Value bool }
 		EnableTransferAPI struct { Type string; Value bool }
 		EnableVoms struct { Type string; Value bool }
@@ -848,6 +945,39 @@ type configWithType struct {
 		HttpAuthTokenPassthrough struct { Type string; Value bool }
 		HttpServiceUrl struct { Type string; Value string }
 		IssuerMode struct { Type string; Value string }
+		Metadata struct {
+			AccessFlushInterval struct { Type string; Value time.Duration }
+			AllowMultipart struct { Type string; Value bool }
+			BatchBufferSize struct { Type string; Value int }
+			BatchFlushInterval struct { Type string; Value time.Duration }
+			Enabled struct { Type string; Value bool }
+			Endpoint struct { Type string; Value string }
+			ErrorAfter struct { Type string; Value time.Duration }
+			EtagPolicy struct { Type string; Value string }
+			History struct {
+				PruneBatchSize struct { Type string; Value int }
+				PruneInterval struct { Type string; Value time.Duration }
+				RetentionDays struct { Type string; Value int }
+			}
+			MaxBackoff struct { Type string; Value time.Duration }
+			MaxInflight struct { Type string; Value int }
+			MaxMetadataBytes struct { Type string; Value int }
+			MaxQueuedBytesPerNamespace struct { Type string; Value int }
+			MaxQueuedPerNamespace struct { Type string; Value int }
+			MetadataPartName struct { Type string; Value string }
+			MinBackoff struct { Type string; Value time.Duration }
+			Mode struct { Type string; Value string }
+			ObjectPartName struct { Type string; Value string }
+			RatePerSecond struct { Type string; Value int }
+			ReconcileEnabled struct { Type string; Value bool }
+			ReconcileInterval struct { Type string; Value time.Duration }
+			ReconcileSettleWindow struct { Type string; Value time.Duration }
+			RequestTimeout struct { Type string; Value time.Duration }
+			TokenLifetime struct { Type string; Value time.Duration }
+			TrackAccess struct { Type string; Value bool }
+			TrackExtra struct { Type string; Value bool }
+			WarnAfter struct { Type string; Value time.Duration }
+		}
 		Mode struct { Type string; Value string }
 		Multiuser struct { Type string; Value bool }
 		MultiuserMinID struct { Type string; Value int }
@@ -855,7 +985,22 @@ type configWithType struct {
 		MultiuserVarlinkSocketPath struct { Type string; Value string }
 		NamespacePrefix struct { Type string; Value string }
 		ObjectProviderURL struct { Type string; Value string }
+		PStoreDataScanInterval struct { Type string; Value time.Duration }
+		PStoreDataScanRate struct { Type string; Value byte_rate.ByteRate }
+		PStoreIndexCheckInterval struct { Type string; Value time.Duration }
+		PStoreInlineMaxBytes struct { Type string; Value int }
+		PStoreLocation struct { Type string; Value string }
+		PStoreMetadataBackupInterval struct { Type string; Value time.Duration }
+		PStoreMetadataBackupLocation struct { Type string; Value string }
+		PStoreMetadataBackupsToKeep struct { Type string; Value int }
+		PStoreStorageDirs struct { Type string; Value any }
 		Port struct { Type string; Value int }
+		Posc struct {
+			Enabled struct { Type string; Value bool }
+			FileTimeout struct { Type string; Value time.Duration }
+			KeepaliveInterval struct { Type string; Value time.Duration }
+			Prefix struct { Type string; Value string }
+		}
 		RunLocation struct { Type string; Value string }
 		S3AccessKeyfile struct { Type string; Value string }
 		S3Bucket struct { Type string; Value string }
@@ -896,6 +1041,11 @@ type configWithType struct {
 		SelfTest struct { Type string; Value bool }
 		SelfTestInterval struct { Type string; Value time.Duration }
 		SelfTestMaxAge struct { Type string; Value time.Duration }
+		StorageCacheDefaultMaxAge struct { Type string; Value time.Duration }
+		StorageCacheLocation struct { Type string; Value string }
+		StorageCacheMaxConcurrentFetches struct { Type string; Value int }
+		StorageCacheRevalidationJitter struct { Type string; Value int }
+		StorageCacheSize struct { Type string; Value string }
 		StoragePrefix struct { Type string; Value string }
 		StorageType struct { Type string; Value string }
 		SupportedChecksumTypes struct { Type string; Value []string }

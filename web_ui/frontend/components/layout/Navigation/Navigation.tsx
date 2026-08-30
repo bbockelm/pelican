@@ -6,10 +6,25 @@ import { getExportData } from '@/components/DataExportTable';
 import { getUser } from '@/helpers/login';
 import { Sidebar } from '@/components/layout/Navigation/Sidebar';
 import NavigationConfig from '@/app/navigation';
-import { getEnabledServers } from '@/helpers/util';
+import { getServerInfo } from '@/helpers/util';
 import { Box, Typography } from '@mui/material';
 import { AppBar } from '@/components/layout/Navigation/AppBar';
 import { ReactNode } from 'react';
+
+/** Recursively removes federationOnly items (and prunes emptied parents). */
+const filterFederationOnly = (
+  items?: StaticNavigationItemProps[]
+): StaticNavigationItemProps[] | undefined => {
+  return items
+    ?.filter((item) => !item.federationOnly)
+    .map((item) => {
+      if (!('children' in item)) {
+        return item;
+      }
+      return { ...item, children: filterFederationOnly(item.children) ?? [] };
+    })
+    .filter((item) => !('children' in item) || item.children.length > 0);
+};
 
 const Navigation = ({
   children,
@@ -37,7 +52,8 @@ const Navigation = ({
     getExportData,
     { errorRetryCount: 0 }
   );
-  const { data: servers } = useSWR('getServers', getEnabledServers);
+  const { data: serverInfo } = useSWR('getServerInfo', getServerInfo);
+  const servers = serverInfo?.servers;
 
   // Handle navigation for shared pages
   // Best we can do is sending them to root if there are many running servers
@@ -49,6 +65,13 @@ const Navigation = ({
     } else {
       config = NavigationConfig[servers ? servers[0] : 'shared'];
     }
+  }
+
+  // Drop items whose only audience is a Director or Registry when this server
+  // belongs to no federation. Filtering here (rather than inside each
+  // NavigationItem) keeps the Sidebar and AppBar renderers in agreement.
+  if (serverInfo?.standaloneOrigin) {
+    config = filterFederationOnly(config);
   }
 
   // Per the operator demo feedback: when running multiple browser
@@ -67,7 +90,7 @@ const Navigation = ({
   const topOffset = isAdmin ? ADMIN_BANNER_HEIGHT_PX : 0;
 
   return (
-    <>
+    <Box id={'navigation'}>
       {isAdmin && (
         <Box
           sx={{
@@ -105,14 +128,15 @@ const Navigation = ({
         </Box>
       )}
       <Box
+        id={'header'}
         sx={{
-          display: 'flex',
           flexDirection: { xs: 'column', md: 'row' },
           // Push *non-fixed* descendants below the banner. The
           // sidebar and burger drawer manage their own offset via
           // the topOffset prop because they're position: fixed and
           // don't honor parent padding.
           pt: `${topOffset}px`,
+          width: '100%',
         }}
       >
         <Box
@@ -123,6 +147,7 @@ const Navigation = ({
           <Sidebar
             exportType={exports?.type}
             role={user?.role}
+            scopes={user?.scopes}
             config={config as StaticNavigationItemProps[]}
             topOffset={topOffset}
           />
@@ -135,13 +160,14 @@ const Navigation = ({
           <AppBar
             exportType={exports?.type}
             role={user?.role}
+            scopes={user?.scopes}
             config={config as StaticNavigationItemProps[]}
             topOffset={topOffset}
           />
         </Box>
         {children}
       </Box>
-    </>
+    </Box>
   );
 };
 

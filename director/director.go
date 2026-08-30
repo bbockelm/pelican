@@ -138,8 +138,12 @@ const (
 
 var (
 	minClientVersion, _ = version.NewVersion("7.0.0")
-	minOriginVersion, _ = version.NewVersion("7.0.0")
-	minCacheVersion, _  = version.NewVersion("7.3.0")
+	// Origins >= 7.9.0 and caches >= 7.8.2 report their registry prefix in the
+	// advertisement; older versions do not and can no longer be verified, so the
+	// version gate rejects them here with an accurate "please update" message
+	// (the missing-registry-prefix check later is a defensive fallback).
+	minOriginVersion, _ = version.NewVersion("7.9.0")
+	minCacheVersion, _  = version.NewVersion("7.8.2")
 	// TODO: Consolidate the two maps into server_structs.Advertisement. [#1391]
 	healthTestUtils      = make(map[string]*healthTestUtil) // The utilities for the director file tests. The key is string form of ServerAd.URL
 	healthTestUtilsMutex = sync.RWMutex{}
@@ -410,81 +414,19 @@ func corsHeadersMiddleware(ginCtx *gin.Context) {
 // issued a request where token generation may be needed. This header informs the client
 // of the issuer that can be used to generate a token for the requested resource.
 func generateXAuthHeader(ginCtx *gin.Context, namespaceAd server_structs.NamespaceAd) {
-	if len(namespaceAd.Issuer) != 0 {
-		issStrings := []string{}
-		for _, tokIss := range namespaceAd.Issuer {
-			issStrings = append(issStrings, "issuer="+tokIss.IssuerUrl.String())
-		}
-		ginCtx.Writer.Header()["X-Pelican-Authorization"] = issStrings
-	}
+	server_structs.SetXAuthHeader(ginCtx.Writer.Header(), namespaceAd)
 }
 
 // Generates the X-Pelican-Token-Generation header (when applicable) for responses that have
 // issued a request where token generation may be needed.
 func generateXTokenGenHeader(ginCtx *gin.Context, namespaceAd server_structs.NamespaceAd) {
-	if len(namespaceAd.Generation) != 0 {
-		tokenGen := ""
-		first := true
-		// TODO: At some point, the director stopped sending the `base-path` key in the token gen header. I'm unsure of the _proper_ way
-		// to fix this because the token gen header uses the issuer URL from NamespaceAd.Generation.CredentialIssuer, whereas basepaths
-		// come from NamespaceAd.Issuer.BasePaths. For now, connecting these two means checking if they have the same issuer URL. This
-		// really needs to be cleaned up in the future, and maybe we need to give more thought to why we have these two structs in the
-		// ad. See https://github.com/PelicanPlatform/pelican/issues/1540
-		var basePath string
-		for _, issuer := range namespaceAd.Issuer {
-			if issuer.IssuerUrl.String() == namespaceAd.Generation[0].CredentialIssuer.String() {
-				if len(issuer.BasePaths) > 0 {
-					basePath = issuer.BasePaths[0]
-				}
-				break
-			}
-		}
-
-		hdrVals := []string{namespaceAd.Generation[0].CredentialIssuer.String(), fmt.Sprint(namespaceAd.Generation[0].MaxScopeDepth),
-			string(namespaceAd.Generation[0].Strategy), basePath}
-		for idx, hdrKey := range []string{"issuer", "max-scope-depth", "strategy", "base-path"} {
-			hdrVal := hdrVals[idx]
-			if hdrVal == "" {
-				continue
-			} else if hdrKey == "max-scope-depth" && hdrVal == "0" {
-				// don't send a 0 max-scope-depth because it's malformed and probably means there should be no token generation header
-				continue
-			}
-			if !first {
-				tokenGen += ", "
-			}
-			first = false
-			tokenGen += hdrKey + "=" + hdrVal
-		}
-
-		if tokenGen != "" {
-			ginCtx.Writer.Header()["X-Pelican-Token-Generation"] = []string{tokenGen}
-		}
-	}
+	server_structs.SetXTokenGenHeader(ginCtx.Writer.Header(), namespaceAd)
 }
 
 // Generate the X-Pelican-Namespace header, which includes information about the namespace and whether token auth is required
 // for reading from this namespace
 func generateXNamespaceHeader(ginCtx *gin.Context, oAds []server_structs.ServerAd, bestNSAd server_structs.NamespaceAd) {
-	var collUrl string
-	// If the namespace or the origin does not allow directory listings, then we should not advertise a collections-url.
-	for _, oAd := range oAds {
-		if oAd.Caps.Listings && bestNSAd.Caps.Listings {
-			if !bestNSAd.Caps.PublicReads && oAd.AuthURL != (url.URL{}) {
-				collUrl = oAd.AuthURL.String()
-				break
-			} else {
-				collUrl = oAd.URL.String()
-				break
-			}
-		}
-	}
-
-	xPelicanNamespace := fmt.Sprintf("namespace=%s, require-token=%v", bestNSAd.Path, !bestNSAd.Caps.PublicReads)
-	if collUrl != "" {
-		xPelicanNamespace += fmt.Sprintf(", collections-url=%s", collUrl)
-	}
-	ginCtx.Writer.Header()["X-Pelican-Namespace"] = []string{xPelicanNamespace}
+	server_structs.SetXNamespaceHeader(ginCtx.Writer.Header(), oAds, bestNSAd)
 }
 
 // Generate the X-Pelican-Broker header using the first origin ad we find supporting
@@ -1140,6 +1082,69 @@ func ShortcutMiddleware(defaultResponse string) gin.HandlerFunc {
 	}
 }
 
+// resolveRegisteredServerName returns the server name registered under prefix at
+// the registry. It is a package variable so tests can stub it.
+var resolveRegisteredServerName = func(ctx context.Context, prefix string) (string, error) {
+	reg, err := server_utils.GetServerMetadataFromReg(ctx, prefix)
+	if err != nil {
+		return "", err
+	}
+	return reg.Name, nil
+}
+
+// registeredNameCache caches prefix → registered-name lookups so that
+// downtimeNameAuthorized doesn't cost a registry round-trip on every
+// advertisement. Registered names change rarely; lookup errors are not cached.
+var registeredNameCache = ttlcache.New(
+	ttlcache.WithTTL[string, string](10*time.Minute),
+	ttlcache.WithDisableTouchOnHit[string, string](),
+)
+
+// downtimeNameAuthorized guards the name-keyed downtime/routing filter against a
+// cross-server manipulation attack: the advertise token only authenticates the
+// server's registry prefix, not its free-form Name, so a server holding a valid
+// token for its own prefix could otherwise advertise another server's name and
+// mutate the victim's filter state — suppress it with a shutdown status or a
+// downtime entry, or clear the victim's active downtime by advertising its name
+// with an empty downtime list.
+func downtimeNameAuthorized(ctx context.Context, adName string, registryPrefix string) bool {
+	// The downtime/routing filter is a server concept; only a genuine origin or
+	// cache prefix may touch it. A namespace prefix (e.g. /foo/bar) must never
+	// mutate a server's downtime state, even one the caller legitimately controls
+	// and holds a valid advertise token for
+	if !server_structs.IsOriginNS(registryPrefix) && !server_structs.IsCacheNS(registryPrefix) {
+		log.Warningf("Ignoring downtime/status in advertisement from %q: registry prefix %q is not a server (origin/cache) prefix", adName, registryPrefix)
+		return false
+	}
+
+	var registeredName string
+	if item := registeredNameCache.Get(registryPrefix); item != nil {
+		registeredName = item.Value()
+	} else {
+		lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		name, err := resolveRegisteredServerName(lookupCtx, registryPrefix)
+		if err != nil || name == "" {
+			// Fail closed: without a positively-resolved registered name we cannot
+			// confirm the advertiser owns adName, so we do not let it mutate another
+			// server's filter state. Do not cache this non-result.
+			if err != nil {
+				log.Warningf("Ignoring downtime/status in advertisement from %q: could not resolve the server registered under %q: %v", adName, registryPrefix, err)
+			} else {
+				log.Warningf("Ignoring downtime/status in advertisement from %q: no server name is registered under %q", adName, registryPrefix)
+			}
+			return false
+		}
+		registeredNameCache.Set(registryPrefix, name, ttlcache.DefaultTTL)
+		registeredName = name
+	}
+	if registeredName != adName {
+		log.Warningf("Ignoring downtime/status in advertisement from %q: it does not match the name %q registered under prefix %q", adName, registeredName, registryPrefix)
+		return false
+	}
+	return true
+}
+
 func registerServerAd(engineCtx context.Context, ctx *gin.Context, sType server_structs.ServerType) {
 	ctx.Set("serverType", sType.String())
 	tokens, present := ctx.Request.Header["Authorization"]
@@ -1165,19 +1170,30 @@ func registerServerAd(engineCtx context.Context, ctx *gin.Context, sType server_
 	// Check if the allowed prefixes for caches data from the registry
 	// has been initialized in the director
 	if sType == server_structs.CacheType {
-		// If the allowed prefix for caches data is not initialized,
-		// wait for it to be initialized for 3 seconds.
-		if allowedPrefixesForCachesLastSetTimestamp.Load() == 0 {
-			log.Warning("Allowed prefixes for caches data is not initialized. Waiting for initialization before continuing with processing cache server advertisement.")
-			start := time.Now()
-			// Wait until last set timestamp is updated
-			for allowedPrefixesForCachesLastSetTimestamp.Load() == 0 {
-				if time.Since(start) >= 3*time.Second {
-					log.Error("Allowed prefix for caches data was not initialized within the 3-second timeout")
-					break
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
+		// A cache ad that arrives before the director has its allowed prefixes
+		// cannot be judged yet, so hold it rather than turning it away. The
+		// registry fetch behind this retries every second until it succeeds,
+		// but a cache whose ad is refused does not offer itself again until
+		// its next advertisement -- Server.AdvertisementInterval, a minute by
+		// default, with no retry in between. Refusing therefore costs the
+		// federation a minute without this cache to settle a condition that
+		// usually clears in seconds.
+		if !waitForAllowedPrefixesForCaches(ctx.Request.Context()) {
+			log.Error("Allowed prefixes for caches data was not initialized before this cache advertisement had to be answered")
+			// Distinct from the stale case below: nothing is known to be
+			// wrong, the director is simply not ready, so say so with a
+			// retryable status rather than a 500.
+			//
+			// Note that Pelican's own advertiser does not read this hint --
+			// doAdvertise treats any failure alike and waits for its next
+			// cycle -- so this is correct HTTP for other clients rather than
+			// something that shortens the retry today.
+			ctx.Header("Retry-After", "1")
+			ctx.JSON(http.StatusServiceUnavailable, server_structs.SimpleApiResp{
+				Status: server_structs.RespFailed,
+				Msg:    "The Director has not yet fetched this cache's allowed prefixes from the Registry; please retry shortly.",
+			})
+			return
 		}
 
 		// If the allowed prefix for caches data is stale (older than 15 minutes),
@@ -1277,16 +1293,43 @@ func registerServerAd(engineCtx context.Context, ctx *gin.Context, sType server_
 	token := strings.TrimPrefix(tokens[0], "Bearer ")
 
 	registryPrefix := server_utils.RemoveTrailingSlash(ad.RegistryPrefix)
-	verifyServer := true
 	if registryPrefix == "" {
-		if sType == server_structs.OriginType {
-			// For origins < 7.9.0, they are not registered, and we skip the verification
-			verifyServer = false
-		} else {
-			// For caches <= 7.8.1, they don't have RegistryPrefix
-			// so we fall back to Name
-			registryPrefix = server_structs.GetCacheNs(ad.Name)
-		}
+		// Every supported server (Pelican >= 7.9.0 origins, >= 7.8.2 caches) registers
+		// itself and reports its registry prefix in the ad; without the prefix the
+		// advertise token cannot be verified.
+		log.Warningf("Rejecting %s advertisement from %q: no registry prefix present in the ad", sType.String(), ad.Name)
+		ctx.JSON(http.StatusForbidden, server_structs.SimpleApiResp{
+			Status: server_structs.RespFailed,
+			Msg:    fmt.Sprintf("%s advertisement rejected: no registry prefix present in the ad. Ensure the server runs a supported Pelican version and is registered at the federation registry", sType.String()),
+		})
+		// This rejection happens before the advertise token is verified, so ad.Name
+		// is unauthenticated and attacker-controllable. Record it under a fixed label
+		// to avoid unbounded Prometheus label cardinality from bogus advertisements.
+		metrics.PelicanDirectorRejectedAdvertisements.With(prometheus.Labels{"hostname": "unverified"}).Inc()
+		return
+	}
+
+	// The advertise token only proves the caller holds an approved key for the
+	// prefix it named; it does not prove that registry prefix is a server prefix.
+	// This ensures a caller cannot enroll an origin/cache with a namespace prefix,
+	// also cannot cross-register origin using cache's identity (or vice versa).
+	var prefixTypeOK bool
+	switch sType {
+	case server_structs.OriginType:
+		prefixTypeOK = server_structs.IsOriginNS(registryPrefix)
+	case server_structs.CacheType:
+		prefixTypeOK = server_structs.IsCacheNS(registryPrefix)
+	}
+	if !prefixTypeOK {
+		log.Warningf("Rejecting %s advertisement from %q: registry prefix %q is not a %s server prefix", sType.String(), ad.Name, registryPrefix, sType.String())
+		ctx.JSON(http.StatusForbidden, server_structs.SimpleApiResp{
+			Status: server_structs.RespFailed,
+			Msg:    fmt.Sprintf("%s advertisement rejected: registry prefix %q is not a valid %s registration prefix", sType.String(), registryPrefix, sType.String()),
+		})
+		// Reached before the advertise token is verified, so ad.Name is
+		// unauthenticated; use a fixed label to bound Prometheus cardinality.
+		metrics.PelicanDirectorRejectedAdvertisements.With(prometheus.Labels{"hostname": "unverified"}).Inc()
+		return
 	}
 
 	approvalErrMsg := "You may find more information on " + param.Server_ExternalWebUrl.GetString()
@@ -1299,33 +1342,31 @@ func registerServerAd(engineCtx context.Context, ctx *gin.Context, sType server_
 		approvalErrMsg = fmt.Sprintf("Visit %s for help.", param.Director_SupportContactUrl.GetString())
 	}
 
-	if verifyServer {
-		ok, err := verifyAdvertiseToken(engineCtx, token, registryPrefix)
-		if err != nil {
-			if err == adminApprovalErr {
-				log.Warningf("Failed to verify token. %s %q was not approved", sType.String(), ad.Name)
-				ctx.JSON(http.StatusForbidden, gin.H{"approval_error": true, "error": fmt.Sprintf("%s %q was not approved by an administrator. %s", sType.String(), ad.Name, approvalErrMsg)})
-				metrics.PelicanDirectorRejectedAdvertisements.With(prometheus.Labels{"hostname": ad.Name}).Inc()
-				return
-			} else {
-				log.Warningf("Failed to verify advertise token for %s %q (prefix %q): %v", sType.String(), ad.Name, registryPrefix, err)
-				ctx.JSON(http.StatusForbidden, server_structs.SimpleApiResp{
-					Status: server_structs.RespFailed,
-					Msg:    fmt.Sprintf("Authorization token verification failed %v", err),
-				})
-				metrics.PelicanDirectorRejectedAdvertisements.With(prometheus.Labels{"hostname": ad.Name}).Inc()
-				return
-			}
-		}
-		if !ok {
-			log.Warningf("%s %v advertised without valid token scope\n", sType, ad.Name)
+	ok, err := verifyAdvertiseToken(engineCtx, token, registryPrefix)
+	if err != nil {
+		if err == adminApprovalErr {
+			log.Warningf("Failed to verify token. %s %q was not approved", sType.String(), ad.Name)
+			ctx.JSON(http.StatusForbidden, gin.H{"approval_error": true, "error": fmt.Sprintf("%s %q was not approved by an administrator. %s", sType.String(), ad.Name, approvalErrMsg)})
+			metrics.PelicanDirectorRejectedAdvertisements.With(prometheus.Labels{"hostname": ad.Name}).Inc()
+			return
+		} else {
+			log.Warningf("Failed to verify advertise token for %s %q (prefix %q): %v", sType.String(), ad.Name, registryPrefix, err)
 			ctx.JSON(http.StatusForbidden, server_structs.SimpleApiResp{
 				Status: server_structs.RespFailed,
-				Msg:    "Authorization token verification failed. Token missing required scope",
+				Msg:    fmt.Sprintf("Authorization token verification failed %v", err),
 			})
 			metrics.PelicanDirectorRejectedAdvertisements.With(prometheus.Labels{"hostname": ad.Name}).Inc()
 			return
 		}
+	}
+	if !ok {
+		log.Warningf("%s %v advertised without valid token scope\n", sType, ad.Name)
+		ctx.JSON(http.StatusForbidden, server_structs.SimpleApiResp{
+			Status: server_structs.RespFailed,
+			Msg:    "Authorization token verification failed. Token missing required scope",
+		})
+		metrics.PelicanDirectorRejectedAdvertisements.With(prometheus.Labels{"hostname": ad.Name}).Inc()
+		return
 	}
 
 	// For origin, also verify namespace registrations
@@ -1381,36 +1422,53 @@ func registerServerAd(engineCtx context.Context, ctx *gin.Context, sType server_
 		ad.Version = "unknown"
 	}
 
+	// The downtime/routing filter below is keyed by the advertised server name,
+	// which the advertise token does not authenticate — it only authenticates the
+	// registry prefix. downtimeNameAuthorized gates BOTH the downtime handling and
+	// the Status-driven shutdownFiltered entry: when the advertised name doesn't
+	// match the name registered under that prefix, we still accept the ad (a
+	// legitimate server may have a local sitename that differs from its
+	// registration) but skip all filter mutation, so a server can neither suppress
+	// nor resurrect routing for a name it doesn't own.
 	sn := ad.Name
-	// Process received server(origin/cache) downtimes and toggle the director's in-memory downtime tracker
-	applyServerDowntimes(sn, ad.Downtimes)
+	if downtimeNameAuthorized(engineCtx, sn, registryPrefix) {
+		// Process received server(origin/cache) downtimes and toggle the director's in-memory downtime tracker
+		applyServerDowntimes(sn, ad.Downtimes)
 
-	// "Status" represents the server's overall health status. It is introduced in Pelican 7.17.0
-	if ad.Status != "" { // For backward compatibility, we only process this if it is set
-		// If the server is about to shutdown, we silently put it into downtime.
-		// Then it will not receive new requests from the Director, but it will still be able to serve the existing ones.
-		if metrics.ParseHealthStatus(ad.Status) == metrics.StatusShuttingDown {
-			filteredServersMutex.Lock()
-			// Inspect the existing downtime status for this server
-			existingFilterType, isServerFiltered := filteredServers[sn]
+		// "Status" represents the server's overall health status. It is introduced in Pelican 7.17.0
+		if ad.Status != "" { // For backward compatibility, we only process this if it is set
+			// If the server is about to shutdown, we silently put it into downtime.
+			// Then it will not receive new requests from the Director, but it will still be able to serve the existing ones.
+			if metrics.ParseHealthStatus(ad.Status) == metrics.StatusShuttingDown {
+				filteredServersMutex.Lock()
+				// Inspect the existing downtime status for this server
+				existingFilterType, isServerFiltered := filteredServers[sn]
 
-			// Put the server in downtime only if no filter (downtime) exists or it was tempAllowed
-			if !isServerFiltered || existingFilterType == tempAllowed {
-				filteredServers[sn] = shutdownFiltered
-				log.Debugf("Server %s is shutting down, applying downtime to prevent new transfer requests", sn)
-			}
-			filteredServersMutex.Unlock()
-		} else {
-			// If the server is back online, we flush out existing shutdown filter if it exists
-			filteredServersMutex.Lock()
-			if existingFilterType, isServerFiltered := filteredServers[sn]; isServerFiltered {
-				if existingFilterType == shutdownFiltered {
-					delete(filteredServers, sn)
-					log.Debugf("Removed the active downtime for server %s as it has come back online", sn)
+				// Put the server in downtime only if no filter (downtime) exists or it was tempAllowed
+				if !isServerFiltered || existingFilterType == tempAllowed {
+					filteredServers[sn] = shutdownFiltered
+					log.Debugf("Server %s is shutting down, applying downtime to prevent new transfer requests", sn)
 				}
+				filteredServersMutex.Unlock()
+			} else {
+				// If the server is back online, we flush out existing shutdown filter if it exists
+				filteredServersMutex.Lock()
+				if existingFilterType, isServerFiltered := filteredServers[sn]; isServerFiltered {
+					if existingFilterType == shutdownFiltered {
+						delete(filteredServers, sn)
+						log.Debugf("Removed the active downtime for server %s as it has come back online", sn)
+					}
+				}
+				filteredServersMutex.Unlock()
 			}
-			filteredServersMutex.Unlock()
 		}
+	} else {
+		// Name unauthorized for this prefix: do not touch filteredServers/serverDowntimes
+		// above, and clear the ad's Downtimes so they aren't persisted or forwarded to
+		// peer directors. Note ad.Status is intentionally left intact — it is still the
+		// server's own health report and is forwarded/stored — it just cannot drive a
+		// shutdownFiltered entry under an unverified name (that path is skipped above).
+		ad.Downtimes = nil
 	}
 
 	// Forward to other directors, if applicable
@@ -1440,7 +1498,7 @@ func finishRegisterServeAd(engineCtx context.Context, ctx *gin.Context, ad *serv
 	// Disable director test if the server isn't POSIX-like (posix / posixv2).
 	// Remote-protocol backends (S3, HTTPS, Globus, etc.) cannot accept the
 	// probe-file write/read that the director test relies on.
-	if !st.IsPosixLike() && !ad.DisableDirectorTest {
+	if !st.SupportsSelfTest() && !ad.DisableDirectorTest {
 		log.Warningf("%s server '%s' with storage type '%s' enabled director test. This is not supported.", sType, ad.Name, string(st))
 		ad.DisableDirectorTest = true
 	}
