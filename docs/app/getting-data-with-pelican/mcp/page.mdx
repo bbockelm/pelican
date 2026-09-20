@@ -1,0 +1,198 @@
+# Using Pelican with AI Assistants via MCP
+
+The Pelican Model Context Protocol (MCP) server lets AI assistants such as Claude Code and VS Code Copilot browse and transfer objects in a Pelican federation on your behalf.
+You describe what you want in natural language, and the assistant drives the Pelican client for you.
+
+## What is MCP?
+
+The [Model Context Protocol](https://modelcontextprotocol.io/) is an open standard for connecting AI assistants to external tools and data.
+Running `pelican mcp serve` exposes the Pelican client as a set of tools your assistant can call:
+
+- Inspect object metadata and list collections
+- Download objects and collections to local paths
+- Upload local files and directories into the federation
+- Copy data between two locations in the federation without it passing through your machine
+- Track long-running transfers and cancel them
+
+## How it works
+
+The MCP server is a thin front end.
+It does not perform transfers itself; it hands them to the [Pelican client agent](../../commands-reference/pelican/client-agent/page.mdx), starting the agent automatically if it is not already running.
+
+This matters for two reasons.
+
+**Transfers are asynchronous.**
+MCP clients cut a tool call off after a short timeout, typically about a minute, which is far less time than a large upload needs.
+Instead of blocking, `pelican_get` and `pelican_put` submit the transfer to the agent and wait briefly for it to finish.
+Short transfers therefore complete in a single tool call.
+Anything longer returns a job ID immediately, and the assistant polls `pelican_job_status` until the job is done.
+Because the agent owns the transfer, it keeps running even if the assistant's session ends.
+
+**The MCP server never handles your credentials.**
+Your Pelican credentials live in an encrypted file protected by a password.
+The MCP server is launched by your AI assistant as a subprocess with no terminal, so it cannot prompt you for that password, and there is deliberately no way to give it one.
+An environment variable in an MCP client config would leave the password in plaintext on disk, and typing it into the chat window would put it in the conversation transcript sent to the model provider.
+Instead, the agent's credential wallet is unlocked out of band, from a real terminal, and the MCP server only reports when that is needed.
+
+## Before starting
+
+This guide assumes:
+
+- Pelican is installed and `pelican` is on your `PATH`
+- You are familiar with [Pelican's command line client](../client/page.mdx)
+- You have an MCP-compatible AI assistant installed
+
+Confirm the server is available:
+
+```bash copy
+pelican mcp --help
+```
+
+## Setting up with Claude Code
+
+Register Pelican as a local stdio server:
+
+```bash copy
+claude mcp add pelican --transport stdio pelican mcp serve
+```
+
+Claude Code loads the server on demand, so no restart is needed.
+
+## Setting up with VS Code
+
+Add Pelican to your MCP configuration, either in the workspace's `.vscode/mcp.json` or in your user settings:
+
+```json copy
+{
+  "servers": {
+    "pelican": {
+      "type": "stdio",
+      "command": "pelican",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+Reload the window, then open Copilot Chat in agent mode.
+
+## Working with protected data
+
+Public namespaces need no setup.
+Protected namespaces need a credential, which means unlocking the agent's wallet from a terminal:
+
+```bash copy
+pelican client-agent warm osdf:///my/protected/prefix
+```
+
+Add `--write` when you intend to upload:
+
+```bash copy
+pelican client-agent warm osdf:///my/protected/prefix --write
+```
+
+This acquires the credential interactively, prompting in your browser if needed, and unlocks the agent's wallet so the agent can use and refresh that credential while jobs run.
+Ask your assistant to call `pelican_wallet_status` if you are not sure whether this is needed.
+
+The wallet does not stay unlocked forever.
+The agent shuts down after a period of inactivity, configured by `ClientAgent.IdleTimeout`, and locks the wallet when it does.
+Run `pelican client-agent warm` again if a transfer starts failing on authorization.
+
+## Available tools
+
+| Tool | Purpose |
+| --- | --- |
+| `pelican_stat` | Metadata for an object or collection: size, modification time, checksums |
+| `pelican_list` | Contents of a collection |
+| `pelican_get` | Download an object or collection to a local path |
+| `pelican_put` | Upload a local file or directory into the federation |
+| `pelican_copy` | Copy between two federation locations (third-party copy) |
+| `pelican_job_status` | Progress of an asynchronous transfer job |
+| `pelican_job_list` | Recent transfer jobs known to the agent |
+| `pelican_job_cancel` | Cancel an in-flight job |
+| `pelican_wallet_status` | Whether the agent's wallet is unlocked |
+
+`pelican_get`, `pelican_put`, and `pelican_copy` all take `source`, `destination`, and an optional `recursive` flag.
+Each returns a job record containing `job_id`, `status`, `done`, and byte counts.
+When `done` is false, the assistant should poll `pelican_job_status` with that `job_id` rather than resubmitting the transfer.
+
+### Third-party copy
+
+`pelican_copy` moves data between two places in the federation.
+Both `source` and `destination` must be `pelican://` or `osdf://` URLs; the bytes travel directly between the two services and never transit your machine, which makes it far faster than downloading and re-uploading.
+
+Because both ends are remote, a copy needs two credentials: read access to the source and write access to the destination.
+Warm both before asking your assistant to start one:
+
+```bash copy
+pelican client-agent warm osdf:///source/prefix
+pelican client-agent warm osdf:///destination/prefix --write
+```
+
+`pelican_copy` refuses a local path on either end rather than quietly turning into a download or an upload.
+Use `pelican_get` or `pelican_put` for those.
+
+## Example prompts
+
+Explore a namespace:
+
+```
+What's in osdf:///ospool/uc-shared/public/OSG-Staff/validation?
+```
+
+Download, naming the destination explicitly:
+
+```
+Download osdf:///ospool/uc-shared/public/OSG-Staff/validation/test.txt to ~/data/
+```
+
+Copy between two federation locations without the data touching your laptop:
+
+```
+Copy osdf:///source/prefix/dataset to osdf:///destination/prefix/dataset, recursively
+```
+
+Upload a large directory and check on it later:
+
+```
+Upload ~/results/run-42 to osdf:///my/protected/prefix/run-42, recursively
+```
+
+```
+How's that upload going?
+```
+
+## Troubleshooting
+
+### The assistant reports it cannot reach the client agent
+
+The MCP server starts the agent automatically, so this usually means the agent could not start.
+Try starting it by hand to see the error:
+
+```bash copy
+pelican client-agent start --foreground
+```
+
+### Transfers fail on protected data
+
+Ask the assistant to call `pelican_wallet_status`.
+If the wallet is locked, run `pelican client-agent warm <url>` in a terminal, adding `--write` for uploads.
+
+If no credential file exists yet, `pelican client-agent warm` will walk you through acquiring one and ask you to create a password protecting it.
+Do not give that password to your assistant; the MCP server cannot accept it and does not need it.
+
+### The assistant does not use the Pelican tools
+
+Name the federation explicitly in your prompt, using a full `pelican://` or `osdf://` URL, and confirm the server is connected with `claude mcp list` or the VS Code MCP panel.
+
+### Diagnosing protocol problems
+
+The server writes JSON-RPC on stdout and logs on stderr, so logs cannot corrupt the protocol stream.
+Your MCP client captures stderr; consult its logs when the server fails to start.
+Add `--debug` to the server's arguments in your MCP client config for more detail.
+
+## Learn more
+
+- [Model Context Protocol](https://modelcontextprotocol.io/)
+- [Pelican client agent](../../commands-reference/pelican/client-agent/page.mdx)
+- [Pelican command line client](../client/page.mdx)

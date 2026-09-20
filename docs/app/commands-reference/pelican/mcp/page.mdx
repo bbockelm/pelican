@@ -1,0 +1,42 @@
+---
+title: pelican mcp
+---
+
+## pelican mcp
+
+Model Context Protocol (MCP) server for the Pelican client
+
+### Synopsis
+
+Expose the Pelican client to AI assistants over the Model Context Protocol.
+
+The server speaks JSON-RPC on stdin/stdout and is meant to be launched by an MCP
+client (Claude Code, VS Code Copilot, and similar) rather than run by hand.
+
+Transfers are delegated to the Pelican client agent, which runs them
+asynchronously; the assistant receives a job ID it can poll. Credentials are
+likewise the agent's responsibility: this server never handles the password
+protecting your credential file. To reach protected data, unlock the agent's
+wallet from a terminal first with 'pelican client-agent warm &lt;url&gt;'.
+
+### Options
+
+```
+  -h, --help   help for mcp
+```
+
+### Options inherited from parent commands
+
+```
+      --config string       config file (default is $HOME/.config/pelican/pelican.yaml)
+  -d, --debug               Enable debug log messages
+  -f, --federation string   Pelican federation to utilize
+      --json                output results in JSON format
+  -L, --log string          Specified log output file
+      --version             Print the version and exit
+```
+
+### SEE ALSO
+
+* [pelican](/commands-reference/pelican/)	 - Interact with data federations
+* [pelican mcp serve](/commands-reference/pelican/mcp/serve/)	 - Start the MCP server on stdio

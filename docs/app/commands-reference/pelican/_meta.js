@@ -3,6 +3,7 @@ export default {
     "config": "pelican config",
     "credentials": "pelican credentials",
     "job": "pelican job",
+    "mcp": "pelican mcp",
     "namespace": "pelican namespace",
     "object": "pelican object",
     "plugin": "pelican plugin",

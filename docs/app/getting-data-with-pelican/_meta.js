@@ -1,5 +1,6 @@
 export default {
   "client": "Command Line Client",
   "fsspec": "Python FSSpec",
-  "auth": "Working with Protected Data"
+  "auth": "Working with Protected Data",
+  "mcp": "AI Assistants (MCP)"
 }
