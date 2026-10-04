@@ -2926,6 +2926,10 @@ description: |+
   An entry may also be written as a plain string (a directory path), shorthand for an
   entry with only Path set; the two forms can be mixed in one list.
   Keys are matched case-insensitively, and an unrecognized key is a configuration error.
+
+  Each directory's usage, limit and watermarks are exported as the
+  `pelican_cache_storage_used_bytes`, `pelican_cache_storage_limit_bytes` and
+  `pelican_cache_storage_{high,low}_watermark_bytes` Prometheus gauges.
 type: object
 default: none
 components: ["localcache"]
@@ -3425,6 +3429,10 @@ description: |+
   served, objects found changed on a target, removals by the consistency sweep and when it
   last completed, whether each target passed its latest liveness check, and whether each
   target can issue redirect URLs.
+  How full each target is appears with the local storage directories in
+  `pelican_cache_storage_used_bytes`, `pelican_cache_storage_limit_bytes` and the
+  `pelican_cache_storage_{high,low}_watermark_bytes` gauges, labelled by `storage_id`,
+  `backend` (`posix` or `tier`) and `path` (the directory, or the target's display URL).
 
   This setting only has effect when `${Cache.EnableV2}` is true; the cache logs a
   warning and ignores tiering targets otherwise.  It applies to the cache server only:

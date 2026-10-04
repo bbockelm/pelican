@@ -58,6 +58,10 @@ type EvictionManager struct {
 	// Sorted list of directory IDs.  Read-only after construction.
 	dirIDs []StorageID
 
+	// storageGauges holds each directory's capacity gauges, resolved by
+	// Start (see storage_metrics.go) and read-only afterwards.
+	storageGauges []storageGauges
+
 	// Sorted list of directory IDs eligible for new-object placement
 	// (excludes NoPlacement targets such as tiering targets).  Read-only
 	// after construction.
@@ -185,6 +189,7 @@ func NewEvictionManager(db *CacheDB, storage *StorageManager, config EvictionCon
 func (em *EvictionManager) Start(ctx context.Context, egrp *errgroup.Group) {
 	// Initialize per-directory usage counters from database
 	em.recalculateDirUsage()
+	em.publishStorageMetrics()
 
 	egrp.Go(func() error {
 		return em.evictionLoop(ctx)
@@ -209,6 +214,7 @@ func (em *EvictionManager) evictionLoop(ctx context.Context) error {
 	reclaimTicker := time.NewTicker(appendReclaimInterval)
 	defer reclaimTicker.Stop()
 
+	defer em.unpublishStorageMetrics()
 	for {
 		select {
 		case <-ctx.Done():
@@ -220,6 +226,7 @@ func (em *EvictionManager) evictionLoop(ctx context.Context) error {
 		case <-em.evictChan:
 			em.checkAndEvict()
 		}
+		em.publishStorageUsage()
 	}
 }
 
