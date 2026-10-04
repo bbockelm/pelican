@@ -79,7 +79,7 @@ type tierTarget struct {
 // object I/O happens beyond the capability probe; identity resolution is a
 // separate, explicit step.
 func newTierTarget(ctx context.Context, cfg TierTargetConfig) (*tierTarget, error) {
-	backend, err := newBlobTierBackend(ctx, cfg)
+	backend, err := newTierBackend(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +97,14 @@ func newTierTarget(ctx context.Context, cfg TierTargetConfig) (*tierTarget, erro
 			cfg.DisplayURL())
 	}
 	return t, nil
+}
+
+// newTierBackend opens the kind of backend cfg names.
+func newTierBackend(ctx context.Context, cfg TierTargetConfig) (TierBackend, error) {
+	if cfg.WebDavUrl != "" {
+		return newWebDAVTierBackend(cfg, fileTokenSource{path: cfg.TokenFile})
+	}
+	return newBlobTierBackend(ctx, cfg)
 }
 
 // probeTierRedirect asks a backend for a sample redirect URL, reporting
