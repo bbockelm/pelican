@@ -67,6 +67,17 @@ type tierTarget struct {
 	redirectScheme string
 	redirectHost   string
 
+	// identity is the UUID in the target's identity object, which the
+	// redirect self-test fetches.  Set at registration.
+	identity string
+
+	// redirectWorks is the latest redirect self-test's verdict (see
+	// checkRedirect); redirectChecked records that one has run, and
+	// lastRedirectError holds the latest failure's message.
+	redirectWorks     atomic.Bool
+	redirectChecked   atomic.Bool
+	lastRedirectError atomic.Value
+
 	// healthy is the latest liveness probe's verdict (true until a probe
 	// fails); probeFailures counts consecutive failed probes, and
 	// lastProbeError holds the latest failure's message.  See probe.

@@ -107,6 +107,7 @@ func (u *tierUploader) probeLoop(ctx context.Context) {
 				return
 			}
 			_ = target.probe(ctx)
+			_ = target.checkRedirect(ctx)
 		}
 		u.publishHealth()
 		select {
@@ -119,11 +120,21 @@ func (u *tierUploader) probeLoop(ctx context.Context) {
 
 // publishHealth folds the targets' probe results into one health status:
 // OK when every target answers, a warning when one has just started failing,
-// and degraded once one has failed tierProbeDegradedAfter probes in a row.
+// and degraded once one has failed tierProbeDegradedAfter probes in a row.  A
+// target whose redirect URLs fail their self-test is a warning: its objects
+// are still served, but through the cache, which is not how the operator
+// configured it to work.
 func (u *tierUploader) publishHealth() {
 	status := metrics.StatusOK
-	var failing []string
+	var failing, proxying []string
 	for _, target := range u.storage.tierTargets {
+		if target.canRedirect && target.redirectChecked.Load() && !target.redirectWorks.Load() {
+			lastErr, _ := target.lastRedirectError.Load().(string)
+			proxying = append(proxying, fmt.Sprintf("%s (%s)", target.DisplayURL(), lastErr))
+			if status == metrics.StatusOK {
+				status = metrics.StatusWarning
+			}
+		}
 		failures := target.probeFailures.Load()
 		if failures == 0 {
 			continue
@@ -136,10 +147,18 @@ func (u *tierUploader) publishHealth() {
 			status = metrics.StatusWarning
 		}
 	}
-	message := fmt.Sprintf("%d tiering target(s) reachable", len(u.storage.tierTargets))
+	var parts []string
 	if len(failing) > 0 {
 		sort.Strings(failing)
-		message = "Tiering targets not answering: " + strings.Join(failing, "; ")
+		parts = append(parts, "Tiering targets not answering: "+strings.Join(failing, "; "))
+	}
+	if len(proxying) > 0 {
+		sort.Strings(proxying)
+		parts = append(parts, "Tiering targets proxied because their redirect URLs do not work: "+strings.Join(proxying, "; "))
+	}
+	message := fmt.Sprintf("%d tiering target(s) reachable", len(u.storage.tierTargets))
+	if len(parts) > 0 {
+		message = strings.Join(parts, ".  ")
 	}
 	metrics.SetComponentHealthStatus(metrics.Cache_TieringStorage, status, message)
 }
