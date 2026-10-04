@@ -1,0 +1,72 @@
+# HTTPS / WebDAV Storage Backend
+
+An Origin with `Origin.StorageType` set to `https` (served through XRootD) or `httpsv2` (served natively by Pelican) exports objects from an upstream HTTPS or WebDAV server, such as dCache or another storage system that speaks HTTP.
+Requests for `<federation prefix>/<path>` become requests for `<Origin.HttpServiceUrl><storage prefix>/<path>`.
+
+```yaml
+Origin:
+  StorageType: httpsv2
+  HttpServiceUrl: https://webdav.example.org
+  Exports:
+    - FederationPrefix: /my/namespace
+      StoragePrefix: /data
+      Capabilities: ["Reads", "PublicReads"]
+```
+
+## Authenticating to the upstream server
+
+The Origin authenticates to the upstream server with a bearer token, obtained in one of these ways:
+
+| Mode | Configuration | Who keeps the token valid |
+|------|---------------|---------------------------|
+| Token file | `Origin.HttpAuthTokenFile` | You: the Origin reads the file, and you must replace it before the token expires. |
+| Device-flow credential | `Origin.HttpAuthOAuth2DeviceFlow` | The Origin, after an administrator approves it once. |
+| Client credentials (`httpsv2` only) | `Origin.HttpAuthOAuth2ClientID`, `Origin.HttpAuthOAuth2ClientSecretFile` | The Origin, from a client secret. |
+| Pass-through (`httpsv2` only) | `Origin.HttpAuthTokenPassthrough` | The client: its own token is forwarded. |
+
+### Device-flow credentials
+
+With a device-flow credential, the Origin holds a long-lived OAuth credential for the upstream server itself.
+You approve it once, from any browser, and the Origin keeps it alive by refreshing access tokens before they expire.
+Only outbound connections from the Origin to the token issuer are needed.
+
+```yaml
+Origin:
+  StorageType: httpsv2
+  HttpServiceUrl: https://webdav.example.org
+  HttpAuthOAuth2DeviceFlow: true
+  HttpAuthOAuth2Issuer: https://iam.example.org/
+  # Optional; these are the defaults.
+  HttpAuthOAuth2Scopes: ["offline_access", "storage.read:/", "storage.create:/", "storage.modify:/"]
+  # Optional; sets the token's audience on issuers that support it (for example, INDIGO IAM).
+  HttpAuthOAuth2Audience: https://webdav.example.org
+```
+
+To activate the credential:
+
+1. Log in to the Origin's web interface as an administrator and open **Backend Credentials**.
+1. Click **Activate**.
+   The Origin starts an OAuth device authorization with the issuer and shows a code and a link.
+1. Open the link (on any device), log in to the issuer as an account with access to the storage, and approve the request.
+1. The page shows the credential as **Active** once the approval is received.
+
+Until the credential is activated, the backend answers requests with `503 Service Unavailable`.
+If the issuer later revokes the refresh token, the page shows the credential as **Not activated** again with the issuer's reason, and you can re-activate it the same way.
+Other failures -- the issuer being unreachable, or rejecting the Origin's client authentication (for example while the Director or Registry is unavailable) -- leave the credential in place: the page shows the error and the Origin keeps retrying, serving the current access token while it remains valid.
+Re-activating an active credential is safe: the current credential keeps working until the new request is approved.
+
+The refresh token is stored in the Origin's database, encrypted with a key derived from the Origin's issuer key, in the same way as Globus credentials.
+
+#### The OAuth client
+
+A device authorization is made on behalf of an OAuth client.
+The Origin picks one in this order:
+
+1. The client in `Origin.HttpAuthOAuth2ClientID`, if you registered one with the issuer yourself.
+   Set `Origin.HttpAuthOAuth2ClientSecretFile` too if the client is confidential.
+1. The federation's *client ID metadata document* for this Origin, when the issuer supports client ID metadata documents (it advertises `client_id_metadata_document_supported`).
+   The federation's Director publishes the document, so the client is the same however many issuers you use, and issuers see the federation's name.
+   The Origin authenticates as this client with the key it registered with the federation's Registry, so nothing else can use its credential.
+1. A client registered on the spot with the issuer's dynamic client registration endpoint.
+
+`Origin.HttpAuthOAuth2ClientRegistration` can force `cimd` or `dcr` instead of this automatic choice.
