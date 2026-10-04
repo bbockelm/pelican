@@ -79,6 +79,10 @@ type tierTarget struct {
 	probeRunning atomic.Bool
 	// probeTimeout overrides tierProbeTimeout (tests).
 	probeTimeout time.Duration
+
+	// names is the browsable tree of logical names on a shared-filesystem
+	// target; nil for every other kind.
+	names *tierNameView
 	// publicReadable answers whether an object path is readable without a
 	// token, and whether that is known yet; see SetTierExposurePolicy.
 	publicReadable func(objectPath string) (allowed, known bool)
@@ -88,13 +92,17 @@ type tierTarget struct {
 // object I/O happens beyond the capability probe; identity resolution is a
 // separate, explicit step.
 func newTierTarget(ctx context.Context, cfg TierTargetConfig) (*tierTarget, error) {
-	var backend TierBackend
+	var (
+		backend TierBackend
+		names   *tierNameView
+	)
 	if cfg.IsSharedFilesystem() {
 		posix, err := newPosixTierBackend(cfg)
 		if err != nil {
 			return nil, err
 		}
 		backend = posix
+		names = newTierNameView(posix, !cfg.DisableNamesView)
 	} else {
 		blobBackend, err := newBlobTierBackend(ctx, cfg)
 		if err != nil {
@@ -102,7 +110,7 @@ func newTierTarget(ctx context.Context, cfg TierTargetConfig) (*tierTarget, erro
 		}
 		backend = blobBackend
 	}
-	t := &tierTarget{cfg: cfg, backend: backend}
+	t := &tierTarget{cfg: cfg, backend: backend, names: names}
 	t.healthy.Store(true)
 	if probe, ok := probeTierRedirect(ctx, backend); ok {
 		if u, perr := url.Parse(probe); perr == nil {

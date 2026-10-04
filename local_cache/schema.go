@@ -1154,6 +1154,9 @@ type TierTargetConfig struct {
 	// The remaining fields apply only to a shared-filesystem (file://)
 	// target, whose objects every user of that filesystem can read.
 
+	// DisableNamesView turns off the browsable tree of logical names the
+	// cache otherwise maintains beside the objects; see tierNameView.
+	DisableNamesView bool
 	// ExposedNamespaces lists namespace prefixes whose objects may be
 	// tiered to -- and named on -- the shared filesystem even though
 	// reading them through Pelican requires a token.  Without an entry
@@ -1362,8 +1365,8 @@ func (cfg *TierTargetConfig) validate() error {
 		return errors.New("AccessKeyfile and SecretKeyfile must be set together")
 	}
 
-	if !cfg.IsSharedFilesystem() && len(cfg.ExposedNamespaces) > 0 {
-		return errors.New("ExposedNamespaces applies only to a shared-filesystem (file://) target")
+	if !cfg.IsSharedFilesystem() && (cfg.DisableNamesView || len(cfg.ExposedNamespaces) > 0) {
+		return errors.New("DisableNamesView and ExposedNamespaces apply only to a shared-filesystem (file://) target")
 	}
 
 	if cfg.MaxSize == 0 {
