@@ -590,6 +590,12 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Origin_GlobusTransferAPIBaseUrl.GetName(), "https://transfer.api.globusonline.org/v0.10/")
 	// Origin.Globusv2TokenRefreshInterval
 	v.SetDefault(param.Origin_Globusv2TokenRefreshInterval.GetName(), "5m")
+	// Origin.HttpAuthOAuth2ClientRegistration
+	v.SetDefault(param.Origin_HttpAuthOAuth2ClientRegistration.GetName(), "auto")
+	// Origin.HttpAuthOAuth2DeviceFlow
+	v.SetDefault(param.Origin_HttpAuthOAuth2DeviceFlow.GetName(), false)
+	// Origin.HttpAuthOAuth2Scopes
+	v.SetDefault(param.Origin_HttpAuthOAuth2Scopes.GetName(), []string{"offline_access", "storage.read:/", "storage.create:/", "storage.modify:/"})
 	// Origin.HttpAuthTokenPassthrough
 	v.SetDefault(param.Origin_HttpAuthTokenPassthrough.GetName(), false)
 	// Origin.IssuerMode

@@ -354,9 +354,13 @@ type Config struct {
 		GlobusTransferAPIBaseUrl string `mapstructure:"globustransferapibaseurl" yaml:"GlobusTransferAPIBaseUrl"`
 		GlobusTransferTokenFile string `mapstructure:"globustransfertokenfile" yaml:"GlobusTransferTokenFile"`
 		Globusv2TokenRefreshInterval time.Duration `mapstructure:"globusv2tokenrefreshinterval" yaml:"Globusv2TokenRefreshInterval"`
+		HttpAuthOAuth2Audience string `mapstructure:"httpauthoauth2audience" yaml:"HttpAuthOAuth2Audience"`
 		HttpAuthOAuth2ClientID string `mapstructure:"httpauthoauth2clientid" yaml:"HttpAuthOAuth2ClientID"`
+		HttpAuthOAuth2ClientRegistration string `mapstructure:"httpauthoauth2clientregistration" yaml:"HttpAuthOAuth2ClientRegistration"`
 		HttpAuthOAuth2ClientSecretFile string `mapstructure:"httpauthoauth2clientsecretfile" yaml:"HttpAuthOAuth2ClientSecretFile"`
+		HttpAuthOAuth2DeviceFlow bool `mapstructure:"httpauthoauth2deviceflow" yaml:"HttpAuthOAuth2DeviceFlow"`
 		HttpAuthOAuth2Issuer string `mapstructure:"httpauthoauth2issuer" yaml:"HttpAuthOAuth2Issuer"`
+		HttpAuthOAuth2Scopes []string `mapstructure:"httpauthoauth2scopes" yaml:"HttpAuthOAuth2Scopes"`
 		HttpAuthTokenFile string `mapstructure:"httpauthtokenfile" yaml:"HttpAuthTokenFile"`
 		HttpAuthTokenPassthrough bool `mapstructure:"httpauthtokenpassthrough" yaml:"HttpAuthTokenPassthrough"`
 		HttpServiceUrl string `mapstructure:"httpserviceurl" yaml:"HttpServiceUrl"`
@@ -958,9 +962,13 @@ type configWithType struct {
 		GlobusTransferAPIBaseUrl struct { Type string; Value string }
 		GlobusTransferTokenFile struct { Type string; Value string }
 		Globusv2TokenRefreshInterval struct { Type string; Value time.Duration }
+		HttpAuthOAuth2Audience struct { Type string; Value string }
 		HttpAuthOAuth2ClientID struct { Type string; Value string }
+		HttpAuthOAuth2ClientRegistration struct { Type string; Value string }
 		HttpAuthOAuth2ClientSecretFile struct { Type string; Value string }
+		HttpAuthOAuth2DeviceFlow struct { Type string; Value bool }
 		HttpAuthOAuth2Issuer struct { Type string; Value string }
+		HttpAuthOAuth2Scopes struct { Type string; Value []string }
 		HttpAuthTokenFile struct { Type string; Value string }
 		HttpAuthTokenPassthrough struct { Type string; Value bool }
 		HttpServiceUrl struct { Type string; Value string }

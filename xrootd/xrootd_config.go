@@ -1322,6 +1322,11 @@ func ConfigXrootd(ctx context.Context, isOrigin bool) (string, error) {
 			if xrdConfig.Origin.FederationPrefix == "" {
 				xrdConfig.Origin.FederationPrefix = param.Origin_FederationPrefix.GetString()
 			}
+			// A managed (device-flow) credential replaces the
+			// administrator's token file with the one it keeps fresh.
+			if tokenFile := origin.ManagedHTTPSTokenFile(); tokenFile != "" {
+				xrdConfig.Origin.HttpAuthTokenFile = tokenFile
+			}
 		case "globus":
 			xrdConfig.Origin.StorageType = "globus"
 			// Set activeOnly to false so that we can use the inactive ones as placeholders

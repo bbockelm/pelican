@@ -71,6 +71,26 @@ func (o *HTTPSOrigin) validateExtra(e *OriginExport, numExports int) (err error)
 		return errors.Errorf("https backend does not yet support multiple exports, but %d were provided", numExports)
 	}
 
+	if param.Origin_HttpAuthOAuth2DeviceFlow.GetBool() {
+		if param.Origin_HttpAuthOAuth2Issuer.GetString() == "" {
+			return errors.Errorf("%s is required when %s is enabled",
+				param.Origin_HttpAuthOAuth2Issuer.GetName(), param.Origin_HttpAuthOAuth2DeviceFlow.GetName())
+		}
+		if param.Origin_HttpAuthTokenPassthrough.GetBool() {
+			return errors.Errorf("%s and %s are mutually exclusive",
+				param.Origin_HttpAuthOAuth2DeviceFlow.GetName(), param.Origin_HttpAuthTokenPassthrough.GetName())
+		}
+		// The issuer URL scheme and Origin.HttpAuthOAuth2ClientRegistration
+		// are validated where they are used, by backendcred.NewManager
+		// (via origin.InitBackendCredentials), so there is one list of
+		// valid values.
+		if param.Origin_HttpAuthTokenFile.GetString() != "" {
+			log.Warningf("%s is ignored because %s is enabled",
+				param.Origin_HttpAuthTokenFile.GetName(), param.Origin_HttpAuthOAuth2DeviceFlow.GetName())
+		}
+		return nil
+	}
+
 	tok := param.Origin_HttpAuthTokenFile.GetString()
 	if tok != "" {
 		if err = validateFile(filepath.Clean(tok)); err != nil {

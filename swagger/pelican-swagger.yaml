@@ -778,6 +778,80 @@ definitions:
         items:
           $ref: "#/definitions/OriginExport"
         minItems: 0
+  BackendCredentialStatus:
+    type: object
+    description: >-
+      The state of a long-lived OAuth credential the server holds for one of its storage backends.
+      Never carries a token.
+    properties:
+      id:
+        type: string
+        example: "origin-https"
+      displayName:
+        type: string
+        example: "HTTPS backend https://webdav.example.org"
+      issuer:
+        type: string
+        example: "https://iam.example.org/"
+      state:
+        type: string
+        enum: [inactive, pending, active, error]
+        description: >-
+          `inactive`: no refresh token; an administrator must activate the credential.
+          `pending`: a device authorization is waiting for approval at `verificationUri`.
+          `active`: a refresh token is held and the last refresh succeeded.
+          `error`: something needs attention but the server keeps retrying without discarding anything:
+          the last refresh failed (including the issuer rejecting the client's authentication, which
+          for a client ID metadata document usually means the issuer could not reach the director or registry),
+          a rotated refresh token could not yet be stored, or the stored credential could not be loaded.
+          Only the issuer declaring the refresh token itself invalid (`invalid_grant`) returns the credential to `inactive`.
+      message:
+        type: string
+        description: Why the credential is in its state, when that needs explaining.
+      registrationMethod:
+        type: string
+        enum: [preconfigured, cimd, dcr]
+        description: How the OAuth client was obtained.
+      clientId:
+        type: string
+      scopes:
+        type: array
+        items:
+          type: string
+      grantedScopes:
+        type: array
+        items:
+          type: string
+        description: The scopes the issuer reported granting with the current access token, when it reports them.
+      clientSecretExpiresAt:
+        type: string
+        format: date-time
+        description: When a dynamically registered client's secret expires, if the issuer set an expiry.
+      userCode:
+        type: string
+        description: While pending, the code to enter at `verificationUri`.
+        example: "WDJB-MJHT"
+      verificationUri:
+        type: string
+        example: "https://iam.example.org/device"
+      verificationUriComplete:
+        type: string
+        description: While pending, a URL that carries the user code, if the issuer provides one.
+      deviceCodeExpiresAt:
+        type: string
+        format: date-time
+      accessTokenExpiresAt:
+        type: string
+        format: date-time
+      lastRefresh:
+        type: string
+        format: date-time
+      activatedBy:
+        type: string
+        description: The administrator who started the device flow that activated the credential.
+      activatedAt:
+        type: string
+        format: date-time
   ClientIDMetadataDocument:
     type: object
     description: >-
@@ -4973,6 +5047,112 @@ paths:
             $ref: "#/definitions/ErrorModelV2"
         "500":
           description: Error fetching the origin exports
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+  /origin_ui/backend_credentials:
+    get:
+      tags:
+        - "origin_ui"
+      summary: List the origin's storage-backend credentials
+      description: >-
+        `Authentication Required` `Admin Privilege Required`
+
+        Lists the long-lived OAuth credentials the origin holds for its storage backend
+        (`Origin.HttpAuthOAuth2DeviceFlow`); empty when none is configured.
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/BackendCredentialStatus"
+        "401":
+          description: Authentication required
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: You need to have admin privilege to access this endpoint
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+  /origin_ui/backend_credentials/{id}/activate:
+    post:
+      tags:
+        - "origin_ui"
+      summary: Start the device flow that activates a storage-backend credential
+      description: >-
+        `Authentication Required` `Admin Privilege Required`
+
+        Starts the OAuth device authorization grant against the backend's issuer and returns the
+        user code and verification URI to show the administrator, who approves the request from any browser.
+        The origin polls in the background and the credential becomes `active` once approved.
+        While a device authorization is pending, returns that one instead of starting another.
+        An already-active credential keeps working until a new authorization is approved.
+        The administrator's username is recorded as `activatedBy`.
+      parameters:
+        - name: id
+          in: path
+          type: string
+          required: true
+          description: The credential ID, e.g. `origin-https`
+      responses:
+        "200":
+          description: The device authorization is pending
+          schema:
+            $ref: "#/definitions/BackendCredentialStatus"
+        "401":
+          description: Authentication required
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: You need to have admin privilege to access this endpoint
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "404":
+          description: No credential with that ID
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "502":
+          description: >-
+            The issuer could not be used: unreachable, no device authorization endpoint,
+            no usable client registration method, or the issuer refused the request.
+            The message carries the issuer's reason.
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+  /origin_ui/backend_credentials/{id}:
+    delete:
+      tags:
+        - "origin_ui"
+      summary: Forget a storage-backend credential
+      description: >-
+        `Authentication Required` `Admin Privilege Required`
+
+        Discards the stored refresh token and any dynamically registered client, and cancels a
+        pending device authorization.
+        The backend answers 503 until the credential is activated again.
+      parameters:
+        - name: id
+          in: path
+          type: string
+          required: true
+      responses:
+        "200":
+          description: The credential is now inactive
+          schema:
+            $ref: "#/definitions/BackendCredentialStatus"
+        "401":
+          description: Authentication required
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: You need to have admin privilege to access this endpoint
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "404":
+          description: No credential with that ID
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: The stored credential could not be removed
           schema:
             $ref: "#/definitions/ErrorModelV2"
   /origin_ui/globus/exports:
