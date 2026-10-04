@@ -35,6 +35,7 @@ const createDefaultTieringTarget = (): TieringTarget => {
     highwatermarkpercentage: 0,
     lowwatermarkpercentage: 0,
     adoptexisting: false,
+    cold: false,
   };
 };
 
@@ -134,6 +135,13 @@ const TieringTargetForm = ({ onSubmit, value }: FormProps<TieringTarget>) => {
           name={'AdoptExisting'}
           onChange={(e) => setTarget({ ...target, adoptexisting: e })}
           value={target.adoptexisting}
+        />
+      </Box>
+      <Box mb={2}>
+        <BooleanField
+          name={'Cold'}
+          onChange={(e) => setTarget({ ...target, cold: e })}
+          value={target.cold}
         />
       </Box>
       <Button type={'submit'} onClick={submitHandler}>
