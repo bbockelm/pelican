@@ -1146,6 +1146,10 @@ type TierTargetConfig struct {
 	// target another cache is still using would have each delete the
 	// other's objects.
 	AdoptExisting bool
+	// Cold marks a target that is larger but slower than local storage.
+	// Objects reach it only when eviction pushes them off local disk, and a
+	// read of one is never redirected: it is served through the cache.
+	Cold bool
 }
 
 // UsesVirtualHostStyle reports whether S3 virtual-host addressing was asked
@@ -1211,6 +1215,18 @@ func ParseTierTargetsConfig() ([]TierTargetConfig, error) {
 	for i := range configs {
 		if err := configs[i].validate(); err != nil {
 			return nil, fmt.Errorf("%s[%d]: %w", param.Cache_TieringTargets.GetName(), i, err)
+		}
+	}
+	// Cold and ordinary targets give local storage opposite roles: an
+	// ordinary target receives every object as soon as it completes, which
+	// leaves local disk a staging area, while a cold target receives only
+	// what eviction pushes off local disk, which makes local disk the hot
+	// tier.  Run together, a promoted object would be shipped straight back
+	// out to the ordinary target, so a configuration has to pick one.
+	for i := 1; i < len(configs); i++ {
+		if configs[i].Cold != configs[0].Cold {
+			return nil, fmt.Errorf("%s: either every target is Cold or none is; %s and %s disagree",
+				param.Cache_TieringTargets.GetName(), configs[0].DisplayURL(), configs[i].DisplayURL())
 		}
 	}
 	return configs, nil

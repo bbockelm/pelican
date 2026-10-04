@@ -77,6 +77,23 @@ type EvictionManager struct {
 	evicting        bool
 	evictChan       chan struct{}
 	evictRunCounter atomic.Uint64
+
+	// demoter, when set, takes watermark-eviction candidates from local
+	// storage and moves them to a cold tiering target instead of letting
+	// them be deleted.  Set during single-threaded init; see
+	// tierUploader.offerDemotion.
+	demoter evictionDemoter
+}
+
+// evictionDemoter is what the eviction manager needs from the cold-tier
+// uploader.
+type evictionDemoter interface {
+	// offerDemotion is EvictOptions.Demote.
+	offerDemotion(InstanceHash, *CacheMetadata) demoteVerdict
+	// pendingDemotionBytes is how many bytes of a storage directory are
+	// queued for demotion but not yet released.  Eviction treats them as
+	// already freed, so a slow upload does not make every pass evict more.
+	pendingDemotionBytes(StorageID) int64
 }
 
 // dirEvictionLimits holds the size limits for a single storage directory,
@@ -411,7 +428,19 @@ func (em *EvictionManager) checkAndEvict() {
 		wg.Add(1)
 		go func(sid StorageID, limits *dirEvictionLimits) {
 			defer wg.Done()
-			dirUsage := em.getDirUsage(sid)
+			// Demotion to a cold target frees space only once its upload
+			// finishes, so bytes already queued are counted as freed here.
+			// Past the hard limit that is no longer affordable: the pass
+			// deletes, and counts only what is really gone.
+			demote := em.demoter != nil && !em.storage.IsTiered(sid) && em.getDirUsage(sid) <= limits.maxSize
+			usage := func() int64 {
+				u := em.getDirUsage(sid)
+				if demote {
+					u -= em.demoter.pendingDemotionBytes(sid)
+				}
+				return u
+			}
+			dirUsage := usage()
 			if dirUsage <= 0 || dirUsage <= limits.highWater {
 				return
 			}
@@ -426,7 +455,7 @@ func (em *EvictionManager) checkAndEvict() {
 			// every candidate protected by a redirect hold) are excluded
 			// so the loop moves on instead of spinning on them.
 			excluded := make(map[NamespaceID]bool)
-			for dirUsage = em.getDirUsage(sid); dirUsage > 0 && dirUsage > limits.lowWater; dirUsage = em.getDirUsage(sid) {
+			for dirUsage = usage(); dirUsage > 0 && dirUsage > limits.lowWater; dirUsage = usage() {
 				// Find the greediest namespace in this directory
 				targetKey, targetUsage, err := em.findGreediestNamespaceInDir(sid, excluded)
 				if err != nil {
@@ -447,7 +476,7 @@ func (em *EvictionManager) checkAndEvict() {
 					"needToFree":  utils.HumanBytes(overhead),
 				}).Debug("Evicting from namespace")
 
-				bytes, count, skipped, conflicts, err := em.evictFromNamespace(rl, targetKey.StorageID, targetKey.NamespaceID, 0, overhead)
+				bytes, count, skipped, conflicts, err := em.evictFromNamespace(rl, targetKey.StorageID, targetKey.NamespaceID, 0, overhead, demote)
 				totalConflicts.Add(int64(conflicts))
 				if err != nil {
 					rl.WithFields(log.Fields{
@@ -545,9 +574,18 @@ func (em *EvictionManager) findGreediestNamespaceInDir(storageID StorageID, excl
 // Objects under a live reader are spared and reported separately; see
 // StorageManager.EvictByLRU.
 //
+// When demote is true, candidates may be handed to the cold-tier demoter
+// instead of deleted; those count as evicted (and their bytes as freed),
+// since their space is released as soon as the upload lands.
+//
 // Returns total bytes freed, number of objects evicted, number spared, number
 // of conflicts, and any non-retryable error.
-func (em *EvictionManager) evictFromNamespace(rl *log.Entry, storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64) (totalFreed uint64, totalCount int, skipped int, conflicts int, err error) {
+func (em *EvictionManager) evictFromNamespace(rl *log.Entry, storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64, demote bool) (totalFreed uint64, totalCount int, skipped int, conflicts int, err error) {
+	var demoteHook func(InstanceHash, *CacheMetadata) demoteVerdict
+	if demote && em.demoter != nil {
+		demoteHook = em.demoter.offerDemotion
+	}
+
 	// batchCaps defines the decreasing batch sizes used on successive
 	// conflict retries.  The first attempt uses the caller's original
 	// limits; subsequent retries cap maxObjects to reduce the transaction
@@ -560,9 +598,11 @@ func (em *EvictionManager) evictFromNamespace(rl *log.Entry, storageID StorageID
 			effMaxObjects = cap
 		}
 
-		var evicted []evictedObject
+		var res EvictResult
 		var freed uint64
-		evicted, freed, skipped, err = em.storage.EvictByLRU(storageID, namespaceID, effMaxObjects, maxBytes)
+		res, freed, err = em.storage.evictByLRU(storageID, namespaceID, effMaxObjects, maxBytes, demoteHook)
+		evicted := res.Evicted
+		skipped = res.Skipped
 
 		if err != nil && errors.Is(err, badger.ErrConflict) {
 			conflicts++
@@ -598,7 +638,15 @@ func (em *EvictionManager) evictFromNamespace(rl *log.Entry, storageID StorageID
 			}).Debug("Evicted object")
 		}
 
-		return freed, len(evicted), skipped, conflicts, nil
+		if res.Queued > 0 {
+			rl.WithFields(log.Fields{
+				"storageID":   storageID,
+				"namespaceID": namespaceID,
+				"objects":     res.Queued,
+				"bytes":       utils.HumanBytes(uint64(res.QueuedBytes)),
+			}).Debug("Queued objects for demotion to a cold tiering target")
+		}
+		return freed + uint64(res.QueuedBytes), len(evicted) + res.Queued, skipped, conflicts, nil
 	}
 
 	// All retries exhausted
@@ -612,16 +660,10 @@ func (em *EvictionManager) evictFromNamespace(rl *log.Entry, storageID StorageID
 func (em *EvictionManager) noteEvicted(evicted []evictedObject) {
 	// Accumulate per-storageID totals to minimize atomic operations.
 	perDir := make(map[StorageID]int64, 2)
-	for _, obj := range evicted {
+	for i := range evicted {
 		// For chunked objects, attribute bytes to each directory
 		// proportional to the chunks stored there.
-		meta := &CacheMetadata{
-			StorageID:      obj.storageID,
-			ContentLength:  obj.contentLen,
-			ChunkSizeCode:  obj.chunkSizeCode,
-			ChunkLocations: obj.chunkLocations,
-		}
-		for sid, bytes := range meta.PerDirectoryBytes() {
+		for sid, bytes := range evicted[i].layout().PerDirectoryBytes() {
 			perDir[sid] += bytes
 		}
 	}
@@ -901,7 +943,7 @@ func (em *EvictionManager) forcePurgeToTargets(label string, targets map[Storage
 				}
 
 				overhead := dirUsage - dirTarget
-				bytes, count, skipped, _, err := em.evictFromNamespace(rl, targetKey.StorageID, targetKey.NamespaceID, 0, overhead)
+				bytes, count, skipped, _, err := em.evictFromNamespace(rl, targetKey.StorageID, targetKey.NamespaceID, 0, overhead, false)
 				if err != nil {
 					rl.WithFields(log.Fields{
 						"storageID":   targetKey.StorageID,

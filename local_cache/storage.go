@@ -2266,27 +2266,55 @@ func (sm *StorageManager) deleteExcludedIf(instanceHash InstanceHash, release fu
 		release(false)
 		return false, err
 	}
-
-	// If stored on a tiering target, delete the remote object; otherwise
-	// delete all chunk files on disk.
-	var target *tierTarget
+	var deleteRemote func()
 	if meta != nil {
-		if target = sm.getTierTarget(meta.StorageID); target == nil && meta.IsDisk() {
-			sm.deleteChunkFiles(instanceHash, meta.ContentLength, meta.StorageID, meta.ChunkSizeCode, meta.ChunkLocations)
-		}
+		deleteRemote = sm.deleteObjectData(instanceHash, meta)
 	}
 	release(true)
+	if deleteRemote != nil {
+		deleteRemote()
+	}
+	return true, nil
+}
 
-	if target != nil {
-		delCtx, delCancel := context.WithTimeout(context.Background(), tierSweepOpTimeout)
-		err := target.deleteObject(delCtx, instanceHash)
-		delCancel()
-		if err != nil {
-			log.Warnf("Failed to delete %s from tiering target %d (consistency sweep will retry): %v", instanceHash, meta.StorageID, err)
+// deleteObjectData removes the bytes behind an object whose database records
+// are already gone: its in-memory state, and its files on local storage or its
+// object on the tiering target it lived on.  Every path that deletes an
+// object goes through here, so they cannot disagree about what that means.
+//
+// The caller holds the instance's fence exclusively (see instanceFences), and
+// the local part -- the in-memory state and the files -- is done at once,
+// inside it.  The remote part goes over the network, so it is returned for
+// the caller to run once the fence is released; a remote delete that fails is
+// logged and left for the tiering consistency sweep, which removes objects it
+// has no record of.  The returned function is nil when there is nothing
+// remote to delete.
+func (sm *StorageManager) deleteObjectData(instanceHash InstanceHash, layout *CacheMetadata) (deleteRemote func()) {
+	sm.invalidateObjectCaches(instanceHash, layout.ChunkCount())
+
+	var remote []StorageID
+	if sm.IsTiered(layout.StorageID) {
+		remote = append(remote, layout.StorageID)
+	} else if layout.IsDisk() {
+		sm.deleteChunkFiles(instanceHash, layout.ContentLength, layout.StorageID, layout.ChunkSizeCode, layout.ChunkLocations)
+	}
+	if len(remote) == 0 {
+		return nil
+	}
+	return func() {
+		for _, sid := range remote {
+			target := sm.getTierTarget(sid)
+			if target == nil {
+				continue
+			}
+			delCtx, delCancel := context.WithTimeout(context.Background(), tierSweepOpTimeout)
+			err := target.deleteObject(delCtx, instanceHash)
+			delCancel()
+			if err != nil {
+				log.Warnf("Failed to delete %s from tiering target %d (consistency sweep will retry): %v", instanceHash, sid, err)
+			}
 		}
 	}
-
-	return true, nil
 }
 
 // deleteRecord removes an object's database entries (metadata, inline data,
@@ -2368,38 +2396,63 @@ func (sm *StorageManager) deleteChunkFiles(instanceHash InstanceHash, contentLen
 // All DB mutations happen atomically; filesystem deletes follow afterward.
 // Returns the evicted objects, total bytes freed, and how many were spared.
 func (sm *StorageManager) EvictByLRU(storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64) ([]evictedObject, uint64, int, error) {
+	res, freed, err := sm.evictByLRU(storageID, namespaceID, maxObjects, maxBytes, nil)
+	return res.Evicted, freed, res.Skipped, err
+}
+
+// evictByLRU is EvictByLRU with a demotion hook (see EvictOptions.Demote),
+// which the eviction manager supplies when local storage drains to a cold
+// target.  It returns the whole EvictResult.
+func (sm *StorageManager) evictByLRU(storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64,
+	demote func(InstanceHash, *CacheMetadata) demoteVerdict) (EvictResult, uint64, error) {
 	// isPinned is called from inside the eviction transaction.  That is safe
 	// because pins.mu is a leaf: pinning never opens a Badger transaction, so
 	// the two locks cannot be acquired in opposing orders.
 	//
 	// Each object is shut off from its writers (see instanceFences) before
 	// the transaction deletes it, and they are let back in once its
-	// in-memory state is gone too.  A writer's write therefore either
-	// commits before the fence is taken -- and the eviction, committing
-	// later, deletes it -- or is fenced off.  Taking a fence waits only for
-	// a write in progress, and a fence is a leaf lock like pins.mu.
+	// in-memory state and local files are gone too.  A writer's write
+	// therefore either commits before the fence is taken -- and the
+	// eviction, committing later, deletes it -- or is fenced off.  Taking a
+	// fence waits only for a write in progress, and a fence is a leaf lock
+	// like pins.mu.
 	releases := make(map[InstanceHash]func(deleted bool))
 	claim := func(hash InstanceHash) {
 		if _, held := releases[hash]; !held {
 			releases[hash] = sm.fences.exclude(hash)
 		}
 	}
-	evicted, skipped, err := sm.db.EvictByLRU(storageID, namespaceID, maxObjects, maxBytes, sm.pins.isPinned, claim)
+	res, err := sm.db.EvictByLRU(storageID, namespaceID, maxObjects, maxBytes, &EvictOptions{
+		Skip:   sm.pins.isPinned,
+		Demote: demote,
+		Claim:  claim,
+	})
 	if err != nil {
 		for _, release := range releases {
 			release(false)
 		}
 		// Return the attempted (uncommitted) objects alongside the error
 		// so the caller can log which objects were involved in a conflict.
-		return evicted, 0, skipped, errors.Wrap(err, "failed to evict objects by LRU")
+		return res, 0, errors.Wrap(err, "failed to evict objects by LRU")
 	}
+
 	// An evicted object's in-memory state and local files go before its
 	// fence is released, as in Delete: a fetch of the same version then
-	// creates its new files after these are gone, never before.
-	for _, obj := range evicted {
-		sm.invalidateObjectCaches(obj.instanceHash, CalculateChunkCount(obj.contentLen, obj.chunkSizeCode))
-		if sm.getTierTarget(obj.storageID) == nil && obj.storageID != StorageIDInline {
-			sm.deleteChunkFiles(obj.instanceHash, obj.contentLen, obj.storageID, obj.chunkSizeCode, obj.chunkLocations)
+	// creates its new files after these are gone, never before.  Copies on
+	// tiering targets are deleted after every fence is released.
+	var totalFreed uint64
+	var deleteRemote []func()
+	for i := range res.Evicted {
+		obj := &res.Evicted[i]
+		layout := obj.layout()
+		// Use PerDirectoryBytes to compute the actual on-disk size freed
+		// -- this correctly handles lazily-allocated chunked objects where
+		// not all chunks may be allocated.
+		for _, bytes := range layout.PerDirectoryBytes() {
+			totalFreed += uint64(bytes)
+		}
+		if del := sm.deleteObjectData(obj.instanceHash, layout); del != nil {
+			deleteRemote = append(deleteRemote, del)
 		}
 		if release, held := releases[obj.instanceHash]; held {
 			release(true)
@@ -2409,36 +2462,27 @@ func (sm *StorageManager) EvictByLRU(storageID StorageID, namespaceID NamespaceI
 	for _, release := range releases {
 		release(false) // claimed, but its deletion failed
 	}
-
-	var totalFreed uint64
-	for _, obj := range evicted {
-		// Use PerDirectoryBytes to compute the actual on-disk size
-		// freed — this correctly handles lazily-allocated chunked
-		// objects where not all chunks may be allocated.
-		meta := &CacheMetadata{
-			StorageID:      obj.storageID,
-			ContentLength:  obj.contentLen,
-			ChunkSizeCode:  obj.chunkSizeCode,
-			ChunkLocations: obj.chunkLocations,
-		}
-		for _, bytes := range meta.PerDirectoryBytes() {
-			totalFreed += uint64(bytes)
-		}
-
-		// Delete a tiered object's remote copy; its local files, if any,
-		// went above.
-		if target := sm.getTierTarget(obj.storageID); target != nil {
-			delCtx, delCancel := context.WithTimeout(context.Background(), tierSweepOpTimeout)
-			err := target.deleteObject(delCtx, obj.instanceHash)
-			delCancel()
-			if err != nil {
-				log.Warnf("Failed to delete evicted object %s from tiering target %d (consistency sweep will retry): %v",
-					obj.instanceHash, obj.storageID, err)
-			}
-		}
+	for _, del := range deleteRemote {
+		del()
 	}
 
-	return evicted, totalFreed, skipped, nil
+	return res, totalFreed, nil
+}
+
+// isColdTarget reports whether a storage ID is a configured cold tiering
+// target.
+func (sm *StorageManager) isColdTarget(id StorageID) bool {
+	t := sm.tierTargets[id]
+	return t != nil && t.cfg.Cold
+}
+
+// coldTiering reports whether this cache tiers to cold targets (configuration
+// validation guarantees that then every target is cold).
+func (sm *StorageManager) coldTiering() bool {
+	for id := range sm.tierTargets {
+		return sm.isColdTarget(id)
+	}
+	return false
 }
 
 // GetObjectSize returns the content length of a cached object
