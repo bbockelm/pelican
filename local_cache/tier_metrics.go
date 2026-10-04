@@ -51,6 +51,13 @@ const (
 	tierChangeSeenByScan = "scan"
 )
 
+// Values of the "method" label on the demotion metrics: how an object left
+// local storage for a cold target.
+const (
+	// tierDemotedByUpload: the object was uploaded to the target.
+	tierDemotedByUpload = "upload"
+)
+
 // Values of the "kind" label on tierSweepRemovedTotal.
 const (
 	tierSweepRemovedRemoteObject = "remote_object"
@@ -126,6 +133,15 @@ var (
 		Help: "Removals by the tiering consistency sweep, by target and kind: remote_object (an object on the " +
 			"target the cache has no record of) or entry (a record whose object is missing from, or changed on, the target)",
 	}, []string{"target", "kind"})
+	tierDemotionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pelican_cache_tiering_demotions_total",
+		Help: "Objects evicted from local storage to a cold tiering target instead of being deleted, by target and " +
+			"method: upload (the object was uploaded)",
+	}, []string{"target", "method"})
+	tierDemotedBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pelican_cache_tiering_demoted_bytes_total",
+		Help: "Size of the objects demoted from local storage to a cold tiering target, by target and method",
+	}, []string{"target", "method"})
 	tierSweepLastSuccess = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "pelican_cache_tiering_sweep_last_success_timestamp_seconds",
 		Help: "Unix timestamp when the tiering consistency sweep last completed for a target",
@@ -143,4 +159,14 @@ func recordTierUpload(target *tierTarget, result string, size int64, elapsed tim
 	if result == tierUploadSucceeded {
 		tierUploadDuration.WithLabelValues(label).Observe(elapsed.Seconds())
 	}
+}
+
+// recordTierDemotion records one object demoted to a cold target.
+func recordTierDemotion(target *tierTarget, method string, size int64) {
+	if target == nil {
+		return
+	}
+	label := target.metricLabel()
+	tierDemotionsTotal.WithLabelValues(label, method).Inc()
+	tierDemotedBytesTotal.WithLabelValues(label, method).Add(float64(size))
 }

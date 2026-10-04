@@ -246,7 +246,7 @@ func TestOpenCacheDBReadOnlyRefusesWrites(t *testing.T) {
 		},
 		"ReloadSalt": func() error { return db.ReloadSalt() },
 		"EvictByLRU": func() error {
-			_, _, err := db.EvictByLRU(StorageIDInline, 1, 1, 0, nil, nil)
+			_, err := db.EvictByLRU(StorageIDInline, 1, 1, 0, nil)
 			return err
 		},
 		"SetTierUploadIntent": func() error {
