@@ -35,12 +35,12 @@ import (
 	"github.com/pelicanplatform/pelican/metrics"
 )
 
-// These tests need neither minio nor symlinks, so unlike the rest of the
-// tiering suite they also run on Windows.
+// These tests need neither an S3 server nor symlinks, so unlike the rest of
+// the tiering suite they also run on Windows.
 
 // tierTestEnv bundles the pieces needed to exercise tiering.  It lives here,
 // in a file built on every platform, so the backend-agnostic tests can share
-// it with the minio-backed suite.
+// it with the S3-server-backed suite.
 type tierTestEnv struct {
 	db       *CacheDB
 	storage  *StorageManager
@@ -52,7 +52,7 @@ type tierTestEnv struct {
 }
 
 // newMemTierEnv wires a tiering environment against the in-memory blob
-// driver instead of minio.  Nothing in the tiering pipeline knows which
+// driver instead of an S3 server.  Nothing in the tiering pipeline knows which
 // backend it is talking to, so this exercises the whole path with no external
 // service -- and, because memblob cannot sign URLs, it is also the case where
 // the cache must fall back to proxying.

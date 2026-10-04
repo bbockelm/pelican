@@ -19,7 +19,7 @@
  ***************************************************************/
 
 // End-to-end tests for the persistent cache's S3 storage targets: a full
-// federation (director, registry, origin, V2 cache) plus a live minio
+// federation (director, registry, origin, V2 cache) plus a live S3 server
 // bucket.  Objects fetched through the cache are tiered to the bucket once
 // complete, after which GETs are answered with a 307 to a pre-signed S3
 // URL (or proxied through the cache when redirect is disabled).
@@ -77,27 +77,22 @@ func getWithToken(t *testing.T, httpClient *http.Client, url, token, rangeHeader
 
 // TestCacheTierStorageFederationE2E spins up a complete federation with an
 // S3 storage target on the V2 cache and verifies the whole tiering +
-// serving lifecycle against a live minio server.
+// serving lifecycle against a live S3 server.
 func TestCacheTierStorageFederationE2E(t *testing.T) {
-	test_utils.SkipIfNoMinio(t)
-	endpoint, accessKey, secretKey := test_utils.StartMinio(t, "pelican-cache-fed-e2e")
+	srv := test_utils.StartS3Server(t, "pelican-cache-fed-e2e")
 
 	t.Cleanup(test_utils.SetupTestLogging(t))
 	server_utils.ResetTestState()
 	t.Cleanup(server_utils.ResetTestState)
 
-	keyDir := t.TempDir()
-	accessKeyfile := filepath.Join(keyDir, "access")
-	secretKeyfile := filepath.Join(keyDir, "secret")
-	require.NoError(t, os.WriteFile(accessKeyfile, []byte(accessKey), 0600))
-	require.NoError(t, os.WriteFile(secretKeyfile, []byte(secretKey), 0600))
+	accessKeyfile, secretKeyfile := srv.WriteCredentialFiles(t)
 
 	require.NoError(t, param.Cache_EnableV2.Set(true))
 	require.NoError(t, param.Cache_TieringThreshold.Set("4KB"))
 	require.NoError(t, param.Cache_TieringTargets.Set([]interface{}{
 		map[string]interface{}{
-			"ServiceUrl":    endpoint,
-			"Bucket":        "pelican-cache-fed-e2e",
+			"ServiceUrl":    srv.Endpoint,
+			"Bucket":        srv.Bucket,
 			"Prefix":        "cache",
 			"MaxSize":       "1GB",
 			"AccessKeyfile": accessKeyfile,

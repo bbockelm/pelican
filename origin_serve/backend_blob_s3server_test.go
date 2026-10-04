@@ -33,23 +33,21 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// TestBlobBackend_MinioS3 — full integration test using a real minio server.
+// TestBlobBackend_S3Server — full integration test against a real S3 server.
 // Tests the complete S3 flow: build URL, open bucket, write, read, stat,
 // rename, delete, directory listing.
-// Skipped if minio is not installed.
+// Skipped if no S3 server is installed (see test_utils.StartS3Server).
 // ---------------------------------------------------------------------------
 
-func TestBlobBackend_MinioS3(t *testing.T) {
-	test_utils.SkipIfNoMinio(t)
-
-	endpoint, accessKey, secretKey := test_utils.StartMinio(t, "test-bucket")
+func TestBlobBackend_S3Server(t *testing.T) {
+	srv := test_utils.StartS3Server(t, "test-bucket")
 
 	backend, err := newBlobBackend(BlobBackendOptions{
-		ServiceURL: endpoint,
-		Region:     "us-east-1",
-		Bucket:     "test-bucket",
-		AccessKey:  accessKey,
-		SecretKey:  secretKey,
+		ServiceURL: srv.Endpoint,
+		Region:     srv.Region,
+		Bucket:     srv.Bucket,
+		AccessKey:  srv.AccessKey,
+		SecretKey:  srv.SecretKey,
 		URLStyle:   "path",
 	})
 	require.NoError(t, err)
@@ -62,7 +60,7 @@ func TestBlobBackend_MinioS3(t *testing.T) {
 	})
 
 	t.Run("WriteAndRead", func(t *testing.T) {
-		content := []byte("Hello from MinIO integration test!")
+		content := []byte("Hello from the S3 integration test!")
 
 		wf, err := backend.FileSystem().OpenFile(ctx, "/greeting.txt", os.O_CREATE|os.O_WRONLY, 0644)
 		require.NoError(t, err)
@@ -199,11 +197,11 @@ func TestBlobBackend_MinioS3(t *testing.T) {
 
 	t.Run("StoragePrefix", func(t *testing.T) {
 		prefixedBackend, err := newBlobBackend(BlobBackendOptions{
-			ServiceURL:    endpoint,
-			Region:        "us-east-1",
-			Bucket:        "test-bucket",
-			AccessKey:     accessKey,
-			SecretKey:     secretKey,
+			ServiceURL:    srv.Endpoint,
+			Region:        srv.Region,
+			Bucket:        srv.Bucket,
+			AccessKey:     srv.AccessKey,
+			SecretKey:     srv.SecretKey,
 			URLStyle:      "path",
 			StoragePrefix: "/prefixed",
 		})
