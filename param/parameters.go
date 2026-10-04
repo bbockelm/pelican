@@ -197,6 +197,7 @@ var runtimeConfigurableMap = map[string]bool{
 	"Director.CheckOriginPresence": false,
 	"Director.DbLocation": false,
 	"Director.DefaultResponse": false,
+	"Director.DisableClientIDMetadataDocuments": false,
 	"Director.EnableBroker": false,
 	"Director.EnableFederationMetadataHosting": false,
 	"Director.EnableOIDC": false,
@@ -390,9 +391,13 @@ var runtimeConfigurableMap = map[string]bool{
 	"Origin.GlobusTransferAPIBaseUrl": false,
 	"Origin.GlobusTransferTokenFile": false,
 	"Origin.Globusv2TokenRefreshInterval": false,
+	"Origin.HttpAuthOAuth2Audience": false,
 	"Origin.HttpAuthOAuth2ClientID": false,
+	"Origin.HttpAuthOAuth2ClientRegistration": false,
 	"Origin.HttpAuthOAuth2ClientSecretFile": false,
+	"Origin.HttpAuthOAuth2DeviceFlow": false,
 	"Origin.HttpAuthOAuth2Issuer": false,
+	"Origin.HttpAuthOAuth2Scopes": false,
 	"Origin.HttpAuthTokenFile": false,
 	"Origin.HttpAuthTokenPassthrough": false,
 	"Origin.HttpServiceUrl": false,
@@ -770,7 +775,9 @@ var stringAccessors = map[string]func(*Config) string{
 	"Origin.GlobusIssuerURL": func(c *Config) string { return c.Origin.GlobusIssuerURL },
 	"Origin.GlobusTransferAPIBaseUrl": func(c *Config) string { return c.Origin.GlobusTransferAPIBaseUrl },
 	"Origin.GlobusTransferTokenFile": func(c *Config) string { return c.Origin.GlobusTransferTokenFile },
+	"Origin.HttpAuthOAuth2Audience": func(c *Config) string { return c.Origin.HttpAuthOAuth2Audience },
 	"Origin.HttpAuthOAuth2ClientID": func(c *Config) string { return c.Origin.HttpAuthOAuth2ClientID },
+	"Origin.HttpAuthOAuth2ClientRegistration": func(c *Config) string { return c.Origin.HttpAuthOAuth2ClientRegistration },
 	"Origin.HttpAuthOAuth2ClientSecretFile": func(c *Config) string { return c.Origin.HttpAuthOAuth2ClientSecretFile },
 	"Origin.HttpAuthOAuth2Issuer": func(c *Config) string { return c.Origin.HttpAuthOAuth2Issuer },
 	"Origin.HttpAuthTokenFile": func(c *Config) string { return c.Origin.HttpAuthTokenFile },
@@ -916,6 +923,7 @@ var stringSliceAccessors = map[string]func(*Config) []string{
 	"OIDC.Scopes": func(c *Config) []string { return c.OIDC.Scopes },
 	"Origin.DefaultChecksumTypes": func(c *Config) []string { return c.Origin.DefaultChecksumTypes },
 	"Origin.ExportVolumes": func(c *Config) []string { return c.Origin.ExportVolumes },
+	"Origin.HttpAuthOAuth2Scopes": func(c *Config) []string { return c.Origin.HttpAuthOAuth2Scopes },
 	"Origin.SSH.AuthMethods": func(c *Config) []string { return c.Origin.SSH.AuthMethods },
 	"Origin.SSH.RemotePelicanBinaryOverrides": func(c *Config) []string { return c.Origin.SSH.RemotePelicanBinaryOverrides },
 	"Origin.ScitokensRestrictedPaths": func(c *Config) []string { return c.Origin.ScitokensRestrictedPaths },
@@ -1134,6 +1142,7 @@ var boolAccessors = map[string]func(*Config) bool{
 	"Director.CachesPullFromCaches": func(c *Config) bool { return c.Director.CachesPullFromCaches },
 	"Director.CheckCachePresence": func(c *Config) bool { return c.Director.CheckCachePresence },
 	"Director.CheckOriginPresence": func(c *Config) bool { return c.Director.CheckOriginPresence },
+	"Director.DisableClientIDMetadataDocuments": func(c *Config) bool { return c.Director.DisableClientIDMetadataDocuments },
 	"Director.EnableBroker": func(c *Config) bool { return c.Director.EnableBroker },
 	"Director.EnableFederationMetadataHosting": func(c *Config) bool { return c.Director.EnableFederationMetadataHosting },
 	"Director.EnableOIDC": func(c *Config) bool { return c.Director.EnableOIDC },
@@ -1174,6 +1183,7 @@ var boolAccessors = map[string]func(*Config) bool{
 	"Origin.EnableVoms": func(c *Config) bool { return c.Origin.EnableVoms },
 	"Origin.EnableWrite": func(c *Config) bool { return c.Origin.EnableWrite },
 	"Origin.EnableWrites": func(c *Config) bool { return c.Origin.EnableWrites },
+	"Origin.HttpAuthOAuth2DeviceFlow": func(c *Config) bool { return c.Origin.HttpAuthOAuth2DeviceFlow },
 	"Origin.HttpAuthTokenPassthrough": func(c *Config) bool { return c.Origin.HttpAuthTokenPassthrough },
 	"Origin.Metadata.AllowMultipart": func(c *Config) bool { return c.Origin.Metadata.AllowMultipart },
 	"Origin.Metadata.Enabled": func(c *Config) bool { return c.Origin.Metadata.Enabled },
@@ -1532,6 +1542,7 @@ var allParameterNames = []string{
 	"Director.CheckOriginPresence",
 	"Director.DbLocation",
 	"Director.DefaultResponse",
+	"Director.DisableClientIDMetadataDocuments",
 	"Director.EnableBroker",
 	"Director.EnableFederationMetadataHosting",
 	"Director.EnableOIDC",
@@ -1725,9 +1736,13 @@ var allParameterNames = []string{
 	"Origin.GlobusTransferAPIBaseUrl",
 	"Origin.GlobusTransferTokenFile",
 	"Origin.Globusv2TokenRefreshInterval",
+	"Origin.HttpAuthOAuth2Audience",
 	"Origin.HttpAuthOAuth2ClientID",
+	"Origin.HttpAuthOAuth2ClientRegistration",
 	"Origin.HttpAuthOAuth2ClientSecretFile",
+	"Origin.HttpAuthOAuth2DeviceFlow",
 	"Origin.HttpAuthOAuth2Issuer",
+	"Origin.HttpAuthOAuth2Scopes",
 	"Origin.HttpAuthTokenFile",
 	"Origin.HttpAuthTokenPassthrough",
 	"Origin.HttpServiceUrl",
@@ -2078,7 +2093,9 @@ var (
 	Origin_GlobusIssuerURL = StringParam{"Origin.GlobusIssuerURL"}
 	Origin_GlobusTransferAPIBaseUrl = StringParam{"Origin.GlobusTransferAPIBaseUrl"}
 	Origin_GlobusTransferTokenFile = StringParam{"Origin.GlobusTransferTokenFile"}
+	Origin_HttpAuthOAuth2Audience = StringParam{"Origin.HttpAuthOAuth2Audience"}
 	Origin_HttpAuthOAuth2ClientID = StringParam{"Origin.HttpAuthOAuth2ClientID"}
+	Origin_HttpAuthOAuth2ClientRegistration = StringParam{"Origin.HttpAuthOAuth2ClientRegistration"}
 	Origin_HttpAuthOAuth2ClientSecretFile = StringParam{"Origin.HttpAuthOAuth2ClientSecretFile"}
 	Origin_HttpAuthOAuth2Issuer = StringParam{"Origin.HttpAuthOAuth2Issuer"}
 	Origin_HttpAuthTokenFile = StringParam{"Origin.HttpAuthTokenFile"}
@@ -2196,6 +2213,7 @@ var (
 	OIDC_Scopes = StringSliceParam{"OIDC.Scopes"}
 	Origin_DefaultChecksumTypes = StringSliceParam{"Origin.DefaultChecksumTypes"}
 	Origin_ExportVolumes = StringSliceParam{"Origin.ExportVolumes"}
+	Origin_HttpAuthOAuth2Scopes = StringSliceParam{"Origin.HttpAuthOAuth2Scopes"}
 	Origin_SSH_AuthMethods = StringSliceParam{"Origin.SSH.AuthMethods"}
 	Origin_SSH_RemotePelicanBinaryOverrides = StringSliceParam{"Origin.SSH.RemotePelicanBinaryOverrides"}
 	Origin_ScitokensRestrictedPaths = StringSliceParam{"Origin.ScitokensRestrictedPaths"}
@@ -2321,6 +2339,7 @@ var (
 	Director_CachesPullFromCaches = BoolParam{"Director.CachesPullFromCaches"}
 	Director_CheckCachePresence = BoolParam{"Director.CheckCachePresence"}
 	Director_CheckOriginPresence = BoolParam{"Director.CheckOriginPresence"}
+	Director_DisableClientIDMetadataDocuments = BoolParam{"Director.DisableClientIDMetadataDocuments"}
 	Director_EnableBroker = BoolParam{"Director.EnableBroker"}
 	Director_EnableFederationMetadataHosting = BoolParam{"Director.EnableFederationMetadataHosting"}
 	Director_EnableOIDC = BoolParam{"Director.EnableOIDC"}
@@ -2361,6 +2380,7 @@ var (
 	Origin_EnableVoms = BoolParam{"Origin.EnableVoms"}
 	Origin_EnableWrite = BoolParam{"Origin.EnableWrite"}
 	Origin_EnableWrites = BoolParam{"Origin.EnableWrites"}
+	Origin_HttpAuthOAuth2DeviceFlow = BoolParam{"Origin.HttpAuthOAuth2DeviceFlow"}
 	Origin_HttpAuthTokenPassthrough = BoolParam{"Origin.HttpAuthTokenPassthrough"}
 	Origin_Metadata_AllowMultipart = BoolParam{"Origin.Metadata.AllowMultipart"}
 	Origin_Metadata_Enabled = BoolParam{"Origin.Metadata.Enabled"}
@@ -2645,7 +2665,9 @@ func init() {
 		"Origin.GlobusIssuerURL": Origin_GlobusIssuerURL,
 		"Origin.GlobusTransferAPIBaseUrl": Origin_GlobusTransferAPIBaseUrl,
 		"Origin.GlobusTransferTokenFile": Origin_GlobusTransferTokenFile,
+		"Origin.HttpAuthOAuth2Audience": Origin_HttpAuthOAuth2Audience,
 		"Origin.HttpAuthOAuth2ClientID": Origin_HttpAuthOAuth2ClientID,
+		"Origin.HttpAuthOAuth2ClientRegistration": Origin_HttpAuthOAuth2ClientRegistration,
 		"Origin.HttpAuthOAuth2ClientSecretFile": Origin_HttpAuthOAuth2ClientSecretFile,
 		"Origin.HttpAuthOAuth2Issuer": Origin_HttpAuthOAuth2Issuer,
 		"Origin.HttpAuthTokenFile": Origin_HttpAuthTokenFile,
@@ -2760,6 +2782,7 @@ func init() {
 		"OIDC.Scopes": OIDC_Scopes,
 		"Origin.DefaultChecksumTypes": Origin_DefaultChecksumTypes,
 		"Origin.ExportVolumes": Origin_ExportVolumes,
+		"Origin.HttpAuthOAuth2Scopes": Origin_HttpAuthOAuth2Scopes,
 		"Origin.SSH.AuthMethods": Origin_SSH_AuthMethods,
 		"Origin.SSH.RemotePelicanBinaryOverrides": Origin_SSH_RemotePelicanBinaryOverrides,
 		"Origin.ScitokensRestrictedPaths": Origin_ScitokensRestrictedPaths,
@@ -2876,6 +2899,7 @@ func init() {
 		"Director.CachesPullFromCaches": Director_CachesPullFromCaches,
 		"Director.CheckCachePresence": Director_CheckCachePresence,
 		"Director.CheckOriginPresence": Director_CheckOriginPresence,
+		"Director.DisableClientIDMetadataDocuments": Director_DisableClientIDMetadataDocuments,
 		"Director.EnableBroker": Director_EnableBroker,
 		"Director.EnableFederationMetadataHosting": Director_EnableFederationMetadataHosting,
 		"Director.EnableOIDC": Director_EnableOIDC,
@@ -2916,6 +2940,7 @@ func init() {
 		"Origin.EnableVoms": Origin_EnableVoms,
 		"Origin.EnableWrite": Origin_EnableWrite,
 		"Origin.EnableWrites": Origin_EnableWrites,
+		"Origin.HttpAuthOAuth2DeviceFlow": Origin_HttpAuthOAuth2DeviceFlow,
 		"Origin.HttpAuthTokenPassthrough": Origin_HttpAuthTokenPassthrough,
 		"Origin.Metadata.AllowMultipart": Origin_Metadata_AllowMultipart,
 		"Origin.Metadata.Enabled": Origin_Metadata_Enabled,

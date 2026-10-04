@@ -46,6 +46,7 @@ import (
 	"github.com/pelicanplatform/pelican/database"
 	"github.com/pelicanplatform/pelican/identity"
 	"github.com/pelicanplatform/pelican/metrics"
+	"github.com/pelicanplatform/pelican/oauth2/backendcred"
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/server_utils"
@@ -900,9 +901,22 @@ func InitializeHandlers(ctx context.Context, exports []server_utils.OriginExport
 			var oauth2Cfg *oauth2.Config
 			var oauth2Tok *oauth2.Token
 
+			var managed backendcred.TokenSource
+
 			// Determine token mode
 			if param.Origin_HttpAuthTokenPassthrough.GetBool() {
 				tokenMode = HTTPSTokenPassthrough
+			} else if param.Origin_HttpAuthOAuth2DeviceFlow.GetBool() {
+				// The credential manager was created and started by the
+				// origin launcher before the backends; see
+				// origin.InitBackendCredentials.
+				mgr := backendcred.Default().Get(HTTPSBackendCredentialID)
+				if mgr == nil {
+					return fmt.Errorf("%s is enabled but the backend credential %s was not initialized",
+						param.Origin_HttpAuthOAuth2DeviceFlow.GetName(), HTTPSBackendCredentialID)
+				}
+				tokenMode = HTTPSTokenManaged
+				managed = mgr
 			} else if param.Origin_HttpAuthOAuth2ClientID.GetString() != "" {
 				tokenMode = HTTPSTokenOAuth2
 
@@ -948,6 +962,7 @@ func InitializeHandlers(ctx context.Context, exports []server_utils.OriginExport
 				StaticTokenFile: staticTokenFile,
 				OAuth2Config:    oauth2Cfg,
 				OAuth2Token:     oauth2Tok,
+				TokenSource:     managed,
 				EnableAutoMkdir: true,
 			})
 			log.Infof("Initialized native HTTPS backend for %s (upstream: %s, token mode: %d)", export.FederationPrefix, httpServiceURL, tokenMode)

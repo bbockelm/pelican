@@ -2063,6 +2063,9 @@ description: |+
   When set for httpsv2 backends, configures OAuth2 client credentials for automatic token management
   to the upstream HTTP server.
   Requires Origin.HttpAuthOAuth2ClientSecretFile and Origin.HttpAuthOAuth2Issuer to also be set.
+
+  With `Origin.HttpAuthOAuth2DeviceFlow`, this is instead the pre-registered client used for the device flow;
+  the secret file is then optional (without it, the client is public).
 type: string
 default: none
 components: ["origin"]
@@ -2081,6 +2084,59 @@ description: |+
   The token endpoint is discovered automatically via the issuer's `/.well-known/openid-configuration` metadata.
 type: string
 default: none
+components: ["origin"]
+---
+name: Origin.HttpAuthOAuth2DeviceFlow
+description: |+
+  When true for `https` and `httpsv2` origins, the origin holds a long-lived OAuth credential for the upstream HTTP/WebDAV
+  server instead of reading a token from `Origin.HttpAuthTokenFile`.
+
+  An administrator activates the credential from the origin's web UI ("Backend Credentials"): the origin starts the OAuth
+  device authorization grant against `Origin.HttpAuthOAuth2Issuer` and shows a user code and verification URL; once
+  someone with access to the storage approves the request (from any browser), the origin keeps the refresh token,
+  encrypted, in its database and refreshes access tokens before they expire.
+  Until the credential is activated, and after the issuer revokes it, the backend answers requests with 503.
+
+  The OAuth client used for the device flow is, in order of preference:
+  the client configured with `Origin.HttpAuthOAuth2ClientID` (and, for a confidential client, `Origin.HttpAuthOAuth2ClientSecretFile`);
+  the client ID metadata document the federation's Director publishes for this origin, when the issuer supports
+  client ID metadata documents;
+  or a client registered with the issuer's dynamic client registration endpoint.
+  See `Origin.HttpAuthOAuth2ClientRegistration`.
+
+  For `https` origins, the current access token is written to a file that XRootD re-reads, under `Origin.RunLocation`.
+type: bool
+default: false
+components: ["origin"]
+---
+name: Origin.HttpAuthOAuth2Scopes
+description: |+
+  The scopes requested for the credential acquired with `Origin.HttpAuthOAuth2DeviceFlow`.
+  The list must allow a refresh token to be issued, which for most issuers means including `offline_access`.
+type: stringSlice
+default: ["offline_access", "storage.read:/", "storage.create:/", "storage.modify:/"]
+components: ["origin"]
+---
+name: Origin.HttpAuthOAuth2Audience
+description: |+
+  When set, the audience requested (as the `audience` parameter) for tokens acquired with `Origin.HttpAuthOAuth2DeviceFlow`.
+  WLCG-profile issuers such as INDIGO IAM use it to set the token's `aud` claim, which storage such as dCache checks.
+type: string
+default: none
+components: ["origin"]
+---
+name: Origin.HttpAuthOAuth2ClientRegistration
+description: |+
+  How the origin obtains an OAuth client for `Origin.HttpAuthOAuth2DeviceFlow` when `Origin.HttpAuthOAuth2ClientID` is not set.
+  One of:
+
+  - `auto`: use the client ID metadata document published by the federation's Director when the Director publishes one
+    and the issuer advertises `client_id_metadata_document_supported`; otherwise register a client with the issuer's
+    dynamic client registration endpoint.
+  - `cimd`: require the client ID metadata document.
+  - `dcr`: always use dynamic client registration.
+type: string
+default: auto
 components: ["origin"]
 ---
 name: Origin.XRootServiceUrl
@@ -3847,6 +3903,23 @@ components: ["cache"]
 ############################
 #  Director-level configs  #
 ############################
+name: Director.DisableClientIDMetadataDocuments
+description: |+
+  By default, the Director publishes an OAuth client ID metadata document for each of the federation's servers
+  at `/api/v1.0/director/oauthClients/caches/<name>` and `/api/v1.0/director/oauthClients/origins/<host>`.
+
+  The URL of a server's document is that server's OAuth `client_id` when it acquires a long-lived credential for a
+  storage backend (for example, `Origin.HttpAuthOAuth2DeviceFlow`) from an issuer that supports client ID metadata documents.
+  The document describes a confidential client that authenticates with `private_key_jwt` using the keys the server
+  registered with the federation's Registry, so the issuer can tell servers apart and a server's refresh token is
+  useless without its private key.
+  Servers fall back to dynamic client registration when no document is published.
+
+  Set to `true` to stop publishing the documents.
+type: bool
+default: false
+components: ["director"]
+---
 name: Director.EnableFederationMetadataHosting
 description: |+
   Controls whether or not the Director should host a copy of the Federation's metadata.
