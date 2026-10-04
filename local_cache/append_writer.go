@@ -374,15 +374,22 @@ func (w *AppendWriter) truncateTail(meta *CacheMetadata, actual int64, realChunk
 		return nil
 	}
 
-	path := w.sm.getChunkPath(storageID, w.instanceHash, tailIdx)
 	// Drop cached descriptors first so the truncation is not racing a reader
 	// holding a stale size.
 	w.sm.invalidateObjectCaches(w.instanceHash, realChunks)
-	if err := os.Truncate(path, wantSize); err != nil {
-		if os.IsNotExist(err) {
+	f, err := w.sm.openChunkFile(storageID, w.instanceHash, tailIdx, os.O_WRONLY)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
 			// Nothing was ever written to the tail chunk.
 			return nil
 		}
+		return errors.Wrapf(err, "failed to open chunk %d to trim it", tailIdx)
+	}
+	err = f.Truncate(wantSize)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
 		return errors.Wrapf(err, "failed to trim chunk %d to %d bytes", tailIdx, wantSize)
 	}
 	if err := w.sm.db.AddUsage(storageID, w.namespaceID, wantSize-haveSize); err != nil {
@@ -398,8 +405,7 @@ func (w *AppendWriter) releaseUnusedChunk(meta *CacheMetadata, chunkIdx int) {
 		return
 	}
 	storageID := meta.GetChunkStorageID(chunkIdx)
-	path := w.sm.getChunkPath(storageID, w.instanceHash, chunkIdx)
-	if err := removeFileWithRetry(path); err != nil && !os.IsNotExist(err) {
+	if err := w.sm.removeChunkFile(storageID, w.instanceHash, chunkIdx); err != nil {
 		log.Warnf("Failed to remove unused chunk %d of %s: %v", chunkIdx, w.instanceHash, err)
 		return
 	}

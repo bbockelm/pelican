@@ -66,11 +66,11 @@ func TestChaosCorruptBlock(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
-	hash := InstanceHash("abab000000000000000000000000000000000000000000000000000000000001")
+	hash := mustInstanceHash("abab000000000000000000000000000000000000000000000000000000000001")
 	storeTestObject(t, ctx, storage, hash, data, diskID, NamespaceID(1))
 
 	ci := NewChaosInjector(db, storage)
-	res, err := ci.CorruptBlock("", "", string(hash), 1, 0)
+	res, err := ci.CorruptBlock("", "", hash.String(), 1, 0)
 	require.NoError(t, err)
 	assert.Equal(t, "corrupt-block", res.Operation)
 	assert.Equal(t, int64(1), res.BlockNum)
@@ -92,11 +92,11 @@ func TestChaosTruncateObject(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
-	hash := InstanceHash("baba000000000000000000000000000000000000000000000000000000000001")
+	hash := mustInstanceHash("baba000000000000000000000000000000000000000000000000000000000001")
 	storeTestObject(t, ctx, storage, hash, data, diskID, NamespaceID(1))
 
 	ci := NewChaosInjector(db, storage)
-	res, err := ci.TruncateObject("", "", string(hash), -1, 0)
+	res, err := ci.TruncateObject("", "", hash.String(), -1, 0)
 	require.NoError(t, err)
 	assert.Equal(t, "truncate", res.Operation)
 	assert.Equal(t, res.OldFileSize-BlockTotalSize, res.NewFileSize,
@@ -113,13 +113,13 @@ func TestChaosInlineRejected(t *testing.T) {
 	db, storage, _ := newChaosTestCache(t)
 	ctx := context.Background()
 
-	hash := InstanceHash("acdc000000000000000000000000000000000000000000000000000000000001")
+	hash := mustInstanceHash("acdc000000000000000000000000000000000000000000000000000000000001")
 	small := []byte("small inline payload")
 	meta := &CacheMetadata{ContentLength: int64(len(small)), StorageID: StorageIDInline, NamespaceID: NamespaceID(1)}
 	require.NoError(t, storage.StoreInline(ctx, hash, meta, small))
 
 	ci := NewChaosInjector(db, storage)
-	_, err := ci.CorruptBlock("", "", string(hash), 0, 0)
+	_, err := ci.CorruptBlock("", "", hash.String(), 0, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "inline")
 }

@@ -156,11 +156,11 @@ func (t *tierTarget) objectKey(instanceHash InstanceHash) string {
 func (t *tierTarget) hashFromKey(key string) InstanceHash {
 	parts := strings.SplitN(key, "/", 3)
 	if len(parts) != 3 || len(parts[0]) != 2 || len(parts[1]) != 2 {
-		return ""
+		return InstanceHash{}
 	}
 	hash, err := ParseInstanceHash(parts[0] + parts[1] + parts[2])
 	if err != nil {
-		return ""
+		return InstanceHash{}
 	}
 	return hash
 }
@@ -248,7 +248,7 @@ func (t *tierTarget) redirectURL(ctx context.Context, instanceHash InstanceHash,
 func (t *tierTarget) listObjects(ctx context.Context, fn func(hash InstanceHash, size int64, modified time.Time) error) error {
 	return t.backend.List(ctx, func(key string, size int64, modified time.Time) error {
 		hash := t.hashFromKey(key)
-		if hash == "" {
+		if hash.IsZero() {
 			return nil
 		}
 		return fn(hash, size, modified)

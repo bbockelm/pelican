@@ -424,7 +424,7 @@ func TestNewIntrospectAPIOffline(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, objects, 1)
 	assert.Equal(t, sourceURL, objects[0].SourceURL)
-	assert.Equal(t, string(instHash), objects[0].InstanceHash)
+	assert.Equal(t, instHash.String(), objects[0].InstanceHash)
 	assert.True(t, objects[0].IsInline)
 
 	// `introspect etags`
@@ -435,7 +435,7 @@ func TestNewIntrospectAPIOffline(t *testing.T) {
 	assert.True(t, instances[0].IsLatest, "the stored ETag pointer was not read back")
 
 	// `introspect metadata`
-	details, err := api.GetObjectDetails(string(instHash))
+	details, err := api.GetObjectDetails(instHash.String())
 	require.NoError(t, err)
 	require.NotNil(t, details)
 	assert.Equal(t, sourceURL, details.SourceURL)

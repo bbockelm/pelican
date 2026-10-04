@@ -20,7 +20,6 @@ package local_cache
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -117,7 +116,7 @@ func TestTierOnNonRedirectingBackend(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
-	hash := InstanceHash(fmt.Sprintf("%064d", 21))
+	hash := testInstanceHash(21)
 	nsID := NamespaceID(1)
 	storeTestObject(t, ctx, env.storage, hash, data, env.diskID, nsID)
 	fileSize := CalculateFileSize(int64(len(data)))
@@ -129,7 +128,7 @@ func TestTierOnNonRedirectingBackend(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	assert.Equal(t, env.tierID, meta.StorageID)
-	_, statErr := os.Stat(env.storage.getObjectPathForDir(env.diskID, hash))
+	_, statErr := os.Stat(env.storage.chunkFilePath(env.diskID, hash, 0))
 	assert.True(t, os.IsNotExist(statErr), "the local copy should be released")
 	diskUsage, err := env.db.GetUsage(env.diskID, nsID)
 	require.NoError(t, err)
@@ -188,7 +187,7 @@ func TestTierIntentsArePaged(t *testing.T) {
 
 	const n = 2*tierIntentPage + 7
 	for i := 0; i < n; i++ {
-		require.NoError(t, env.db.SetTierUploadIntent(InstanceHash(fmt.Sprintf("%064d", i)),
+		require.NoError(t, env.db.SetTierUploadIntent(testInstanceHash(i),
 			&TierUploadIntent{TargetStorageID: env.tierID, Size: 1}))
 	}
 
@@ -196,7 +195,7 @@ func TestTierIntentsArePaged(t *testing.T) {
 	var previous InstanceHash
 	require.NoError(t, env.uploader.forEachIntent(ctx, func(h InstanceHash, _ *TierUploadIntent) error {
 		seen[h]++
-		assert.Greater(t, h, previous, "intents are visited in hash order")
+		assert.Positive(t, h.Compare(previous), "intents are visited in hash order")
 		previous = h
 		return env.db.DeleteTierUploadIntent(h)
 	}))
@@ -204,7 +203,7 @@ func TestTierIntentsArePaged(t *testing.T) {
 	for h, count := range seen {
 		assert.Equal(t, 1, count, "intent %s visited more than once", h)
 	}
-	rest, err := env.db.ListTierUploadIntents("", tierIntentPage)
+	rest, err := env.db.ListTierUploadIntents(InstanceHash{}, tierIntentPage)
 	require.NoError(t, err)
 	assert.Empty(t, rest)
 }
@@ -241,7 +240,7 @@ func TestTierStartDoesNotWaitForRecovery(t *testing.T) {
 
 	// An upload that never committed: recovery deletes its remote copy,
 	// refunds the charge and re-queues the object.
-	hash := InstanceHash(fmt.Sprintf("%064d", 77))
+	hash := testInstanceHash(77)
 	data := make([]byte, 4*BlockDataSize)
 	storeTestObject(t, ctx, env.storage, hash, data, env.diskID, NamespaceID(1))
 	require.NoError(t, env.db.SetTierUploadIntent(hash, &TierUploadIntent{
@@ -345,7 +344,7 @@ func TestTierGivesUpOnAnObject(t *testing.T) {
 	env := newMemTierEnv(t, ctx)
 	working := env.target.backend
 
-	hash := InstanceHash(fmt.Sprintf("%064d", 91))
+	hash := testInstanceHash(91)
 	data := make([]byte, 4*BlockDataSize)
 	storeTestObject(t, ctx, env.storage, hash, data, env.diskID, NamespaceID(1))
 

@@ -238,7 +238,7 @@ func ParseChunkFilename(filename string) (baseHash InstanceHash, chunkIndex int,
 		if n, err := strconv.Atoi(suffix); err == nil && n >= 2 {
 			hash, err := ParseInstanceHash(filename[:idx])
 			if err != nil {
-				return "", 0, false
+				return InstanceHash{}, 0, false
 			}
 			return hash, n - 1, true // -2 means chunk index 1, -3 means chunk index 2, etc.
 		}
@@ -246,7 +246,7 @@ func ParseChunkFilename(filename string) (baseHash InstanceHash, chunkIndex int,
 	// No valid suffix - treat as base file (chunk 0)
 	hash, err := ParseInstanceHash(filename)
 	if err != nil {
-		return "", 0, false
+		return InstanceHash{}, 0, false
 	}
 	return hash, 0, true
 }

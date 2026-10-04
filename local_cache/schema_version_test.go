@@ -274,7 +274,7 @@ func TestSchemaVersionReadOnlyPath(t *testing.T) {
 		dir := t.TempDir()
 		seed := openPlainBadger(t, dir, false)
 		require.NoError(t, seed.Update(func(txn *badger.Txn) error {
-			return txn.Set(MetaKey("instance"), []byte("record"))
+			return txn.Set(MetaKey(namedInstanceHash("instance")), []byte("record"))
 		}))
 		require.NoError(t, seed.Close())
 

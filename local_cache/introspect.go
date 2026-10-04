@@ -22,7 +22,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -274,7 +273,7 @@ func (api *IntrospectAPIOpen) ListObjectInstances(objectURL string) ([]ObjectIns
 		}
 
 		instance := ObjectInstance{
-			InstanceHash:  string(instanceHash),
+			InstanceHash:  instanceHash.String(),
 			ETag:          meta.ETag,
 			SourceURL:     meta.SourceURL,
 			ContentLength: meta.ContentLength,
@@ -416,7 +415,7 @@ func (api *IntrospectAPIOpen) GetObjectDetailsByURL(objectURL, etag string) (*Ob
 	}
 
 	instanceHash := api.db.InstanceHash(etag, objectHash)
-	return api.GetObjectDetails(string(instanceHash))
+	return api.GetObjectDetails(instanceHash.String())
 }
 
 // VerifyChecksum triggers a checksum verification for the specified instance.
@@ -504,7 +503,7 @@ func (api *IntrospectAPIOpen) VerifyChecksumByURL(objectURL, etag string) (*Veri
 	}
 
 	instanceHash := api.db.InstanceHash(etag, objectHash)
-	return api.VerifyChecksum(string(instanceHash))
+	return api.VerifyChecksum(instanceHash.String())
 }
 
 // getBlockSummary computes block download status for an object.
@@ -610,7 +609,7 @@ func (api *IntrospectAPIOpen) ListAllObjects(limit int, pattern string) ([]Objec
 		}
 
 		instance := ObjectInstance{
-			InstanceHash:  string(instanceHash),
+			InstanceHash:  instanceHash.String(),
 			ETag:          meta.ETag,
 			SourceURL:     meta.SourceURL,
 			ContentLength: meta.ContentLength,
@@ -703,45 +702,7 @@ func (api *IntrospectAPIOpen) GetCacheStats() (*CacheStats, error) {
 // GetDiskUsage walks the storage directories to compute actual disk usage.
 // This is an expensive operation that reads every file's size on disk.
 func (api *IntrospectAPIOpen) GetDiskUsage() (*DiskUsageResult, error) {
-	start := time.Now()
-	result := &DiskUsageResult{
-		Directories: make(map[string]*DirDiskStat),
-	}
-
-	dirs := api.storage.GetDirs()
-	for storageID, objectsDir := range dirs {
-		dirKey := fmt.Sprintf("storage-%d", storageID)
-		ds := &DirDiskStat{
-			StorageID: uint8(storageID),
-			Path:      objectsDir,
-		}
-
-		err := filepath.WalkDir(objectsDir, func(path string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return nil // skip entries we can't stat
-			}
-			if d.IsDir() {
-				return nil
-			}
-			info, err := d.Info()
-			if err != nil {
-				return nil // skip
-			}
-			ds.FileCount++
-			ds.BytesUsed += info.Size()
-			return nil
-		})
-		if err != nil {
-			return nil, errors.Wrapf(err, "failed to walk storage directory %s", objectsDir)
-		}
-
-		result.Directories[dirKey] = ds
-		result.TotalBytesOnDisk += ds.BytesUsed
-		result.TotalFiles += ds.FileCount
-	}
-
-	result.Duration = time.Since(start).String()
-	return result, nil
+	return api.storage.DiskUsage(), nil
 }
 
 // RunConsistencyCheck runs a full consistency check (metadata scan + data scan)

@@ -21,6 +21,8 @@ package local_cache
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"hash"
@@ -393,10 +395,10 @@ func (cc *ConsistencyChecker) dataScanLoop(ctx context.Context) error {
 // of a hex-encoded hash.  Used to estimate scan progress: bucket 0x00
 // means 1/256 complete, 0xff means 256/256 complete.
 func hashBucket(h InstanceHash) int {
-	if len(h) < 2 {
+	if len(h.hex) < 2 {
 		return 0
 	}
-	b, err := hex.DecodeString(string(h[:2]))
+	b, err := hex.DecodeString(h.hex[:2])
 	if err != nil || len(b) == 0 {
 		return 0
 	}
@@ -426,7 +428,7 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 	// stream on fileChan, which the merge-join algorithm requires.
 	type fileInfo struct {
 		instanceHash InstanceHash
-		path         string
+		path         walkedFile
 		modTime      time.Time
 		size         int64
 		chunkIndex   int       // 0 for base file, 1+ for chunk suffix files (-2, -3, etc.)
@@ -446,8 +448,18 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 		ch := make(chan fileInfo, 64)
 		go func() {
 			defer close(ch)
-			fsys := os.DirFS(objectsDir)
-			_ = fs.WalkDir(fsys, ".", func(relPath string, d fs.DirEntry, err error) error {
+			root, err := cc.storage.storageRootFor(storageID)
+			if err != nil {
+				// A directory a read-only manager could not open: missing
+				// is benign, as for a missing root below; anything else
+				// means the listing is incomplete.
+				if !errors.Is(err, fs.ErrNotExist) {
+					sl.WithError(err).WithField("path", objectsDir).Warn("Walk error")
+					hadWalkError.Store(true)
+				}
+				return
+			}
+			_ = fs.WalkDir(root.FS(), ".", func(relPath string, d fs.DirEntry, err error) error {
 				if err != nil {
 					// A missing root directory is benign (e.g. inline-only
 					// storage has no objects/ dir yet).  Only flag actual
@@ -494,11 +506,15 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 				select {
 				case ch <- fileInfo{
 					instanceHash: instanceHash,
-					path:         filepath.Join(objectsDir, relPath),
-					modTime:      info.ModTime(),
-					size:         info.Size(),
-					chunkIndex:   chunkIndex,
-					storageID:    storageID,
+					path: walkedFile{
+						root: root,
+						rel:  filepath.FromSlash(relPath),
+						full: filepath.Join(objectsDir, filepath.FromSlash(relPath)),
+					},
+					modTime:    info.ModTime(),
+					size:       info.Size(),
+					chunkIndex: chunkIndex,
+					storageID:  storageID,
 				}:
 				case <-ctx.Done():
 					return ctx.Err()
@@ -537,7 +553,7 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 				if !ok[i] {
 					continue
 				}
-				if minIdx == -1 || heads[i].instanceHash < heads[minIdx].instanceHash {
+				if minIdx == -1 || heads[i].instanceHash.Compare(heads[minIdx].instanceHash) < 0 {
 					minIdx = i
 				}
 			}
@@ -558,7 +574,7 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 	type deleteAction struct {
 		instanceHash InstanceHash
 		isFile       bool
-		path         string
+		path         walkedFile
 		size         int64
 		chunkIndex   int // For file deletions: which chunk (0 = base file, 1+ = chunk suffix)
 	}
@@ -585,7 +601,7 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 	usageDuringScan := make(map[StorageUsageKey]int64)
 
 	// Track where to resume DB scan after each transaction restart
-	lastDBKey := InstanceHash("")
+	var lastDBKey InstanceHash
 	transactionStartTime := time.Now()
 	const transactionTimeout = 5 * time.Second
 
@@ -638,7 +654,7 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 			entriesThisTransaction++
 
 			// Process all files that are less than current DB entry (orphaned files)
-			for fileOk && currentFile.instanceHash < instanceHash {
+			for fileOk && currentFile.instanceHash.Compare(instanceHash) < 0 {
 				if len(deletions) < maxDeletionsPerTx {
 					deletions = append(deletions, deleteAction{
 						instanceHash: currentFile.instanceHash,
@@ -856,12 +872,12 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 				// Re-verify before deleting
 				if del.isFile {
 					// Re-check file still exists
-					if _, err := os.Stat(del.path); err == nil {
-						sl.WithField("path", del.path).Warn("Orphaned file")
+					if _, err := del.path.root.Stat(del.path.rel); err == nil {
+						sl.WithField("path", del.path.full).Warn("Orphaned file")
 						orphanedFiles++
 						orphanedBytes += del.size
-						if err := os.Remove(del.path); err != nil {
-							sl.WithError(err).WithField("path", del.path).Warn("Failed to remove orphaned file")
+						if err := del.path.root.Remove(del.path.rel); err != nil {
+							sl.WithError(err).WithField("path", del.path.full).Warn("Failed to remove orphaned file")
 						}
 						// For base files (chunk 0), also remove any associated chunk files (chunks 1+)
 						// Chunk suffix files are detected and removed independently, so only
@@ -925,13 +941,13 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 	for fileOk {
 		if !hadWalkError.Load() {
 			// Re-check file (might have been created after scan start)
-			if info, err := os.Stat(currentFile.path); err == nil {
+			if info, err := currentFile.path.root.Stat(currentFile.path.rel); err == nil {
 				if !info.ModTime().After(scanStartTime) {
-					sl.WithField("path", currentFile.path).Warn("Orphaned file")
+					sl.WithField("path", currentFile.path.full).Warn("Orphaned file")
 					orphanedFiles++
 					orphanedBytes += currentFile.size
-					if err := os.Remove(currentFile.path); err != nil {
-						sl.WithError(err).WithField("path", currentFile.path).Warn("Failed to remove orphaned file")
+					if err := currentFile.path.root.Remove(currentFile.path.rel); err != nil {
+						sl.WithError(err).WithField("path", currentFile.path.full).Warn("Failed to remove orphaned file")
 					}
 				}
 			}
@@ -1104,11 +1120,16 @@ func (cc *ConsistencyChecker) RunDataScan(ctx context.Context, progressCh chan<-
 	objectsVerified := int64(0)
 	lastProgressSend := scanStartTime
 
-	// Generate random 4-byte hex starting point (16 bits = 4 hex chars)
-	// This randomizes where we start scanning through the database
+	// Pick a random starting point (16 bits = the first 4 hex digits, the
+	// rest zero) so successive scans do not always begin at the same
+	// objects.  It is a seek position, not an object: no real hash will
+	// equal it (that would take a 240-bit coincidence), so nothing is
+	// skipped by ScanMetadataFrom passing over its start key.
 	rng := rand.New(rand.NewSource(scanStartTime.UnixNano()))
-	randomStart := fmt.Sprintf("%04x", rng.Intn(1<<16))
-	startBucket := hashBucket(InstanceHash(randomStart))
+	var startDigest [sha256.Size]byte
+	binary.BigEndian.PutUint16(startDigest[:2], uint16(rng.Intn(1<<16)))
+	randomStart := InstanceHashFromSHA256(startDigest)
+	startBucket := hashBucket(randomStart)
 
 	// Channel for streaming objects from DB scan
 	objectChan := make(chan scanItem, 1000)
@@ -1130,7 +1151,7 @@ func (cc *ConsistencyChecker) RunDataScan(ctx context.Context, progressCh chan<-
 
 		const transactionTimeout = 5 * time.Second
 
-		startKey := InstanceHash(randomStart)
+		startKey := randomStart
 		lastKey := startKey
 
 		for {
@@ -1156,7 +1177,7 @@ func (cc *ConsistencyChecker) RunDataScan(ctx context.Context, progressCh chan<-
 				}
 
 				// If we've wrapped around and reached our starting point, we're done
-				if wrappedAround.Load() && instanceHash >= startKey {
+				if wrappedAround.Load() && instanceHash.Compare(startKey) >= 0 {
 					return errScanDone
 				}
 
@@ -1197,8 +1218,8 @@ func (cc *ConsistencyChecker) RunDataScan(ctx context.Context, progressCh chan<-
 				}
 				// Wrap around to beginning
 				wrappedAround.Store(true)
-				lastKey = ""
-				sl.WithField("startKey", string(startKey)).Debug("Data scan wrapping around from end to beginning")
+				lastKey = InstanceHash{}
+				sl.WithField("startKey", startKey.String()).Debug("Data scan wrapping around from end to beginning")
 			}
 		}
 	}()
@@ -1709,8 +1730,7 @@ func (cc *ConsistencyChecker) VerifyObject(instanceHash InstanceHash) (bool, err
 				continue
 			}
 			storageID := meta.GetChunkStorageID(chunkIdx)
-			chunkPath := cc.storage.getChunkPath(storageID, instanceHash, chunkIdx)
-			if _, err := os.Stat(chunkPath); os.IsNotExist(err) {
+			if _, err := cc.storage.statChunkFile(storageID, instanceHash, chunkIdx); errors.Is(err, fs.ErrNotExist) {
 				return false, nil
 			}
 		}
@@ -1819,26 +1839,39 @@ func (cc *ConsistencyChecker) allChunkFilesExist(meta *CacheMetadata, instanceHa
 			continue
 		}
 		storageID := meta.GetChunkStorageID(chunkIdx)
-		chunkPath := cc.storage.getChunkPath(storageID, instanceHash, chunkIdx)
-		if _, err := os.Stat(chunkPath); os.IsNotExist(err) {
+		if _, err := cc.storage.statChunkFile(storageID, instanceHash, chunkIdx); errors.Is(err, fs.ErrNotExist) {
 			return false
 		}
 	}
 	return true
 }
 
+// walkedFile names a file found by the metadata scan's directory walk: its
+// storage root and its path relative to that root, through which it is
+// re-checked and removed, and its full path, for messages.
+type walkedFile struct {
+	root *os.Root
+	rel  string
+	full string
+}
+
 // removeOrphanedChunkFiles removes chunk files (chunks 1+) associated with a base file.
 // This is called when an orphaned base file (chunk 0) is being deleted.
 // Because chunks may be lazily allocated (non-sequential), we list the parent
 // directory and match by prefix rather than probing sequential indices.
-func (cc *ConsistencyChecker) removeOrphanedChunkFiles(sl *log.Entry, basePath string, orphanedFiles *int64, orphanedBytes *int64) {
-	dir := filepath.Dir(basePath)
-	base := filepath.Base(basePath)
-	prefix := base + "-"
+func (cc *ConsistencyChecker) removeOrphanedChunkFiles(sl *log.Entry, base walkedFile, orphanedFiles *int64, orphanedBytes *int64) {
+	dir := filepath.Dir(base.rel)
+	prefix := filepath.Base(base.rel) + "-"
 
-	entries, err := os.ReadDir(dir)
+	d, err := base.root.Open(dir)
 	if err != nil {
-		sl.WithError(err).WithField("dir", dir).Warn("Failed to list directory for orphaned chunk cleanup")
+		sl.WithError(err).WithField("dir", filepath.Dir(base.full)).Warn("Failed to list directory for orphaned chunk cleanup")
+		return
+	}
+	entries, err := d.ReadDir(-1)
+	d.Close()
+	if err != nil {
+		sl.WithError(err).WithField("dir", filepath.Dir(base.full)).Warn("Failed to list directory for orphaned chunk cleanup")
 		return
 	}
 	for _, entry := range entries {
@@ -1849,7 +1882,8 @@ func (cc *ConsistencyChecker) removeOrphanedChunkFiles(sl *log.Entry, basePath s
 		if !strings.HasPrefix(name, prefix) {
 			continue
 		}
-		chunkPath := filepath.Join(dir, name)
+		chunkRel := filepath.Join(dir, name)
+		chunkPath := filepath.Join(filepath.Dir(base.full), name)
 		info, err := entry.Info()
 		if err != nil {
 			sl.WithError(err).WithField("path", chunkPath).Warn("Error getting info for chunk file")
@@ -1858,7 +1892,7 @@ func (cc *ConsistencyChecker) removeOrphanedChunkFiles(sl *log.Entry, basePath s
 		sl.WithField("path", chunkPath).Warn("Orphaned chunk file")
 		(*orphanedFiles)++
 		(*orphanedBytes) += info.Size()
-		if err := os.Remove(chunkPath); err != nil {
+		if err := base.root.Remove(chunkRel); err != nil {
 			sl.WithError(err).WithField("path", chunkPath).Warn("Failed to remove orphaned chunk file")
 		}
 	}

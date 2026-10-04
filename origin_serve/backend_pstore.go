@@ -82,8 +82,7 @@ func newPStoreBackend(
 		return nil, errors.New("no error group in context; cannot start the pstore background workers")
 	}
 
-	dirs, err := local_cache.ParseStorageDirsValue(
-		param.Origin_PStoreStorageDirs.GetRaw(), param.Origin_PStoreStorageDirs.GetName())
+	dirs, err := local_cache.DecodeStorageDirs(param.Origin_PStoreStorageDirs)
 	if err != nil {
 		return nil, err
 	}

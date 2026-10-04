@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/glebarez/sqlite"
@@ -450,7 +451,8 @@ func TestCorruption_VerifyBlockIntegrity(t *testing.T) {
 	const contentLen = 3 * local_cache.BlockDataSize
 	content := generateTestData(contentLen)
 
-	fileHash := local_cache.InstanceHash("deadbeef1234567890abcdef")
+	fileHash, err := local_cache.ParseInstanceHash("deadbeef1234567890abcdef" + strings.Repeat("0", 40))
+	require.NoError(t, err)
 
 	// Get the assigned storage ID for the single directory.
 	assignedDirs := storage.GetDirs()

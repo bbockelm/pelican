@@ -1131,13 +1131,12 @@ func (pc *PersistentCache) resolveObject(
 			return nil, errors.Wrap(err, "failed to check cache")
 		}
 		// An object whose storage no longer exists -- most plausibly one left
-		// behind by a bucket that has since been removed from the
-		// configuration -- is a miss, not something to look for on disk.  Its
-		// storage ID resolves to no directory, and treating it as a hit would
-		// send the read to an arbitrary one.
-		if meta != nil && !pc.storage.storageIsResolvable(meta.StorageID) {
-			log.Warnf("Cached object %s names storage %d, which is not configured; treating as a miss",
-				instanceHash, meta.StorageID)
+		// behind by a directory or bucket that has since been removed from
+		// the configuration, possibly holding only some of its chunks -- is
+		// a miss, not something to read: see objectIsResolvable.
+		if meta != nil && !pc.storage.objectIsResolvable(meta) {
+			log.Warnf("Cached object %s is stored (in whole or part) on storage that is not configured; treating as a miss",
+				instanceHash)
 			meta = nil
 		}
 	}
@@ -1764,7 +1763,7 @@ func (pc *PersistentCache) initObjectFromStat(
 	namespaceID NamespaceID,
 	token string,
 ) (InstanceHash, *CacheMetadata, error) {
-	v, err, _ := pc.initGroup.Do(string(objectHash), func() (interface{}, error) {
+	v, err, _ := pc.initGroup.Do(objectHash.String(), func() (interface{}, error) {
 		result, err := pc.doInitObjectFromStat(ctx, pelicanURL, objectHash, namespaceID, token)
 		if err != nil {
 			return nil, err
@@ -1772,7 +1771,7 @@ func (pc *PersistentCache) initObjectFromStat(
 		return result, nil
 	})
 	if err != nil {
-		return "", nil, err
+		return InstanceHash{}, nil, err
 	}
 	result := v.(*initResult)
 	return result.instanceHash, result.meta, nil
@@ -1899,7 +1898,7 @@ func (pc *PersistentCache) revalidateObject(
 	log.Debugf("Cached object %s is stale (validated %v), revalidating", instanceHash, meta.LastValidated)
 
 	// ---- singleflight deduplication ----
-	ch := pc.revalGroup.DoChan(string(objectHash), func() (interface{}, error) {
+	ch := pc.revalGroup.DoChan(objectHash.String(), func() (interface{}, error) {
 		newHash, dl, dlErr := pc.downloadObject(ctx, pelicanURL, objectHash, namespaceID, token)
 
 		if errors.Is(dlErr, ErrNoStore) && dl != nil && dl.noStoreReader != nil {
@@ -1912,7 +1911,7 @@ func (pc *PersistentCache) revalidateObject(
 			return nil, ErrNoStoreRetry
 		}
 
-		if dlErr == nil && newHash != "" {
+		if dlErr == nil && !newHash.IsZero() {
 			if newHash != instanceHash {
 				log.Debugf("Revalidation fetched new version %s (was %s)", newHash, instanceHash)
 				newMeta, getErr := pc.storage.GetMetadata(newHash)
@@ -1940,9 +1939,9 @@ func (pc *PersistentCache) revalidateObject(
 	case res := <-ch:
 		if res.Err != nil {
 			if errors.Is(res.Err, ErrNoStoreRetry) {
-				return "", nil, nil, ErrNoStoreRetry
+				return InstanceHash{}, nil, nil, ErrNoStoreRetry
 			}
-			return "", nil, nil, res.Err
+			return InstanceHash{}, nil, nil, res.Err
 		}
 		result := res.Val.(*revalResult)
 		if result.stale {
@@ -1951,16 +1950,16 @@ func (pc *PersistentCache) revalidateObject(
 		if result.noStoreReader != nil {
 			if res.Shared {
 				// Waiter — cannot consume the same reader; caller must retry.
-				return "", nil, nil, ErrNoStoreRetry
+				return InstanceHash{}, nil, nil, ErrNoStoreRetry
 			}
-			return "", nil, &revalidation{
+			return InstanceHash{}, nil, &revalidation{
 				noStoreReader: result.noStoreReader,
 				noStoreMeta:   result.noStoreMeta,
 			}, nil
 		}
 		return result.instanceHash, result.meta, nil, nil
 	case <-ctx.Done():
-		return "", nil, nil, ctx.Err()
+		return InstanceHash{}, nil, nil, ctx.Err()
 	}
 }
 
@@ -1983,7 +1982,7 @@ func (pc *PersistentCache) downloadObject(ctx context.Context, pelicanURL string
 			if errors.Is(err, ErrNoStore) {
 				// Stream already consumed by first caller — tell this
 				// caller to start its own download.
-				return "", nil, ErrNoStoreRetry
+				return InstanceHash{}, nil, ErrNoStoreRetry
 			}
 			return instanceHash, dl, err
 		}
@@ -2000,11 +1999,11 @@ func (pc *PersistentCache) downloadObject(ctx context.Context, pelicanURL string
 			dlRef.mu.Unlock()
 			if errors.Is(err, ErrNoStore) {
 				// Stream already consumed by first caller — retry.
-				return "", nil, ErrNoStoreRetry
+				return InstanceHash{}, nil, ErrNoStoreRetry
 			}
 			return instanceHash, dlRef, err
 		case <-ctx.Done():
-			return "", nil, ctx.Err()
+			return InstanceHash{}, nil, ctx.Err()
 		}
 	}
 
@@ -2062,7 +2061,7 @@ func (pc *PersistentCache) downloadObject(ctx context.Context, pelicanURL string
 	}()
 
 	if errors.Is(err, ErrNoStore) {
-		return "", dl, err
+		return InstanceHash{}, dl, err
 	}
 	return dl.instanceHash, dl, err
 }

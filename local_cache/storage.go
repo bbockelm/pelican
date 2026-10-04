@@ -24,7 +24,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -42,47 +41,6 @@ import (
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/utils"
 )
-
-// removeFileWithRetry removes a file, retrying briefly on Windows if the
-// file is still held open by an asynchronous eviction callback (ttlcache
-// fires OnEviction in a goroutine, so the file descriptor may not be
-// closed by the time we attempt the delete).
-func removeFileWithRetry(name string) error {
-	err := os.Remove(name)
-	if err == nil || os.IsNotExist(err) {
-		return nil
-	}
-	if runtime.GOOS != "windows" {
-		return err
-	}
-	// On Windows, retry a few times to allow the async close to finish.
-	for attempt := 0; attempt < 5; attempt++ {
-		time.Sleep(10 * time.Millisecond)
-		err = os.Remove(name)
-		if err == nil || os.IsNotExist(err) {
-			return nil
-		}
-	}
-	return err
-}
-
-// createFile creates a file at the given path. If the parent directory
-// does not exist, it creates the directory (with 0750 permissions) and
-// retries the file creation. This avoids the overhead of a-priori
-// directory existence checks.
-func createFile(name string) (*os.File, error) {
-	fp, err := os.Create(name)
-	if err == nil {
-		return fp, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-	if mkdirErr := os.MkdirAll(filepath.Dir(name), 0750); mkdirErr != nil {
-		return nil, mkdirErr
-	}
-	return os.Create(name)
-}
 
 // refCountedFile wraps an *os.File with atomic reference counting.
 // The file is only closed when the last reference is released.
@@ -235,7 +193,7 @@ var writeToOutBufPool = sync.Pool{
 // are uniformly distributed; XOR-ing with the block number produces a
 // collision probability of ~1/2^64 per pair — effectively zero.
 func ptCacheKey(h InstanceHash, block uint32) uint64 {
-	return binary.LittleEndian.Uint64([]byte(h)[:8]) ^ uint64(block)
+	return binary.LittleEndian.Uint64([]byte(h.hex[:8])) ^ uint64(block)
 }
 
 // chunkFileKey identifies a specific chunk file in the FD cache.
@@ -315,6 +273,11 @@ type StorageManager struct {
 	// StorageIDFirstDisk is always present; additional dirs have
 	// sequential IDs.
 	dirs map[StorageID]string
+
+	// roots holds an open *os.Root on each objects directory, through
+	// which every object file is opened, created, statted and removed (see
+	// storage_root.go).  Opened with the manager and closed by Close.
+	roots map[StorageID]storageRoot
 
 	// inlineMaxBytes is the maximum size of objects stored inline in
 	// BadgerDB.  Objects at or below this threshold are stored inline;
@@ -590,9 +553,18 @@ func NewStorageManager(db *CacheDB, dirs []string, inlineMax int, egrp *errgroup
 		return dirIDs[idx]
 	}
 
+	roots, err := openStorageRoots(objDirs, true)
+	if err != nil {
+		if ptCache != nil {
+			ptCache.Close()
+		}
+		return nil, err
+	}
+
 	sm := &StorageManager{
 		db:             db,
 		dirs:           objDirs,
+		roots:          roots,
 		inlineMaxBytes: inlineMax,
 		fdCacheMaxSize: fdCacheSize,
 		ptCache:        ptCache,
@@ -805,6 +777,7 @@ func (sm *StorageManager) Close() {
 	if sm.ptCache != nil {
 		sm.ptCache.Close()
 	}
+	closeStorageRoots(sm.roots)
 }
 
 // NewStorageManagerReadOnly creates a storage manager for read-only introspection.
@@ -831,10 +804,18 @@ func NewStorageManagerReadOnly(baseDir string, db *CacheDB) (*StorageManager, er
 		objDirs[dm.ID] = filepath.Join(dm.Directory, objectsSubDir)
 	}
 
+	// Unmounted directories are tolerated here: operations on them report
+	// why the directory could not be opened.
+	roots, err := openStorageRoots(objDirs, false)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create minimal caches with no goroutine management
 	sm := &StorageManager{
 		db:             db,
 		dirs:           objDirs,
+		roots:          roots,
 		inlineMaxBytes: InlineThreshold,
 		pins:           newPinSet(),
 		blockStates:    newBlockStateCache(db),
@@ -916,9 +897,7 @@ func (sm *StorageManager) getFile(instanceHash InstanceHash, storageID StorageID
 		}
 	}
 
-	objectPath := sm.getObjectPathForDir(storageID, instanceHash)
-
-	file, err := os.OpenFile(objectPath, os.O_RDWR, 0600)
+	file, err := sm.openChunkFile(storageID, instanceHash, 0, os.O_RDWR)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to open object file")
 	}
@@ -944,29 +923,35 @@ func (sm *StorageManager) invalidateObjectCaches(instanceHash InstanceHash, chun
 	}
 }
 
-// getObjectPathForDir returns the full path for an object in a specific directory.
-func (sm *StorageManager) getObjectPathForDir(storageID StorageID, instanceHash InstanceHash) string {
-	dir, ok := sm.dirs[storageID]
-	if !ok {
-		// Fallback to first dir (should not happen in practice)
-		for _, d := range sm.dirs {
-			dir = d
-			break
+// objectIsResolvable reports whether every place an object's data lives is
+// something this manager can actually reach: a configured directory, inline
+// storage, or a registered tiering target.  For a chunked object that means
+// the base storage ID and the storage ID of every allocated chunk.
+//
+// An object for which any of them resolves to nothing must be treated as a
+// miss and fetched again, rather than read.  A directory or bucket that has
+// been removed from the configuration leaves its objects' metadata behind
+// pointing at an ID with no storage -- for a chunked object, possibly only
+// some of its chunks.  File operations refuse such an ID
+// (errStorageDirNotConfigured), so reading the object would fail on every
+// attempt, and the write-back repair cannot recreate a chunk in a directory
+// that is not there; it must not be recreated anywhere else either, since
+// the metadata would not name that place.  Deciding up front keeps the read
+// path from getting that far.
+func (sm *StorageManager) objectIsResolvable(meta *CacheMetadata) bool {
+	if !sm.storageIsResolvable(meta.StorageID) {
+		return false
+	}
+	for _, loc := range meta.ChunkLocations {
+		if !sm.storageIsResolvable(loc.StorageID) {
+			return false
 		}
 	}
-	return filepath.Join(dir, GetInstanceStoragePath(instanceHash))
+	return true
 }
 
-// storageIsResolvable reports whether a storage ID names something this manager
-// can actually reach: a configured directory, inline storage, or a registered
-// tiering target.
-//
-// An object whose storage ID resolves to none of those must be treated as a
-// miss rather than looked up on disk.  A bucket that has been removed from the
-// configuration leaves its objects' metadata behind pointing at an ID with no
-// directory, and getObjectPathForDir answers for any unknown ID by falling back
-// to an arbitrary directory -- so a read would silently look for the object in
-// the wrong place, and auto-repair could write it there.
+// storageIsResolvable reports whether one storage ID is inline storage (or an
+// unallocated chunk), a configured directory, or a registered tiering target.
 func (sm *StorageManager) storageIsResolvable(storageID StorageID) bool {
 	if storageID == StorageIDInline {
 		return true
@@ -976,26 +961,6 @@ func (sm *StorageManager) storageIsResolvable(storageID StorageID) bool {
 	}
 	_, ok := sm.tierTargets[storageID]
 	return ok
-}
-
-// getObjectPath returns the full filesystem path for an object.
-// For objects already stored, use getObjectPathForDir with their StorageID.
-// This legacy helper uses StorageIDFirstDisk for backward compatibility.
-func (sm *StorageManager) getObjectPath(instanceHash InstanceHash) string {
-	return sm.getObjectPathForDir(StorageIDFirstDisk, instanceHash)
-}
-
-// getChunkPath returns the filesystem path for a specific chunk of an object.
-// For chunk 0, this is the same as getObjectPathForDir.
-// For chunks 1+, a suffix like "-2", "-3" is appended.
-func (sm *StorageManager) getChunkPath(storageID StorageID, instanceHash InstanceHash, chunkIndex int) string {
-	basePath := sm.getObjectPathForDir(storageID, instanceHash)
-	if basePath == "" {
-		// Rejected by containment; suffixing it would turn an unusable path
-		// back into a usable one.
-		return ""
-	}
-	return GetChunkPath(basePath, chunkIndex)
 }
 
 // getChunkFile returns a reference-counted file descriptor for a specific chunk.
@@ -1031,9 +996,7 @@ func (sm *StorageManager) getChunkFile(instanceHash InstanceHash, meta *CacheMet
 	}
 
 	storageID := meta.GetChunkStorageID(chunkIndex)
-	chunkPath := sm.getChunkPath(storageID, instanceHash, chunkIndex)
-
-	file, err := os.OpenFile(chunkPath, os.O_RDWR, 0600)
+	file, err := sm.openChunkFile(storageID, instanceHash, chunkIndex, os.O_RDWR)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to open chunk %d file", chunkIndex)
 	}
@@ -1185,9 +1148,8 @@ func (sm *StorageManager) InitDiskStorage(ctx context.Context, instanceHash Inst
 		DataKey:       encryptedDEK,
 	}
 
-	// Create the file; createFile lazily creates the parent directory
-	objectPath := sm.getObjectPathForDir(storageID, instanceHash)
-	file, err := createFile(objectPath)
+	// Create the file; createChunkFile lazily creates the parent directory
+	file, err := sm.createChunkFile(storageID, instanceHash, 0)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create object file")
 	}
@@ -1196,21 +1158,21 @@ func (sm *StorageManager) InitDiskStorage(ctx context.Context, instanceHash Inst
 	fileSize := CalculateFileSize(contentLength)
 	if err := file.Truncate(fileSize); err != nil {
 		file.Close()
-		os.Remove(objectPath)
+		_ = sm.removeChunkFile(storageID, instanceHash, 0)
 		return nil, errors.Wrap(err, "failed to pre-allocate file")
 	}
 
 	// Store metadata
 	if err := sm.db.SetMetadata(instanceHash, meta); err != nil {
 		file.Close()
-		os.Remove(objectPath)
+		_ = sm.removeChunkFile(storageID, instanceHash, 0)
 		return nil, errors.Wrap(err, "failed to store metadata")
 	}
 
 	// Initialize block state as empty bitmap
 	if err := sm.db.SetBlockState(instanceHash, roaring.New()); err != nil {
 		file.Close()
-		os.Remove(objectPath)
+		_ = sm.removeChunkFile(storageID, instanceHash, 0)
 		if delErr := sm.db.DeleteMetadata(instanceHash); delErr != nil {
 			log.Warnf("Failed to clean up metadata for %s: %v", instanceHash, delErr)
 		}
@@ -1223,7 +1185,7 @@ func (sm *StorageManager) InitDiskStorage(ctx context.Context, instanceHash Inst
 	if contentLength > 0 {
 		if err := sm.db.ChargeUsage(storageID, namespaceID, fileSize); err != nil {
 			file.Close()
-			os.Remove(objectPath)
+			_ = sm.removeChunkFile(storageID, instanceHash, 0)
 			if delErr := sm.db.DeleteMetadata(instanceHash); delErr != nil {
 				log.Warnf("Failed to clean up metadata for %s: %v", instanceHash, delErr)
 			}
@@ -1341,8 +1303,7 @@ func (sm *StorageManager) AllocateChunk(
 	storageID := sm.chooseDir()
 
 	// Create the chunk file
-	chunkPath := sm.getChunkPath(storageID, instanceHash, chunkIndex)
-	file, err := createFile(chunkPath)
+	file, err := sm.createChunkFile(storageID, instanceHash, chunkIndex)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to create chunk %d file", chunkIndex)
 	}
@@ -1353,7 +1314,7 @@ func (sm *StorageManager) AllocateChunk(
 
 	if err := file.Truncate(fileSize); err != nil {
 		file.Close()
-		_ = removeFileWithRetry(chunkPath)
+		_ = sm.removeChunkFile(storageID, instanceHash, chunkIndex)
 		return nil, errors.Wrapf(err, "failed to pre-allocate chunk %d file", chunkIndex)
 	}
 
@@ -1362,7 +1323,7 @@ func (sm *StorageManager) AllocateChunk(
 	if chunkContentLen > 0 {
 		if err := sm.db.ChargeUsage(storageID, meta.NamespaceID, fileSize); err != nil {
 			file.Close()
-			_ = removeFileWithRetry(chunkPath)
+			_ = sm.removeChunkFile(storageID, instanceHash, chunkIndex)
 			return nil, errors.Wrapf(err, "failed to charge usage for chunk %d", chunkIndex)
 		}
 	}
@@ -1380,7 +1341,7 @@ func (sm *StorageManager) AllocateChunk(
 
 	// Persist the updated metadata
 	if err := sm.db.SetMetadata(instanceHash, meta); err != nil {
-		_ = removeFileWithRetry(chunkPath)
+		_ = sm.removeChunkFile(storageID, instanceHash, chunkIndex)
 		return nil, errors.Wrap(err, "failed to update metadata with chunk storage")
 	}
 
@@ -1447,10 +1408,9 @@ func (sm *StorageManager) writeBlocks(instanceHash InstanceHash, meta *CacheMeta
 			// File was removed from disk (e.g. corruption auto-repair).
 			// Recreate it so the write can proceed.
 			storageID := meta.GetChunkStorageID(chunkIdx)
-			chunkPath := sm.getChunkPath(storageID, instanceHash, chunkIdx)
 			chunkContentLen := ChunkContentLength(meta.ContentLength, meta.ChunkSizeCode, chunkIdx)
 			fileSize := CalculateFileSize(chunkContentLen)
-			f, createErr := createFile(chunkPath)
+			f, createErr := sm.createChunkFile(storageID, instanceHash, chunkIdx)
 			if createErr != nil {
 				return nil, errors.Wrapf(createErr, "failed to recreate missing chunk %d file", chunkIdx)
 			}
@@ -2099,9 +2059,9 @@ func (sm *StorageManager) deleteChunkFiles(instanceHash InstanceHash, contentLen
 			continue
 		}
 
-		chunkPath := sm.getChunkPath(storageID, instanceHash, chunkIdx)
-		if err := removeFileWithRetry(chunkPath); err != nil && !os.IsNotExist(err) {
-			log.Warnf("Failed to delete chunk %d file %s: %v", chunkIdx, chunkPath, err)
+		if err := sm.removeChunkFile(storageID, instanceHash, chunkIdx); err != nil {
+			log.Warnf("Failed to delete chunk %d file %s: %v", chunkIdx,
+				sm.chunkFilePath(storageID, instanceHash, chunkIdx), err)
 		}
 	}
 }
@@ -2582,14 +2542,7 @@ func (sm *StorageManager) NewBlockWriter(instanceHash InstanceHash, startBlock u
 	}
 
 	// Open the file for read/write, creating it and its parent directory if necessary.
-	objectPath := sm.getObjectPathForDir(meta.StorageID, instanceHash)
-	file, err := os.OpenFile(objectPath, os.O_RDWR|os.O_CREATE, 0600)
-	if errors.Is(err, os.ErrNotExist) {
-		if mkdirErr := os.MkdirAll(filepath.Dir(objectPath), 0750); mkdirErr != nil {
-			return nil, errors.Wrap(mkdirErr, "failed to create object directory")
-		}
-		file, err = os.OpenFile(objectPath, os.O_RDWR|os.O_CREATE, 0600)
-	}
+	file, err := sm.openChunkFile(meta.StorageID, instanceHash, 0, os.O_RDWR|os.O_CREATE)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to open object file for writing")
 	}

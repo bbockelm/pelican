@@ -69,12 +69,12 @@ func TestComputeInstanceHash(t *testing.T) {
 
 	// Empty ETag should also work
 	instanceHashEmpty := ComputeInstanceHash(salt, "", objectHash1)
-	assert.Len(t, instanceHashEmpty, 64, "SHA256 hash should be 64 hex characters")
+	assert.Len(t, instanceHashEmpty.String(), 64, "SHA256 hash should be 64 hex characters")
 	assert.NotEqual(t, instanceHash1, instanceHashEmpty, "Empty ETag should produce different hash than non-empty")
 
 	// Test hash format (should be 64 hex characters for SHA256)
-	assert.Len(t, objectHash1, 64, "SHA256 hash should be 64 hex characters")
-	assert.Len(t, instanceHash1, 64, "SHA256 hash should be 64 hex characters")
+	assert.Len(t, objectHash1.String(), 64, "SHA256 hash should be 64 hex characters")
+	assert.Len(t, instanceHash1.String(), 64, "SHA256 hash should be 64 hex characters")
 
 	// Test that different salts produce different hashes
 	salt2 := []byte("different-salt")
@@ -83,7 +83,7 @@ func TestComputeInstanceHash(t *testing.T) {
 }
 
 func TestGetInstanceStoragePath(t *testing.T) {
-	hash := InstanceHash("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
+	hash := mustInstanceHash("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
 
 	path := GetInstanceStoragePath(hash)
 
@@ -202,7 +202,7 @@ func TestCacheDBBasicOperations(t *testing.T) {
 	defer db.Close()
 
 	// Test metadata operations
-	instanceHash := InstanceHash("test_hash_12345")
+	instanceHash := namedInstanceHash("test_hash_12345")
 	meta := &CacheMetadata{
 		ContentLength: 1024,
 		ContentType:   "application/octet-stream",
@@ -223,7 +223,7 @@ func TestCacheDBBasicOperations(t *testing.T) {
 	assert.Equal(t, meta.SourceURL, retrieved.SourceURL)
 
 	// Test non-existent key
-	missing, err := db.GetMetadata("nonexistent")
+	missing, err := db.GetMetadata(namedInstanceHash("nonexistent"))
 	require.NoError(t, err)
 	assert.Nil(t, missing)
 
@@ -249,7 +249,7 @@ func TestMergeMetadata(t *testing.T) {
 	defer db.Close()
 
 	t.Run("CreatesWhenMissing", func(t *testing.T) {
-		hash := InstanceHash("merge_create")
+		hash := namedInstanceHash("merge_create")
 		now := time.Now().Truncate(time.Millisecond)
 		incoming := &CacheMetadata{
 			ETag:          "etag-create",
@@ -272,7 +272,7 @@ func TestMergeMetadata(t *testing.T) {
 	})
 
 	t.Run("MaxTimeAdvancesForward", func(t *testing.T) {
-		hash := InstanceHash("merge_maxtime")
+		hash := namedInstanceHash("merge_maxtime")
 		t0 := time.Now().Truncate(time.Millisecond)
 		t1 := t0.Add(10 * time.Second)
 		tEarlier := t0.Add(-5 * time.Second)
@@ -303,7 +303,7 @@ func TestMergeMetadata(t *testing.T) {
 	})
 
 	t.Run("AdditiveChecksums", func(t *testing.T) {
-		hash := InstanceHash("merge_checksums")
+		hash := namedInstanceHash("merge_checksums")
 
 		// Seed with a SHA-256 checksum
 		sha256Val := []byte("sha256-existing")
@@ -334,7 +334,7 @@ func TestMergeMetadata(t *testing.T) {
 	})
 
 	t.Run("ChecksumOriginVerifiedWins", func(t *testing.T) {
-		hash := InstanceHash("merge_cksum_ov")
+		hash := namedInstanceHash("merge_cksum_ov")
 
 		localVal := []byte("local-sha256")
 		require.NoError(t, db.SetMetadata(hash, &CacheMetadata{
@@ -359,7 +359,7 @@ func TestMergeMetadata(t *testing.T) {
 	})
 
 	t.Run("LastWriterWins", func(t *testing.T) {
-		hash := InstanceHash("merge_lww")
+		hash := namedInstanceHash("merge_lww")
 
 		require.NoError(t, db.SetMetadata(hash, &CacheMetadata{
 			ContentType:   "text/plain",
@@ -388,7 +388,7 @@ func TestMergeMetadata(t *testing.T) {
 	})
 
 	t.Run("LastWriterWinsZeroNoOverwrite", func(t *testing.T) {
-		hash := InstanceHash("merge_lww_zero")
+		hash := namedInstanceHash("merge_lww_zero")
 
 		require.NoError(t, db.SetMetadata(hash, &CacheMetadata{
 			ContentType:   "text/plain",
@@ -405,7 +405,7 @@ func TestMergeMetadata(t *testing.T) {
 	})
 
 	t.Run("SetOnceSameValueOK", func(t *testing.T) {
-		hash := InstanceHash("merge_setonce_same")
+		hash := namedInstanceHash("merge_setonce_same")
 
 		require.NoError(t, db.SetMetadata(hash, &CacheMetadata{
 			ETag:        "etag-1",
@@ -460,7 +460,7 @@ func TestMergeMetadata(t *testing.T) {
 
 		for i, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				hash := InstanceHash(fmt.Sprintf("merge_conflict_%d", i))
+				hash := namedInstanceHash(fmt.Sprintf("merge_conflict_%d", i))
 				require.NoError(t, db.SetMetadata(hash, tc.initial))
 				err := db.MergeMetadata(hash, tc.incoming)
 				require.Error(t, err)
@@ -470,7 +470,7 @@ func TestMergeMetadata(t *testing.T) {
 	})
 
 	t.Run("SetOnceZeroToValueOK", func(t *testing.T) {
-		hash := InstanceHash("merge_setonce_zero2val")
+		hash := namedInstanceHash("merge_setonce_zero2val")
 
 		// Start with empty metadata
 		require.NoError(t, db.SetMetadata(hash, &CacheMetadata{}))
@@ -494,7 +494,7 @@ func TestMergeMetadata(t *testing.T) {
 	})
 
 	t.Run("CombinedMerge", func(t *testing.T) {
-		hash := InstanceHash("merge_combined")
+		hash := namedInstanceHash("merge_combined")
 		t0 := time.Now().Truncate(time.Millisecond)
 
 		// Initial metadata
@@ -547,7 +547,7 @@ func TestCacheDBBlockState(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	instanceHash := InstanceHash("test_block_hash")
+	instanceHash := namedInstanceHash("test_block_hash")
 
 	// Initially no blocks downloaded
 	bitmap, err := db.GetBlockState(instanceHash)
@@ -600,7 +600,7 @@ func TestCacheDBAtomicBlockUsage(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	instanceHash := InstanceHash("atomic_usage_test_hash")
+	instanceHash := namedInstanceHash("atomic_usage_test_hash")
 	storageID := StorageIDFirstDisk
 	namespaceID := NamespaceID(7)
 
@@ -685,7 +685,7 @@ func TestCacheDBAtomicBlockUsage_NoMetadata(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	instanceHash := InstanceHash("no_meta_test_hash")
+	instanceHash := namedInstanceHash("no_meta_test_hash")
 
 	// Mark blocks without setting metadata first — should succeed
 	err = db.MarkBlocksDownloaded(instanceHash, 0, 5, 0, 0, -1)
@@ -726,7 +726,7 @@ func TestCacheDBUsageCounter(t *testing.T) {
 	assert.Equal(t, int64(0), usage)
 
 	// Set up metadata for an instance so MarkBlocksDownloaded can track blocks
-	instanceHash := InstanceHash("usage_counter_test_hash")
+	instanceHash := namedInstanceHash("usage_counter_test_hash")
 	contentLength := int64(3 * BlockDataSize) // 3 full blocks
 	meta := &CacheMetadata{
 		ContentLength: contentLength,
@@ -937,7 +937,7 @@ func TestZeroBlockReadFailure(t *testing.T) {
 	require.NoError(t, err)
 	defer storage.Close()
 
-	instanceHash := InstanceHash("zero_block_test_0123456789abcdef0123456789abcdef01")
+	instanceHash := namedInstanceHash("zero_block_test_0123456789abcdef0123456789abcdef01")
 
 	// Generate encryption keys.
 	encMgr := db.GetEncryptionManager()
@@ -960,7 +960,7 @@ func TestZeroBlockReadFailure(t *testing.T) {
 
 	// Create directory for the object file and pre-allocate it to the
 	// exact encrypted size (same as InitDiskStorage / NewBlockWriter).
-	objPath := storage.getObjectPath(instanceHash)
+	objPath := storage.chunkFilePath(StorageIDFirstDisk, instanceHash, 0)
 	require.NoError(t, os.MkdirAll(filepath.Dir(objPath), 0750))
 	totalSize := CalculateFileSize(dataSize)
 	fp, err := os.OpenFile(objPath, os.O_RDWR|os.O_CREATE, 0600)
@@ -1008,7 +1008,7 @@ func TestStorageManagerInline(t *testing.T) {
 	require.NoError(t, err)
 	defer storage.Close()
 
-	instanceHash := InstanceHash("inline_test_hash")
+	instanceHash := namedInstanceHash("inline_test_hash")
 	testData := []byte("Hello, World! This is inline test data.")
 
 	meta := &CacheMetadata{
@@ -1066,8 +1066,8 @@ func TestEvictionManager(t *testing.T) {
 	})
 
 	// Test recording access
-	require.NoError(t, eviction.RecordAccess("instance_hash_1"))
-	require.NoError(t, eviction.RecordAccess("instance_hash_2"))
+	require.NoError(t, eviction.RecordAccess(namedInstanceHash("instance_hash_1")))
+	require.NoError(t, eviction.RecordAccess(namedInstanceHash("instance_hash_2")))
 
 	// Test adding usage via AddUsage (MergeOperator-backed)
 	require.NoError(t, seedUsage(db, StorageIDFirstDisk, 1, 100000))
@@ -1152,9 +1152,9 @@ func TestConsistencyChecker_MetadataScan(t *testing.T) {
 
 	// Create some valid disk-based objects
 	validHashes := []InstanceHash{
-		"1111111111111111111111111111111111111111111111111111111111111111",
-		"3333333333333333333333333333333333333333333333333333333333333333",
-		"5555555555555555555555555555555555555555555555555555555555555555",
+		mustInstanceHash("1111111111111111111111111111111111111111111111111111111111111111"),
+		mustInstanceHash("3333333333333333333333333333333333333333333333333333333333333333"),
+		mustInstanceHash("5555555555555555555555555555555555555555555555555555555555555555"),
 	}
 	for _, hash := range validHashes {
 		meta := &CacheMetadata{
@@ -1175,7 +1175,7 @@ func TestConsistencyChecker_MetadataScan(t *testing.T) {
 	}
 
 	// Create an orphaned DB entry (no file)
-	orphanedDBHash := InstanceHash("2222222222222222222222222222222222222222222222222222222222222222")
+	orphanedDBHash := mustInstanceHash("2222222222222222222222222222222222222222222222222222222222222222")
 	meta := &CacheMetadata{
 		ContentLength: 100,
 		StorageID:     diskID,
@@ -1186,7 +1186,7 @@ func TestConsistencyChecker_MetadataScan(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create an orphaned file (no DB entry)
-	orphanedFileHash := InstanceHash("4444444444444444444444444444444444444444444444444444444444444444")
+	orphanedFileHash := mustInstanceHash("4444444444444444444444444444444444444444444444444444444444444444")
 	orphanedFilePath := filepath.Join(tmpDir, objectsSubDir, GetInstanceStoragePath(orphanedFileHash))
 	err = os.MkdirAll(filepath.Dir(orphanedFilePath), 0755)
 	require.NoError(t, err)
@@ -1264,7 +1264,7 @@ func TestConsistencyChecker_InlineStorage(t *testing.T) {
 	})
 
 	// Create a valid inline object
-	validHash := InstanceHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	validHash := mustInstanceHash("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	testData := []byte("test inline data")
 	meta := &CacheMetadata{
 		ContentLength: int64(len(testData)),
@@ -1275,7 +1275,7 @@ func TestConsistencyChecker_InlineStorage(t *testing.T) {
 	require.NoError(t, err)
 
 	// Create an orphaned inline entry (metadata exists but inline data is missing)
-	orphanedHash := InstanceHash("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	orphanedHash := mustInstanceHash("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 	orphanedMeta := &CacheMetadata{
 		ContentLength: 50,
 		NamespaceID:   1,
@@ -1342,7 +1342,7 @@ func TestConsistencyChecker_OrphanCleanup(t *testing.T) {
 
 	for i := 0; i < numObjects; i++ {
 		// Generate predictable hash (still 64 hex chars)
-		hash := InstanceHash(fmt.Sprintf("%064d", i))
+		hash := testInstanceHash(i)
 		validHashes[i] = hash
 
 		meta := &CacheMetadata{
@@ -1364,8 +1364,8 @@ func TestConsistencyChecker_OrphanCleanup(t *testing.T) {
 
 	// Add a few orphaned entries (disk-backed but no file exists)
 	orphanedHashes := []InstanceHash{
-		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-		"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		mustInstanceHash("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+		mustInstanceHash("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
 	}
 	for _, hash := range orphanedHashes {
 		meta := &CacheMetadata{
@@ -1437,7 +1437,7 @@ func TestConsistencyChecker_UsageReconciliation(t *testing.T) {
 
 	// Create two objects with known block state.
 	// Object 1: 3 full blocks = 3*BlockDataSize bytes.
-	hash1 := InstanceHash("aaaa111111111111111111111111111111111111111111111111111111111111")
+	hash1 := mustInstanceHash("aaaa111111111111111111111111111111111111111111111111111111111111")
 	contentLen1 := int64(3 * BlockDataSize)
 	meta1 := &CacheMetadata{
 		ContentLength: contentLen1,
@@ -1456,7 +1456,7 @@ func TestConsistencyChecker_UsageReconciliation(t *testing.T) {
 	require.NoError(t, os.WriteFile(filePath1, make([]byte, contentLen1), 0644))
 
 	// Object 2: 2 full blocks = 2*BlockDataSize bytes.
-	hash2 := InstanceHash("bbbb222222222222222222222222222222222222222222222222222222222222")
+	hash2 := mustInstanceHash("bbbb222222222222222222222222222222222222222222222222222222222222")
 	contentLen2 := int64(2 * BlockDataSize)
 	meta2 := &CacheMetadata{
 		ContentLength: contentLen2,
@@ -1577,7 +1577,7 @@ func TestVerifyObject_CorrectChecksum(t *testing.T) {
 		data[i] = byte(i % 251) // prime-cycle pattern
 	}
 
-	hash := InstanceHash("aaaa000000000000000000000000000000000000000000000000000000000001")
+	hash := mustInstanceHash("aaaa000000000000000000000000000000000000000000000000000000000001")
 	storeTestObject(t, ctx, storage, hash, data, diskID, NamespaceID(1))
 
 	// Compute the correct SHA-256 over the plaintext.
@@ -1632,7 +1632,7 @@ func TestVerifyObject_WrongChecksum(t *testing.T) {
 		data[i] = byte(i % 251)
 	}
 
-	hash := InstanceHash("bbbb000000000000000000000000000000000000000000000000000000000002")
+	hash := mustInstanceHash("bbbb000000000000000000000000000000000000000000000000000000000002")
 	storeTestObject(t, ctx, storage, hash, data, diskID, NamespaceID(1))
 
 	// Attach a deliberately wrong checksum.
@@ -1686,7 +1686,7 @@ func TestDataScan_CorrectChecksum(t *testing.T) {
 		for j := range data {
 			data[j] = byte((i*7 + j) % 251)
 		}
-		hash := InstanceHash(fmt.Sprintf("cccc%060x", i+1))
+		hash := mustInstanceHash(fmt.Sprintf("cccc%060x", i+1))
 
 		storeTestObject(t, ctx, storage, hash, data, diskID, NamespaceID(1))
 
@@ -1745,7 +1745,7 @@ func TestDataScan_WrongChecksum(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
-	corruptHash := InstanceHash("dddd000000000000000000000000000000000000000000000000000000000001")
+	corruptHash := mustInstanceHash("dddd000000000000000000000000000000000000000000000000000000000001")
 
 	storeTestObject(t, ctx, storage, corruptHash, data, diskID, NamespaceID(1))
 
@@ -1764,7 +1764,7 @@ func TestDataScan_WrongChecksum(t *testing.T) {
 	for i := range goodData {
 		goodData[i] = byte(i % 199)
 	}
-	goodHash := InstanceHash("dddd000000000000000000000000000000000000000000000000000000000002")
+	goodHash := mustInstanceHash("dddd000000000000000000000000000000000000000000000000000000000002")
 	storeTestObject(t, ctx, storage, goodHash, goodData, diskID, NamespaceID(1))
 
 	goodSum := sha256.Sum256(goodData)
@@ -1790,7 +1790,7 @@ func TestDataScan_WrongChecksum(t *testing.T) {
 	assert.Equal(t, int64(1), stats.ChecksumMismatches, "one mismatch expected")
 
 	// The corrupt object's disk file should have been deleted.
-	corruptPath := storage.getObjectPathForDir(diskID, corruptHash)
+	corruptPath := storage.chunkFilePath(diskID, corruptHash, 0)
 	_, statErr := os.Stat(corruptPath)
 	assert.True(t, os.IsNotExist(statErr), "corrupt object file should be removed")
 
@@ -1827,7 +1827,7 @@ func TestDataScan_MissingChecksum(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 211)
 	}
-	hash := InstanceHash("eeee000000000000000000000000000000000000000000000000000000000001")
+	hash := mustInstanceHash("eeee000000000000000000000000000000000000000000000000000000000001")
 	storeTestObject(t, ctx, storage, hash, data, diskID, NamespaceID(1))
 
 	// Verify no checksums stored yet.
@@ -1885,7 +1885,7 @@ func TestDataScan_SkipVerifiedData(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 211)
 	}
-	hash := InstanceHash("dddd000000000000000000000000000000000000000000000000000000000001")
+	hash := mustInstanceHash("dddd000000000000000000000000000000000000000000000000000000000001")
 	storeTestObject(t, ctx, storage, hash, data, diskID, NamespaceID(1))
 
 	checker := NewConsistencyChecker(db, storage, ConsistencyConfig{
@@ -1946,7 +1946,7 @@ func TestDataScan_SkipVerifiedResample(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 211)
 	}
-	hash := InstanceHash("eded000000000000000000000000000000000000000000000000000000000001")
+	hash := mustInstanceHash("eded000000000000000000000000000000000000000000000000000000000001")
 	storeTestObject(t, ctx, storage, hash, data, diskID, NamespaceID(1))
 
 	checker := NewConsistencyChecker(db, storage, ConsistencyConfig{
@@ -1993,7 +1993,7 @@ func TestDataScan_AllModeReverifies(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 211)
 	}
-	hash := InstanceHash("cccc000000000000000000000000000000000000000000000000000000000001")
+	hash := mustInstanceHash("cccc000000000000000000000000000000000000000000000000000000000001")
 	storeTestObject(t, ctx, storage, hash, data, diskID, NamespaceID(1))
 
 	checker := NewConsistencyChecker(db, storage, ConsistencyConfig{
@@ -2069,7 +2069,7 @@ func TestMultiDirStoragePlacement(t *testing.T) {
 	const objectSize = 8192 // 2 blocks
 
 	for i := 0; i < 10; i++ {
-		instanceHash := InstanceHash(fmt.Sprintf("%064x", i+0x10))
+		instanceHash := testInstanceHash(i + 0x10)
 		sid := eviction.ChooseDiskStorage()
 
 		meta, err := storage.InitDiskStorage(ctx, instanceHash, objectSize, sid, 1)
@@ -2224,7 +2224,7 @@ func TestPurgeStorageID(t *testing.T) {
 
 	// Helper: create one object on a given storageID.
 	createObject := func(i int, sid StorageID) InstanceHash {
-		instanceHash := InstanceHash(fmt.Sprintf("%064x", i))
+		instanceHash := testInstanceHash(i)
 		meta, err := storage.InitDiskStorage(ctx, instanceHash, objSize, sid, 1)
 		require.NoError(t, err)
 		meta.ETag = fmt.Sprintf("etag-%d", i)

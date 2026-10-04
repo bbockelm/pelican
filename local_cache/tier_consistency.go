@@ -174,7 +174,7 @@ func (cc *ConsistencyChecker) scanTierTarget(ctx context.Context, sid StorageID,
 		}
 
 		// Bucket keys sorting before this DB entry have no metadata.
-		for listOk && current.hash < instanceHash {
+		for listOk && current.hash.Compare(instanceHash) < 0 {
 			considerBucketOrphan(current)
 			current, listOk = <-listChan
 		}

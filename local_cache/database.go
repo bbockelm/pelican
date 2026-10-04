@@ -1650,8 +1650,9 @@ func (cdb *CacheDB) ScanAppendIntents(fn func(InstanceHash, AppendIntent) error)
 
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			item := it.Item()
-			hash := InstanceHash(string(item.Key())[len(PrefixAppendIntent):])
-			if hash == "" {
+			hash, err := InstanceHashFromKey(item.Key(), PrefixAppendIntent)
+			if err != nil {
+				log.Warnf("Skipping malformed append intent key: %v", err)
 				continue
 			}
 			var intent AppendIntent
@@ -1931,8 +1932,9 @@ func (cdb *CacheDB) ComputeActualUsage() (map[StorageUsageKey]int64, error) {
 
 		for it.Seek(metaPrefix); it.ValidForPrefix(metaPrefix); it.Next() {
 			item := it.Item()
-			metaKey := item.Key()
-			instanceHash := InstanceHash(metaKey[len(PrefixMeta):])
+			// The key is used only to name the record in a warning; an
+			// object is charged whether or not its key is well formed.
+			instanceHash := string(item.Key()[len(PrefixMeta):])
 
 			// Decode metadata to get StorageID, NamespaceID, ContentLength.
 			var meta CacheMetadata
@@ -2053,12 +2055,16 @@ func (cdb *CacheDB) ListTierUploadIntents(after InstanceHash, limit int) ([]Tier
 		defer it.Close()
 
 		start := prefix
-		if after != "" {
+		if !after.IsZero() {
 			start = TierUploadIntentKey(after)
 		}
 		for it.Seek(start); it.ValidForPrefix(prefix) && len(entries) < limit; it.Next() {
 			item := it.Item()
-			hash := InstanceHash(item.Key()[len(PrefixTierUpload):])
+			hash, err := InstanceHashFromKey(item.Key(), PrefixTierUpload)
+			if err != nil {
+				log.Warnf("Skipping malformed tiering upload intent key: %v", err)
+				continue
+			}
 			if hash == after {
 				continue
 			}
@@ -2575,9 +2581,9 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 				if quotaReached() {
 					break
 				}
-				keyStr := string(it.Item().Key())
-				hash := InstanceHash(keyStr[len(PrefixPurgeFirst):])
-				if hash == "" {
+				hash, err := InstanceHashFromKey(it.Item().Key(), PrefixPurgeFirst)
+				if err != nil {
+					log.Warnf("Skipping malformed purge-first key: %v", err)
 					continue
 				}
 
@@ -2723,10 +2729,12 @@ var _ badger.Logger = (*badgerLogger)(nil)
 
 // ScanMetadata iterates over all metadata entries
 func (cdb *CacheDB) ScanMetadata(fn func(instanceHash InstanceHash, meta *CacheMetadata) error) error {
-	return cdb.ScanMetadataFrom("", fn)
+	return cdb.ScanMetadataFrom(InstanceHash{}, fn)
 }
 
-// ScanMetadataFrom scans metadata starting from the given instanceHash (empty string = start from beginning)
+// ScanMetadataFrom scans metadata starting after the given instanceHash (the
+// zero value starts from the beginning).  Records whose key is not a valid
+// instance hash are skipped with a warning.
 func (cdb *CacheDB) ScanMetadataFrom(startKey InstanceHash, fn func(instanceHash InstanceHash, meta *CacheMetadata) error) error {
 	return cdb.db.View(func(txn *badger.Txn) error {
 		prefix := []byte(PrefixMeta)
@@ -2737,22 +2745,25 @@ func (cdb *CacheDB) ScanMetadataFrom(startKey InstanceHash, fn func(instanceHash
 
 		// Seek to the starting position
 		seekKey := prefix
-		if startKey != "" {
+		if !startKey.IsZero() {
 			seekKey = MetaKey(startKey)
 		}
 
 		for it.Seek(seekKey); it.ValidForPrefix(prefix); it.Next() {
 			item := it.Item()
-			key := string(item.Key())
-			instanceHash := InstanceHash(key[len(PrefixMeta):])
+			instanceHash, err := InstanceHashFromKey(item.Key(), PrefixMeta)
+			if err != nil {
+				log.Warnf("Skipping metadata record with a malformed key: %v", err)
+				continue
+			}
 
 			// Skip the start key itself if resuming (we already processed it)
-			if startKey != "" && instanceHash == startKey {
+			if !startKey.IsZero() && instanceHash == startKey {
 				continue
 			}
 
 			var meta CacheMetadata
-			err := item.Value(func(val []byte) error {
+			err = item.Value(func(val []byte) error {
 				return msgpack.Unmarshal(val, &meta)
 			})
 			if err != nil {

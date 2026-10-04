@@ -200,7 +200,7 @@ func TestJanitorNeverReclaimsAWriteInFlight(t *testing.T) {
 	// difficulty.
 	queued, _, _, err := s.collectGarbage()
 	require.NoError(t, err)
-	require.Equal(t, []queuedInstance{newQueuedInstance(string(w.instanceHash))}, queued,
+	require.Equal(t, []queuedInstance{newQueuedInstance(w.instanceHash.String())}, queued,
 		"a write in flight sits on the queue looking exactly like garbage")
 
 	stats, err := s.RunGC(t.Context())
@@ -287,7 +287,7 @@ func TestReclaimFreesASupersededVersion(t *testing.T) {
 
 	batch, _, _, err := s.collectGarbage()
 	require.NoError(t, err)
-	require.Equal(t, []queuedInstance{newQueuedInstance(string(superseded))}, batch)
+	require.Equal(t, []queuedInstance{newQueuedInstance(superseded.String())}, batch)
 
 	outcome, freed, err := s.reclaimInstance(batch[0])
 	require.NoError(t, err)

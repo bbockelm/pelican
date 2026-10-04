@@ -297,7 +297,7 @@ Two writers that reach commit simultaneously can also collide in BadgerDB itself
 
 There is no eviction: `EvictionManager` is never constructed, and the `l:` index is maintained for access time only (§8).
 
-**Capacity** is bounded by `StorageDirConfig.MaxSize` per storage directory — the same structure and parser `LocalCache.StorageDirs` uses (`StorageDirConfig` and `ParseStorageDirsValue` in `local_cache/schema.go`). Counters live in memory, seeded from the catalog's persisted usage at startup; a store owns its directories exclusively for its lifetime, so an in-process count is exact and costs no writes on the hot path.
+**Capacity** is bounded by `StorageDirConfig.MaxSize` per storage directory — the same structure and parser `LocalCache.StorageDirs` uses (`StorageDirConfig` and `DecodeStorageDirs` in `local_cache/schema.go`). Counters live in memory, seeded from the catalog's persisted usage at startup; a store owns its directories exclusively for its lifetime, so an in-process count is exact and costs no writes on the hot path.
 
 An **unset `MaxSize` makes that directory unbounded**, and one unbounded directory makes the store as a whole unbounded — the aggregate ceiling is the sum of the configured limits, or zero (meaning no ceiling) if any directory has none. This differs from the cache, which auto-detects a directory's size from the filesystem when the limit is unset; a store that silently adopted the filesystem's size would start refusing writes at a boundary the operator never chose. `docs/parameters.yaml` states the same rule under `Origin.PStoreStorageDirs`.
 
@@ -411,7 +411,7 @@ Most of this is additive, but not all of it. The behavior changes are listed sec
 1. `CacheDB.EnsureStoreMode` and the `_mode` marker key, so a store and a cache cannot cross-open a database.
 1. `CacheDB.ReloadSalt`, so a restored catalog's hash salt replaces the one cached at open (§11.4).
 1. `StorageManager.SetChooseDir`, so a consumer without an `EvictionManager` can still control directory placement (§7).
-1. `ParseStorageDirsValue`, factored out of the `LocalCache.StorageDirs` parser so `Origin.PStoreStorageDirs` accepts the same two formats.
+1. `DecodeStorageDirs`, shared by `LocalCache.StorageDirs` and `Origin.PStoreStorageDirs` so both accept the same formats.
 1. `local_cache/checksum_format.go` — `ChecksumAlgorithmName`, `ParseChecksumAlgorithm`, `FormatChecksumValue`, `FormatDigestEntry`, `FormatDigestHeader`, and `NewChecksumHasher`, so the origin cannot drift from the value the cache would report for the same bytes.
 1. Documentation of the `pd:`/`pg:` prefix reservation next to the existing prefix constants.
 
