@@ -2914,8 +2914,9 @@ description: |+
         MaxSize: 2TB
   ```
 
-  For backward compatibility, a plain list of strings (directory paths) is also
-  accepted and treated as entries with only Path set.
+  An entry may also be written as a plain string (a directory path), shorthand for an
+  entry with only Path set; the two forms can be mixed in one list.
+  Keys are matched case-insensitively, and an unrecognized key is a configuration error.
 type: object
 default: none
 components: ["localcache"]

@@ -396,175 +396,51 @@ type StorageDirConfig struct {
 	LowWaterMarkPercentage int
 }
 
-// ParseStorageDirsConfig reads the LocalCache.StorageDirs setting from Viper
-// and returns parsed StorageDirConfig values.  It accepts two formats for
-// backward compatibility:
+// ParseStorageDirsConfig reads the LocalCache.StorageDirs setting and returns
+// the parsed StorageDirConfig values.  Each entry is either a plain path or
+// an object with per-directory settings:
 //
-//  1. A list of strings (paths only):
-//     LocalCache:
-//     StorageDirs:
-//     - /mnt/cache1
-//     - /mnt/cache2
+//	LocalCache:
+//	  StorageDirs:
+//	    - /mnt/cache1               # path only
+//	    - Path: /mnt/cache2
+//	      MaxSize: 500GB
+//	      HighWaterMarkPercentage: 95
+//	      LowWaterMarkPercentage: 85
 //
-//  2. A list of objects with per-directory configuration:
-//     LocalCache:
-//     StorageDirs:
-//     - Path: /mnt/cache1
-//     MaxSize: 500GB
-//     HighWaterMarkPercentage: 95
-//     LowWaterMarkPercentage: 85
-//     - Path: /mnt/cache2
-//     MaxSize: 2TB
-//
-// Returns nil (not an error) when the key is unset or empty.
+// Keys match case-insensitively; an unknown key is an error.  Returns nil
+// (not an error) when the key is unset or empty.
 func ParseStorageDirsConfig() ([]StorageDirConfig, error) {
-	return ParseStorageDirsValue(param.LocalCache_StorageDirs.GetRaw(), param.LocalCache_StorageDirs.GetName())
+	return DecodeStorageDirs(param.LocalCache_StorageDirs)
 }
 
-// ParseStorageDirsValue parses an already-fetched StorageDirs setting.  It
-// exists so another subsystem configuring the same block store -- the pstore
-// origin backend, via Origin.PStoreStorageDirs -- accepts exactly the same two
-// formats without duplicating the parsing.
-//
-// name identifies the setting in error messages.
-func ParseStorageDirsValue(raw any, name string) ([]StorageDirConfig, error) {
-	if raw == nil {
+// DecodeStorageDirs decodes a StorageDirs-shaped object parameter.  The cache
+// (LocalCache.StorageDirs) and the pstore origin backend
+// (Origin.PStoreStorageDirs) configure the same block store, so they share
+// this one decoder and accept exactly the same spellings.
+func DecodeStorageDirs(p param.ObjectParam) ([]StorageDirConfig, error) {
+	var dirs []StorageDirConfig
+	if err := p.Decode(&dirs, storageDirPathHook, byteSizeHook); err != nil {
+		return nil, err
+	}
+	for i := range dirs {
+		if dirs[i].Path == "" {
+			return nil, fmt.Errorf("%s[%d]: missing or empty Path", p.GetName(), i)
+		}
+	}
+	if len(dirs) == 0 {
 		return nil, nil
 	}
-
-	switch v := raw.(type) {
-	case []interface{}:
-		if len(v) == 0 {
-			return nil, nil
-		}
-		configs := make([]StorageDirConfig, 0, len(v))
-		for i, elem := range v {
-			switch e := elem.(type) {
-			case string:
-				// Plain string path (backward-compat format)
-				if e == "" {
-					return nil, fmt.Errorf("%s[%d]: empty path", name, i)
-				}
-				configs = append(configs, StorageDirConfig{Path: e})
-			case map[string]interface{}:
-				// Structured entry
-				cfg, err := parseStorageDirEntry(name, i, e)
-				if err != nil {
-					return nil, err
-				}
-				configs = append(configs, cfg)
-			case map[interface{}]interface{}:
-				// YAML sometimes produces map[interface{}]interface{}
-				converted := make(map[string]interface{}, len(e))
-				for k, val := range e {
-					converted[fmt.Sprint(k)] = val
-				}
-				cfg, err := parseStorageDirEntry(name, i, converted)
-				if err != nil {
-					return nil, err
-				}
-				configs = append(configs, cfg)
-			default:
-				return nil, fmt.Errorf("%s[%d]: unsupported type %T", name, i, elem)
-			}
-		}
-		return configs, nil
-	case []string:
-		// Viper sometimes resolves stringSlice directly
-		if len(v) == 0 {
-			return nil, nil
-		}
-		configs := make([]StorageDirConfig, len(v))
-		for i, p := range v {
-			if p == "" {
-				return nil, fmt.Errorf("%s[%d]: empty path", name, i)
-			}
-			configs[i] = StorageDirConfig{Path: p}
-		}
-		return configs, nil
-	default:
-		return nil, fmt.Errorf("%s: unsupported type %T; expected list of paths or objects", name, raw)
-	}
+	return dirs, nil
 }
 
-// parseStorageDirEntry converts a map entry into a StorageDirConfig.
-func parseStorageDirEntry(name string, idx int, m map[string]interface{}) (StorageDirConfig, error) {
-	var cfg StorageDirConfig
-
-	// Path (required)
-	switch p := m["Path"].(type) {
-	case string:
-		cfg.Path = p
-	default:
-		// Try lowercase key as fallback
-		if p2, ok := m["path"].(string); ok {
-			cfg.Path = p2
-		}
+// storageDirPathHook lets a StorageDirs entry be written as a bare path,
+// shorthand for an entry with only Path set.
+func storageDirPathHook(from, to reflect.Type, data any) (any, error) {
+	if from.Kind() != reflect.String || to != reflect.TypeOf(StorageDirConfig{}) {
+		return data, nil
 	}
-	if cfg.Path == "" {
-		return cfg, fmt.Errorf("%s[%d]: missing or empty Path", name, idx)
-	}
-
-	// MaxSize (optional, string like "500GB" or number of bytes)
-	if _, ok := m["MaxSize"]; !ok {
-		if v, ok := m["maxsize"]; ok {
-			m["MaxSize"] = v
-		}
-	}
-	if v, ok := m["MaxSize"]; ok && v != nil {
-		switch s := v.(type) {
-		case string:
-			if s != "" && s != "0" {
-				n, err := utils.ParseBytes(s)
-				if err != nil {
-					return cfg, fmt.Errorf("%s[%d].MaxSize: %w", name, idx, err)
-				}
-				cfg.MaxSize = n
-			}
-		case int:
-			cfg.MaxSize = uint64(s)
-		case int64:
-			cfg.MaxSize = uint64(s)
-		case float64:
-			cfg.MaxSize = uint64(s)
-		}
-	}
-
-	// HighWaterMarkPercentage (optional)
-	if _, ok := m["HighWaterMarkPercentage"]; !ok {
-		if v, ok := m["highwatermarkpercentage"]; ok {
-			m["HighWaterMarkPercentage"] = v
-		}
-	}
-	if v, ok := m["HighWaterMarkPercentage"]; ok && v != nil {
-		switch n := v.(type) {
-		case int:
-			cfg.HighWaterMarkPercentage = n
-		case int64:
-			cfg.HighWaterMarkPercentage = int(n)
-		case float64:
-			cfg.HighWaterMarkPercentage = int(n)
-		}
-	}
-
-	// LowWaterMarkPercentage (optional)
-	if _, ok := m["LowWaterMarkPercentage"]; !ok {
-		if v, ok := m["lowwatermarkpercentage"]; ok {
-			m["LowWaterMarkPercentage"] = v
-		}
-	}
-	if v, ok := m["LowWaterMarkPercentage"]; ok && v != nil {
-		switch n := v.(type) {
-		case int:
-			cfg.LowWaterMarkPercentage = n
-		case int64:
-			cfg.LowWaterMarkPercentage = int(n)
-		case float64:
-			cfg.LowWaterMarkPercentage = int(n)
-		}
-	}
-
-	return cfg, nil
+	return StorageDirConfig{Path: data.(string)}, nil
 }
 
 // Block size constants for encryption and storage
@@ -1381,10 +1257,15 @@ func ParseTierTargetsConfig() ([]TierTargetConfig, error) {
 }
 
 // byteSizeHook decodes a size written as a string ("5TB", "512MB") into an
-// unsigned integer field.  TierTargetConfig's only such field is MaxSize.
+// unsigned integer field -- the MaxSize of TierTargetConfig and
+// StorageDirConfig, their only such fields.  An empty string is zero, the
+// same as leaving the key out.
 func byteSizeHook(from, to reflect.Type, data any) (any, error) {
 	if from.Kind() != reflect.String || to.Kind() != reflect.Uint64 {
 		return data, nil
+	}
+	if strings.TrimSpace(data.(string)) == "" {
+		return uint64(0), nil
 	}
 	return utils.ParseBytes(data.(string))
 }

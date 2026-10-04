@@ -141,7 +141,60 @@ func TestParseStorageDirsConfig(t *testing.T) {
 		viper.Set("LocalCache.StorageDirs", []interface{}{""})
 		_, err := ParseStorageDirsConfig()
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "empty path")
+		assert.Contains(t, err.Error(), "LocalCache.StorageDirs[0]: missing or empty Path")
+	})
+
+	t.Run("MixedEntries", func(t *testing.T) {
+		viper.Reset()
+		viper.Set("LocalCache.StorageDirs", []interface{}{
+			"/plain",
+			map[string]interface{}{"Path": "/structured", "MaxSize": "1GB"},
+		})
+		dirs, err := ParseStorageDirsConfig()
+		require.NoError(t, err)
+		assert.Equal(t, []StorageDirConfig{
+			{Path: "/plain"},
+			{Path: "/structured", MaxSize: 1 << 30},
+		}, dirs)
+	})
+
+	t.Run("CommaSeparatedString", func(t *testing.T) {
+		// What an environment variable delivers.
+		viper.Reset()
+		viper.Set("LocalCache.StorageDirs", "/a,/b")
+		dirs, err := ParseStorageDirsConfig()
+		require.NoError(t, err)
+		assert.Equal(t, []StorageDirConfig{{Path: "/a"}, {Path: "/b"}}, dirs)
+	})
+
+	t.Run("UnknownKeyRejected", func(t *testing.T) {
+		// A misspelled key used to be silently ignored, leaving the
+		// directory at its default size.
+		viper.Reset()
+		viper.Set("LocalCache.StorageDirs", []interface{}{
+			map[string]interface{}{"Path": "/data", "MaximumSize": "10GB"},
+		})
+		_, err := ParseStorageDirsConfig()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "MaximumSize")
+	})
+
+	t.Run("NonNumericWatermark", func(t *testing.T) {
+		viper.Reset()
+		viper.Set("LocalCache.StorageDirs", []interface{}{
+			map[string]interface{}{"Path": "/data", "HighWaterMarkPercentage": "lots"},
+		})
+		_, err := ParseStorageDirsConfig()
+		require.Error(t, err, "a non-numeric percentage used to be silently ignored")
+	})
+
+	t.Run("SingleObjectIsAOneEntryList", func(t *testing.T) {
+		// Weakly typed decoding, as for every other list parameter.
+		viper.Reset()
+		viper.Set("LocalCache.StorageDirs", map[string]interface{}{"Path": "/data"})
+		dirs, err := ParseStorageDirsConfig()
+		require.NoError(t, err)
+		assert.Equal(t, []StorageDirConfig{{Path: "/data"}}, dirs)
 	})
 
 	t.Run("InvalidMaxSize", func(t *testing.T) {
