@@ -67,6 +67,17 @@ type tierTarget struct {
 	redirectScheme string
 	redirectHost   string
 
+	// identity is the UUID in the target's identity object, which the
+	// redirect self-test fetches.  Set at registration.
+	identity string
+
+	// redirectWorks is the latest redirect self-test's verdict (see
+	// checkRedirect); redirectChecked records that one has run, and
+	// lastRedirectError holds the latest failure's message.
+	redirectWorks     atomic.Bool
+	redirectChecked   atomic.Bool
+	lastRedirectError atomic.Value
+
 	// healthy is the latest liveness probe's verdict (true until a probe
 	// fails); probeFailures counts consecutive failed probes, and
 	// lastProbeError holds the latest failure's message.  See probe.
@@ -79,7 +90,7 @@ type tierTarget struct {
 // object I/O happens beyond the capability probe; identity resolution is a
 // separate, explicit step.
 func newTierTarget(ctx context.Context, cfg TierTargetConfig) (*tierTarget, error) {
-	backend, err := newBlobTierBackend(ctx, cfg)
+	backend, err := newTierBackend(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +108,14 @@ func newTierTarget(ctx context.Context, cfg TierTargetConfig) (*tierTarget, erro
 			cfg.DisplayURL())
 	}
 	return t, nil
+}
+
+// newTierBackend opens the kind of backend cfg names.
+func newTierBackend(ctx context.Context, cfg TierTargetConfig) (TierBackend, error) {
+	if cfg.WebDavUrl != "" {
+		return newWebDAVTierBackend(cfg, fileTokenSource{path: cfg.TokenFile})
+	}
+	return newBlobTierBackend(ctx, cfg)
 }
 
 // probeTierRedirect asks a backend for a sample redirect URL, reporting

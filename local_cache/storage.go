@@ -654,10 +654,22 @@ func (sm *StorageManager) GetDirs() map[StorageID]string {
 // single-threaded initialization, before any concurrent access.
 //
 // Returns the storageID → config mapping for the registered targets.
-func (sm *StorageManager) RegisterTierTargets(ctx context.Context, configs []TierTargetConfig) (map[StorageID]TierTargetConfig, error) {
+func (sm *StorageManager) RegisterTierTargets(ctx context.Context, configs []TierTargetConfig) (_ map[StorageID]TierTargetConfig, err error) {
 	if len(configs) == 0 {
 		return nil, nil
 	}
+	// A target can hold resources from the moment it is opened -- a WebDAV
+	// target's macaroon refresher, for one -- so every target opened by a
+	// registration that fails is closed again.
+	var opened []*tierTarget
+	defer func() {
+		if err != nil {
+			for _, target := range opened {
+				_ = target.Close()
+			}
+			sm.tierTargets = nil
+		}
+	}()
 	persisted, err := sm.db.LoadDiskMappings()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to load disk mappings for tiering target registration")
@@ -689,6 +701,7 @@ func (sm *StorageManager) RegisterTierTargets(ctx context.Context, configs []Tie
 		if err != nil {
 			return nil, err
 		}
+		opened = append(opened, target)
 		uid, fresh, err := target.resolveIdentity(ctx, cfg.AdoptExisting)
 		if err != nil {
 			return nil, err
@@ -755,12 +768,12 @@ func (sm *StorageManager) RegisterTierTargets(ctx context.Context, configs []Tie
 		}
 		usedIDs[id] = true
 		target.id = id
+		target.identity = uid
 		sm.tierTargets[id] = target
-		capable := 0.0
-		if target.canRedirect {
-			capable = 1
-		}
-		tierRedirectCapable.WithLabelValues(target.metricLabel()).Set(capable)
+		// Verify that the URLs it mints work before any is handed out.  A
+		// failure is not fatal: the target serves by proxy until a later
+		// check, run with each liveness probe, succeeds.
+		_ = target.checkRedirect(ctx)
 		result[id] = cfg
 	}
 	return result, nil
