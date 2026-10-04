@@ -95,6 +95,11 @@ jobs:
         # build VCS stamping) unless the directory is marked safe.
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      # The S3-backed tests (the origin's S3 backend, cache tiering) need a
+      # local S3 server; this installs it and makes its absence an error.
+      - name: Set up the S3 test server
+        uses: ./.github/actions/setup-s3-test-server
+
       - name: Run "go test" with coverage
         run: |
           echo "::group::Building web UI"

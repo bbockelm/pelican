@@ -121,6 +121,11 @@ jobs:
       - name: Install macOS dependencies
         run: ./github_scripts/osx_install.sh
 
+      # The S3-backed tests (the origin's S3 backend, cache tiering) need a
+      # local S3 server; this installs it and makes its absence an error.
+      - name: Set up the S3 test server
+        uses: ./.github/actions/setup-s3-test-server
+
       - name: Run "go test"
         env:
           JUNIT_FILE: junit-${{ matrix.binary_name }}.xml
