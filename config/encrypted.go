@@ -581,6 +581,35 @@ func DecryptString(encryptedString string) (decryptedString string, keyID string
 	return string(decryptedMsg), keyID, nil
 }
 
+// DecryptStringAndRotate decrypts a value produced by EncryptString and, when
+// it was sealed under an issuer key that is no longer the current one,
+// re-seals it under the current key.
+//
+// reEncrypted is empty when no rotation was needed (or re-encryption failed,
+// which is not fatal: the old key still decrypts the stored value).  Callers
+// that persist encrypted secrets write a non-empty reEncrypted back, so that
+// stored secrets follow issuer-key rotation and survive the eventual removal
+// of the old key.
+func DecryptStringAndRotate(encryptedString string) (plaintext string, reEncrypted string, err error) {
+	plaintext, keyID, err := DecryptString(encryptedString)
+	if err != nil {
+		return "", "", err
+	}
+	currentKey, err := GetIssuerPrivateJWK()
+	if err != nil {
+		return "", "", errors.Wrap(err, "failed to get current issuer key")
+	}
+	if keyID == currentKey.KeyID() {
+		return plaintext, "", nil
+	}
+	if rotated, encErr := EncryptString(plaintext); encErr == nil {
+		reEncrypted = rotated
+	} else {
+		log.Debugf("Failed to re-encrypt a value sealed with retired key %s: %v", keyID, encErr)
+	}
+	return plaintext, reEncrypted, nil
+}
+
 // SaveConfigContentsToFile saves the configuration to a specific file path.
 // If withPassword is false, the credentials are saved without encryption.
 // This is useful for creating credential files that can be used in non-interactive

@@ -41,6 +41,7 @@ import (
 	pelican_oauth2 "github.com/pelicanplatform/pelican/oauth2"
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/server_structs"
+	"github.com/pelicanplatform/pelican/server_utils"
 	"github.com/pelicanplatform/pelican/web_ui"
 )
 
@@ -601,17 +602,8 @@ func handleGlobusAuth(ctx *gin.Context) {
 	ctx.Redirect(http.StatusTemporaryRedirect, redirectUrl)
 }
 
-// Persist a Globus access token on the disk
+// Persist a Globus access token on the disk for the XRootD daemon to read.
 func persistToken(collectionID string, token *oauth2.Token, tokenType GlobusTokenType) (string, error) {
-	uid, err := config.GetDaemonUID()
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to persist Globus %s access token on disk: failed to get uid", tokenType)
-	}
-
-	gid, err := config.GetDaemonGID()
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to persist Globus %s access token on disk: failed to get gid", tokenType)
-	}
 	globusFdr := param.Origin_GlobusConfigLocation.GetString()
 	tokBase := filepath.Join(globusFdr, "tokens")
 	if filepath.Clean(tokBase) == "" {
@@ -629,27 +621,8 @@ func persistToken(collectionID string, token *oauth2.Token, tokenType GlobusToke
 	}
 
 	tokFileName := filepath.Join(tokBase, filename)
-	tmpTokFile, err := os.CreateTemp(tokBase, filename)
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to update Globus %s token: unable to create a temporary Globus %s token file", tokenType, tokenType)
-	}
-	// We need to change the directory and file permission to XRootD user/group so that it can access the token
-	if err = tmpTokFile.Chown(uid, gid); err != nil {
-		return "", errors.Wrapf(err, "unable to change the ownership of Globus %s token file at %s to xrootd daemon", tokenType, tmpTokFile.Name())
-	}
-	defer tmpTokFile.Close()
-
-	_, err = tmpTokFile.Write([]byte(token.AccessToken + "\n"))
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to update Globus %s token: unable to write token to the tmp file", tokenType)
-	}
-
-	if err = tmpTokFile.Sync(); err != nil {
-		return "", errors.Wrapf(err, "failed to update Globus %s token: unable to flush tmp file to disk", tokenType)
-	}
-
-	if err := os.Rename(tmpTokFile.Name(), tokFileName); err != nil {
-		return "", errors.Wrapf(err, "failed to update Globus %s token: unable to rename tmp file to the token file", tokenType)
+	if err := server_utils.WriteDaemonTokenFile(tokFileName, token.AccessToken); err != nil {
+		return "", errors.Wrapf(err, "failed to update Globus %s token", tokenType)
 	}
 	return tokFileName, nil
 }

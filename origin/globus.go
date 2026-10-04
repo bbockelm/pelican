@@ -22,7 +22,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -157,17 +156,10 @@ func InitGlobusBackend(exps []server_utils.OriginExport) error {
 	//   uses pelican's own group since no xrootd daemon is involved
 	globusFdr := param.Origin_GlobusConfigLocation.GetString()
 	tokFdr := filepath.Join(globusFdr, "tokens")
-	if err := os.MkdirAll(tokFdr, 0750); err != nil {
-		return errors.Wrapf(err, "failed to create directory for Globus tokens: %s", tokFdr)
-	}
-	if err = os.Chown(globusFdr, puser.Uid, tokenGid); err != nil {
-		return errors.Wrapf(err, "unable to change the ownership of %s to pelican uid %d and gid %d for Globus config", globusFdr, puser.Uid, tokenGid)
-	}
-	if err = os.Chmod(globusFdr, 0750); err != nil {
-		return errors.Wrapf(err, "unable to change the permissions of %s for Globus config", globusFdr)
-	}
-	if err = os.Chown(tokFdr, puser.Uid, tokenGid); err != nil {
-		return errors.Wrapf(err, "unable to change the ownership of %s to pelican uid %d and gid %d for Globus tokens", tokFdr, puser.Uid, tokenGid)
+	for _, dir := range []string{globusFdr, tokFdr} {
+		if err := server_utils.PrepareTokenDir(dir, puser.Uid, tokenGid); err != nil {
+			return errors.Wrap(err, "failed to prepare the Globus token directories")
+		}
 	}
 
 	globusAuthCfg, err := GetGlobusOAuthCfg()
