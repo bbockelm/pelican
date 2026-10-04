@@ -236,6 +236,8 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Director_CheckOriginPresence.GetName(), true)
 	// Director.DefaultResponse
 	v.SetDefault(param.Director_DefaultResponse.GetName(), "cache")
+	// Director.DisableClientIDMetadataDocuments
+	v.SetDefault(param.Director_DisableClientIDMetadataDocuments.GetName(), false)
 	// Director.EnableBroker
 	v.SetDefault(param.Director_EnableBroker.GetName(), true)
 	// Director.EnableFederationMetadataHosting

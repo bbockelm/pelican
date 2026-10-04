@@ -197,6 +197,7 @@ var runtimeConfigurableMap = map[string]bool{
 	"Director.CheckOriginPresence": false,
 	"Director.DbLocation": false,
 	"Director.DefaultResponse": false,
+	"Director.DisableClientIDMetadataDocuments": false,
 	"Director.EnableBroker": false,
 	"Director.EnableFederationMetadataHosting": false,
 	"Director.EnableOIDC": false,
@@ -1134,6 +1135,7 @@ var boolAccessors = map[string]func(*Config) bool{
 	"Director.CachesPullFromCaches": func(c *Config) bool { return c.Director.CachesPullFromCaches },
 	"Director.CheckCachePresence": func(c *Config) bool { return c.Director.CheckCachePresence },
 	"Director.CheckOriginPresence": func(c *Config) bool { return c.Director.CheckOriginPresence },
+	"Director.DisableClientIDMetadataDocuments": func(c *Config) bool { return c.Director.DisableClientIDMetadataDocuments },
 	"Director.EnableBroker": func(c *Config) bool { return c.Director.EnableBroker },
 	"Director.EnableFederationMetadataHosting": func(c *Config) bool { return c.Director.EnableFederationMetadataHosting },
 	"Director.EnableOIDC": func(c *Config) bool { return c.Director.EnableOIDC },
@@ -1532,6 +1534,7 @@ var allParameterNames = []string{
 	"Director.CheckOriginPresence",
 	"Director.DbLocation",
 	"Director.DefaultResponse",
+	"Director.DisableClientIDMetadataDocuments",
 	"Director.EnableBroker",
 	"Director.EnableFederationMetadataHosting",
 	"Director.EnableOIDC",
@@ -2321,6 +2324,7 @@ var (
 	Director_CachesPullFromCaches = BoolParam{"Director.CachesPullFromCaches"}
 	Director_CheckCachePresence = BoolParam{"Director.CheckCachePresence"}
 	Director_CheckOriginPresence = BoolParam{"Director.CheckOriginPresence"}
+	Director_DisableClientIDMetadataDocuments = BoolParam{"Director.DisableClientIDMetadataDocuments"}
 	Director_EnableBroker = BoolParam{"Director.EnableBroker"}
 	Director_EnableFederationMetadataHosting = BoolParam{"Director.EnableFederationMetadataHosting"}
 	Director_EnableOIDC = BoolParam{"Director.EnableOIDC"}
@@ -2876,6 +2880,7 @@ func init() {
 		"Director.CachesPullFromCaches": Director_CachesPullFromCaches,
 		"Director.CheckCachePresence": Director_CheckCachePresence,
 		"Director.CheckOriginPresence": Director_CheckOriginPresence,
+		"Director.DisableClientIDMetadataDocuments": Director_DisableClientIDMetadataDocuments,
 		"Director.EnableBroker": Director_EnableBroker,
 		"Director.EnableFederationMetadataHosting": Director_EnableFederationMetadataHosting,
 		"Director.EnableOIDC": Director_EnableOIDC,

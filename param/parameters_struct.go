@@ -134,6 +134,7 @@ type Config struct {
 		CheckOriginPresence bool `mapstructure:"checkoriginpresence" yaml:"CheckOriginPresence"`
 		DbLocation string `mapstructure:"dblocation" yaml:"DbLocation"`
 		DefaultResponse string `mapstructure:"defaultresponse" yaml:"DefaultResponse"`
+		DisableClientIDMetadataDocuments bool `mapstructure:"disableclientidmetadatadocuments" yaml:"DisableClientIDMetadataDocuments"`
 		EnableBroker bool `mapstructure:"enablebroker" yaml:"EnableBroker"`
 		EnableFederationMetadataHosting bool `mapstructure:"enablefederationmetadatahosting" yaml:"EnableFederationMetadataHosting"`
 		EnableOIDC bool `mapstructure:"enableoidc" yaml:"EnableOIDC"`
@@ -737,6 +738,7 @@ type configWithType struct {
 		CheckOriginPresence struct { Type string; Value bool }
 		DbLocation struct { Type string; Value string }
 		DefaultResponse struct { Type string; Value string }
+		DisableClientIDMetadataDocuments struct { Type string; Value bool }
 		EnableBroker struct { Type string; Value bool }
 		EnableFederationMetadataHosting struct { Type string; Value bool }
 		EnableOIDC struct { Type string; Value bool }
