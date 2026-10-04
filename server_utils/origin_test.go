@@ -583,6 +583,23 @@ func TestGetExports(t *testing.T) {
 		assert.Equal(t, expectedExport, exports[0])
 	})
 
+	t.Run("testHTTPSDeviceFlowValidation", func(t *testing.T) {
+		base := httpsSingleExport + "\n  HttpAuthOAuth2DeviceFlow: true\n"
+		for _, tc := range []struct {
+			name, extra string
+			shouldError bool
+		}{
+			{"missing issuer", "", true},
+			{"issuer set", "  HttpAuthOAuth2Issuer: https://issuer.example.org\n", false},
+			{"passthrough conflicts", "  HttpAuthOAuth2Issuer: https://issuer.example.org\n  HttpAuthTokenPassthrough: true\n", true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				defer ResetTestState()
+				_ = setup(t, base+tc.extra, tc.shouldError)
+			})
+		}
+	})
+
 	// Should currently fail -- HTTPS origins do not support multiple exports yet
 	t.Run("testMultiExportBlockHTTPS", func(t *testing.T) {
 		defer ResetTestState()

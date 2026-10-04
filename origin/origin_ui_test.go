@@ -204,6 +204,35 @@ func TestCollectionsAPI(t *testing.T) {
 	err = database.ServerDatabase.AutoMigrate(&database.UserIdentity{})
 	require.NoError(t, err, "Failed to migrate DB for user identities table")
 
+	// The backend credential endpoints hand out device-flow user codes and
+	// can replace or discard the origin's storage credential: they must be
+	// reachable by system admins only, through the real middleware chain.
+	t.Run("backend-credentials-admin-only", func(t *testing.T) {
+		userToken := generateToken(t, []token_scopes.TokenScope{token_scopes.WebUi_Access}, "test-user")
+		adminToken := generateToken(t, []token_scopes.TokenScope{token_scopes.WebUi_Access}, "admin-user")
+		for _, tc := range []struct {
+			method, path, cookie string
+			want                 int
+		}{
+			{"GET", "/api/v1.0/origin_ui/backend_credentials", "", http.StatusUnauthorized},
+			{"GET", "/api/v1.0/origin_ui/backend_credentials", userToken, http.StatusForbidden},
+			{"POST", "/api/v1.0/origin_ui/backend_credentials/origin-https/activate", userToken, http.StatusForbidden},
+			{"DELETE", "/api/v1.0/origin_ui/backend_credentials/origin-https", userToken, http.StatusForbidden},
+			{"GET", "/api/v1.0/origin_ui/backend_credentials", adminToken, http.StatusOK},
+			// Admitted, but this origin has no such credential.
+			{"POST", "/api/v1.0/origin_ui/backend_credentials/origin-https/activate", adminToken, http.StatusNotFound},
+		} {
+			req, err := http.NewRequest(tc.method, tc.path, nil)
+			require.NoError(t, err)
+			if tc.cookie != "" {
+				req.AddCookie(&http.Cookie{Name: "login", Value: tc.cookie})
+			}
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, req)
+			assert.Equal(t, tc.want, recorder.Code, "%s %s: %s", tc.method, tc.path, recorder.Body.String())
+		}
+	})
+
 	t.Run("create-delete-collection", func(t *testing.T) {
 		createReq := CreateCollectionReq{
 			Name:        "test",
