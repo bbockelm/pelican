@@ -3847,6 +3847,23 @@ components: ["cache"]
 ############################
 #  Director-level configs  #
 ############################
+name: Director.DisableClientIDMetadataDocuments
+description: |+
+  By default, the Director publishes an OAuth client ID metadata document for each of the federation's servers
+  at `/api/v1.0/director/oauthClients/caches/<name>` and `/api/v1.0/director/oauthClients/origins/<host>`.
+
+  The URL of a server's document is that server's OAuth `client_id` when it acquires a long-lived credential for a
+  storage backend (for example, `Origin.HttpAuthOAuth2DeviceFlow`) from an issuer that supports client ID metadata documents.
+  The document describes a confidential client that authenticates with `private_key_jwt` using the keys the server
+  registered with the federation's Registry, so the issuer can tell servers apart and a server's refresh token is
+  useless without its private key.
+  Servers fall back to dynamic client registration when no document is published.
+
+  Set to `true` to stop publishing the documents.
+type: bool
+default: false
+components: ["director"]
+---
 name: Director.EnableFederationMetadataHosting
 description: |+
   Controls whether or not the Director should host a copy of the Federation's metadata.

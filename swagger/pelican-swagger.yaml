@@ -778,6 +778,40 @@ definitions:
         items:
           $ref: "#/definitions/OriginExport"
         minItems: 0
+  ClientIDMetadataDocument:
+    type: object
+    description: >-
+      An OAuth client ID metadata document (draft-ietf-oauth-client-id-metadata-document)
+      describing one federation server as a confidential OAuth client.
+      The document's URL is the server's `client_id`.
+      The client authenticates with `private_key_jwt` using the keys the server
+      registered with the Registry, which `jwks_uri` points to.
+    properties:
+      client_id:
+        type: string
+        example: "https://director.example.org/api/v1.0/director/oauthClients/caches/site-a"
+      client_name:
+        type: string
+        example: "Pelican cache site-a (example.org)"
+      client_uri:
+        type: string
+        example: "https://director.example.org"
+      grant_types:
+        type: array
+        items:
+          type: string
+        example: ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"]
+      token_endpoint_auth_method:
+        type: string
+        example: "private_key_jwt"
+      jwks_uri:
+        type: string
+        example: "https://registry.example.org/api/v1.0/registry/caches/site-a/.well-known/issuer.jwks"
+      software_id:
+        type: string
+        example: "https://pelicanplatform.org"
+      software_version:
+        type: string
   GlobusExport:
     type: object
     properties:
@@ -4772,6 +4806,43 @@ paths:
           description: "Namespace prefix not found for the path"
           schema:
             type: object
+            $ref: "#/definitions/ErrorModelV2"
+  /director/oauthClients/{serverPrefix}:
+    get:
+      summary: Get the OAuth client ID metadata document of a federation server
+      description: >-
+        Returns the client ID metadata document for the cache or origin whose Registry prefix is
+        `/caches/<name>` or `/origins/<host>`.
+        The document's URL is that server's OAuth `client_id` when it acquires a long-lived
+        storage-backend credential with the device authorization grant from an issuer that
+        supports client ID metadata documents; issuers fetch it to learn the client's metadata
+        and the location of its keys.
+        No authentication is required: the document grants nothing by itself, since only the
+        holder of the private key the Registry serves for that server can authenticate as the client.
+        Responses carry `Cache-Control: public, max-age=3600`.
+        Disabled (404) when `Director.DisableClientIDMetadataDocuments` is true.
+      tags:
+        - "director"
+      parameters:
+        - name: serverPrefix
+          in: path
+          type: string
+          required: true
+          description: >-
+            The server's Registry prefix without the leading slash, e.g. `caches/site-a`
+            or `origins/origin.example.org:8443`.
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: "#/definitions/ClientIDMetadataDocument"
+        "404":
+          description: Not a cache or origin prefix, or documents are disabled on this Director
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: The Director could not resolve the federation's URLs
+          schema:
             $ref: "#/definitions/ErrorModelV2"
   /director/getFedToken:
     get:
