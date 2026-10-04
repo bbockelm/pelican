@@ -85,6 +85,12 @@ func newTierTarget(ctx context.Context, cfg TierTargetConfig) (*tierTarget, erro
 	}
 	t := &tierTarget{cfg: cfg, backend: backend}
 	t.healthy.Store(true)
+	if cfg.Cold {
+		// Reads of a cold target's objects always go through the cache,
+		// which brings them back to local storage.
+		log.Infof("Cache tier target %s is cold; reads of its objects go through the cache", cfg.DisplayURL())
+		return t, nil
+	}
 	if probe, ok := probeTierRedirect(ctx, backend); ok {
 		if u, perr := url.Parse(probe); perr == nil {
 			t.canRedirect = true

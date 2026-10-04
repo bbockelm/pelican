@@ -58,6 +58,14 @@ type tierTestEnv struct {
 // the cache must fall back to proxying.
 func newMemTierEnv(t *testing.T, ctx context.Context) *tierTestEnv {
 	t.Helper()
+	return newMemTierEnvWith(t, ctx, TierTargetConfig{ProviderURL: "mem://", Prefix: "cache", MaxSize: 1 << 30},
+		EvictionDirConfig{MaxSize: 1 << 30})
+}
+
+// newMemTierEnvWith is newMemTierEnv with a chosen target configuration and
+// local directory limits.
+func newMemTierEnvWith(t *testing.T, ctx context.Context, targetCfg TierTargetConfig, diskCfg EvictionDirConfig) *tierTestEnv {
+	t.Helper()
 	InitIssuerKeyForTests(t)
 	tmpDir := t.TempDir()
 
@@ -70,7 +78,6 @@ func newMemTierEnv(t *testing.T, ctx context.Context) *tierTestEnv {
 	require.NoError(t, err)
 	t.Cleanup(func() { storage.Close() })
 
-	targetCfg := TierTargetConfig{ProviderURL: "mem://", Prefix: "cache", MaxSize: 1 << 30}
 	registered, err := storage.RegisterTierTargets(ctx, []TierTargetConfig{targetCfg})
 	require.NoError(t, err)
 	require.Len(t, registered, 1)
@@ -86,11 +93,15 @@ func newMemTierEnv(t *testing.T, ctx context.Context) *tierTestEnv {
 	}
 	env.eviction = NewEvictionManager(db, storage, EvictionConfig{
 		DirConfigs: map[StorageID]EvictionDirConfig{
-			env.diskID: {MaxSize: 1 << 30},
+			env.diskID: diskCfg,
 			env.tierID: {MaxSize: targetCfg.MaxSize, NoPlacement: true},
 		},
 	})
+	storage.SetChooseDir(env.eviction.ChooseDiskStorage)
 	env.uploader = newTierUploader(db, storage, env.eviction, 1024)
+	if env.uploader.cold {
+		env.eviction.demoter = env.uploader
+	}
 	return env
 }
 

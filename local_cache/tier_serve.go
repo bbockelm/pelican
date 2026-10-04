@@ -214,9 +214,10 @@ func (pc *PersistentCache) tryTierRedirect(w http.ResponseWriter, r *http.Reques
 		return false
 	}
 	target := pc.storage.getTierTarget(meta.StorageID)
-	if target == nil || !target.canRedirect {
+	if target == nil || !target.canRedirect || target.cfg.Cold {
 		// Either the object is not tiered, or its target cannot hand out a
-		// URL the client could fetch on its own; proxy instead.
+		// URL the client could fetch on its own, or it is cold, whose
+		// objects are always read through the cache; serve it from here.
 		return false
 	}
 	// A URL the client fetches over something other than HTTP -- a file://

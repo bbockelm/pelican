@@ -2058,23 +2058,40 @@ func (sm *StorageManager) Delete(instanceHash InstanceHash) error {
 	if err := sm.deleteRecord(instanceHash, chunkCount); err != nil {
 		return err
 	}
-
-	// If stored on a tiering target, delete the remote object; otherwise
-	// delete all chunk files on disk.
 	if meta != nil {
-		if target := sm.getTierTarget(meta.StorageID); target != nil {
-			delCtx, delCancel := context.WithTimeout(context.Background(), tierSweepOpTimeout)
-			err := target.deleteObject(delCtx, instanceHash)
-			delCancel()
-			if err != nil {
-				log.Warnf("Failed to delete %s from tiering target %d (consistency sweep will retry): %v", instanceHash, meta.StorageID, err)
-			}
-		} else if meta.IsDisk() {
-			sm.deleteChunkFiles(instanceHash, meta.ContentLength, meta.StorageID, meta.ChunkSizeCode, meta.ChunkLocations)
+		sm.deleteObjectData(instanceHash, meta)
+	}
+	return nil
+}
+
+// deleteObjectData removes the bytes behind an object whose database records
+// are already gone: its in-memory state, and its files on local storage or its
+// object on the tiering target it lived on.  Every path that deletes an
+// object goes through here, so they cannot disagree about what that means.
+//
+// A remote delete that fails is logged and left for the tiering consistency
+// sweep, which removes objects it has no record of.
+func (sm *StorageManager) deleteObjectData(instanceHash InstanceHash, layout *CacheMetadata) {
+	sm.invalidateObjectCaches(instanceHash, layout.ChunkCount())
+
+	deleteRemote := func(sid StorageID) {
+		target := sm.getTierTarget(sid)
+		if target == nil {
+			return
+		}
+		delCtx, delCancel := context.WithTimeout(context.Background(), tierSweepOpTimeout)
+		err := target.deleteObject(delCtx, instanceHash)
+		delCancel()
+		if err != nil {
+			log.Warnf("Failed to delete %s from tiering target %d (consistency sweep will retry): %v", instanceHash, sid, err)
 		}
 	}
 
-	return nil
+	if sm.IsTiered(layout.StorageID) {
+		deleteRemote(layout.StorageID)
+	} else if layout.IsDisk() {
+		sm.deleteChunkFiles(instanceHash, layout.ContentLength, layout.StorageID, layout.ChunkSizeCode, layout.ChunkLocations)
+	}
 }
 
 // deleteRecord removes an object's database entries (metadata, inline data,
@@ -2139,50 +2156,58 @@ func (sm *StorageManager) deleteChunkFiles(instanceHash InstanceHash, contentLen
 // All DB mutations happen atomically; filesystem deletes follow afterward.
 // Returns the evicted objects, total bytes freed, and how many were spared.
 func (sm *StorageManager) EvictByLRU(storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64) ([]evictedObject, uint64, int, error) {
+	res, freed, err := sm.evictByLRU(storageID, namespaceID, maxObjects, maxBytes, nil)
+	return res.Evicted, freed, res.Skipped, err
+}
+
+// evictByLRU is EvictByLRU with a demotion hook (see EvictOptions.Demote),
+// which the eviction manager supplies when local storage drains to a cold
+// target.  It returns the whole EvictResult.
+func (sm *StorageManager) evictByLRU(storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64,
+	demote func(InstanceHash, *CacheMetadata) demoteVerdict) (EvictResult, uint64, error) {
 	// isPinned is called from inside the eviction transaction.  That is safe
 	// because pins.mu is a leaf: pinning never opens a Badger transaction, so
 	// the two locks cannot be acquired in opposing orders.
-	evicted, skipped, err := sm.db.EvictByLRU(storageID, namespaceID, maxObjects, maxBytes, sm.pins.isPinned)
+	res, err := sm.db.EvictByLRU(storageID, namespaceID, maxObjects, maxBytes, &EvictOptions{
+		Skip:   sm.pins.isPinned,
+		Demote: demote,
+	})
 	if err != nil {
 		// Return the attempted (uncommitted) objects alongside the error
 		// so the caller can log which objects were involved in a conflict.
-		return evicted, 0, skipped, errors.Wrap(err, "failed to evict objects by LRU")
+		return res, 0, errors.Wrap(err, "failed to evict objects by LRU")
 	}
 
 	var totalFreed uint64
-	for _, obj := range evicted {
-		// Use PerDirectoryBytes to compute the actual on-disk size
-		// freed — this correctly handles lazily-allocated chunked
-		// objects where not all chunks may be allocated.
-		meta := &CacheMetadata{
-			StorageID:      obj.storageID,
-			ContentLength:  obj.contentLen,
-			ChunkSizeCode:  obj.chunkSizeCode,
-			ChunkLocations: obj.chunkLocations,
-		}
-		for _, bytes := range meta.PerDirectoryBytes() {
+	for i := range res.Evicted {
+		obj := &res.Evicted[i]
+		layout := obj.layout()
+		// Use PerDirectoryBytes to compute the actual on-disk size freed
+		// -- this correctly handles lazily-allocated chunked objects where
+		// not all chunks may be allocated.
+		for _, bytes := range layout.PerDirectoryBytes() {
 			totalFreed += uint64(bytes)
 		}
-
-		// Remove all in-memory cached state for this object.
-		sm.invalidateObjectCaches(obj.instanceHash, CalculateChunkCount(obj.contentLen, obj.chunkSizeCode))
-
-		// Delete the backing data: remote object for tiered objects,
-		// chunk files on disk otherwise.
-		if target := sm.getTierTarget(obj.storageID); target != nil {
-			delCtx, delCancel := context.WithTimeout(context.Background(), tierSweepOpTimeout)
-			err := target.deleteObject(delCtx, obj.instanceHash)
-			delCancel()
-			if err != nil {
-				log.Warnf("Failed to delete evicted object %s from tiering target %d (consistency sweep will retry): %v",
-					obj.instanceHash, obj.storageID, err)
-			}
-		} else if obj.storageID != StorageIDInline {
-			sm.deleteChunkFiles(obj.instanceHash, obj.contentLen, obj.storageID, obj.chunkSizeCode, obj.chunkLocations)
-		}
+		sm.deleteObjectData(obj.instanceHash, layout)
 	}
 
-	return evicted, totalFreed, skipped, nil
+	return res, totalFreed, nil
+}
+
+// isColdTarget reports whether a storage ID is a configured cold tiering
+// target.
+func (sm *StorageManager) isColdTarget(id StorageID) bool {
+	t := sm.tierTargets[id]
+	return t != nil && t.cfg.Cold
+}
+
+// coldTiering reports whether this cache tiers to cold targets (configuration
+// validation guarantees that then every target is cold).
+func (sm *StorageManager) coldTiering() bool {
+	for id := range sm.tierTargets {
+		return sm.isColdTarget(id)
+	}
+	return false
 }
 
 // GetObjectSize returns the content length of a cached object

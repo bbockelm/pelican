@@ -790,7 +790,13 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 			threshold = int64(parsed)
 		}
 		uploader := newTierUploader(db, storage, eviction, threshold)
-		storage.onObjectComplete = uploader.MaybeEnqueue
+		if uploader.cold {
+			// Cold targets take objects only when eviction pushes them
+			// off local storage.
+			eviction.demoter = uploader
+		} else {
+			storage.onObjectComplete = uploader.MaybeEnqueue
+		}
 		pc.tierUploader = uploader
 	}
 

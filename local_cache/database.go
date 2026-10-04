@@ -2417,6 +2417,65 @@ type evictedObject struct {
 	chunkLocations []ChunkLocation // Locations of chunks 1, 2, ...
 }
 
+// layout reconstructs the parts of the object's metadata that say where its
+// bytes were and what they were charged, for cleanup after the transaction.
+func (e *evictedObject) layout() *CacheMetadata {
+	return &CacheMetadata{
+		StorageID:      e.storageID,
+		ContentLength:  e.contentLen,
+		NamespaceID:    e.namespaceID,
+		ChunkSizeCode:  e.chunkSizeCode,
+		ChunkLocations: e.chunkLocations,
+	}
+}
+
+// demoteVerdict is a demotion hook's answer about one eviction candidate.
+type demoteVerdict int
+
+const (
+	// demoteNo: the object cannot be demoted; evict it normally.
+	demoteNo demoteVerdict = iota
+	// demoteQueued: the object was handed to the uploader, which will move
+	// it to a cold target and release the local copy.  The pass counts its
+	// bytes as freed and leaves it in place.
+	demoteQueued
+	// demotePending: an earlier pass already handed the object over.  It is
+	// left alone and counts for nothing, since its bytes were counted then.
+	demotePending
+)
+
+// EvictOptions tunes an eviction pass.  The zero value evicts by deletion
+// only, as before cold tiering.
+type EvictOptions struct {
+	// Skip, when non-nil, is consulted for every candidate; returning true
+	// leaves the object in place.  It is how a caller protects objects that
+	// must not disappear right now -- see StorageManager.EvictByLRU, which
+	// uses it to spare objects under a live reader.  A skipped object is
+	// not counted against maxObjects, because skipping frees nothing and
+	// counting it would let eviction report a full batch while returning
+	// under target.
+	Skip func(InstanceHash) bool
+
+	// Demote, when non-nil, is offered every LRU candidate before it is
+	// deleted, with its metadata, and may take it for demotion by upload
+	// instead.  It runs inside the eviction transaction, so it must not
+	// block or touch the database.
+	Demote func(InstanceHash, *CacheMetadata) demoteVerdict
+}
+
+// EvictResult reports what one eviction pass did.
+type EvictResult struct {
+	// Evicted lists the objects removed from their storage target.  Their
+	// records are already gone; the caller removes the bytes.
+	Evicted []evictedObject
+	// Skipped counts candidates left in place because they are protected.
+	Skipped int
+	// Queued counts candidates handed to EvictOptions.Demote, and
+	// QueuedBytes their size; their space is freed once the upload finishes.
+	Queued      int
+	QueuedBytes int64
+}
+
 // evictionSkipBudget bounds how many protected objects the LRU walk (phases 2
 // and 3) will step over before giving up.
 //
@@ -2444,20 +2503,19 @@ const evictionSkipBudget = 1024
 // to go one object over the byte threshold so that progress is always
 // made even when only large objects remain.
 //
-// skip, when non-nil, is consulted for every candidate; returning true leaves
-// the object in place.  It is how a caller protects objects that must not
-// disappear right now -- see StorageManager.EvictByLRU, which uses it to spare
-// objects under a live reader.  A skipped object is not counted against
-// maxObjects, because skipping frees nothing and counting it would let
-// eviction report a full batch while returning under target.
-//
-// Returns the evicted objects and the number that were skipped.
-func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64, skip func(InstanceHash) bool) ([]evictedObject, int, error) {
+// opts (nil for the defaults) protects objects and enables cold-tier
+// demotion; see EvictOptions.  Demotion applies only to the LRU walk: a
+// purge-first marker is an explicit request to remove the object, and is
+// honoured by deleting every copy of it.
+func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64, opts *EvictOptions) (EvictResult, error) {
 	if err := cdb.checkWritable(); err != nil {
-		return nil, 0, err
+		return EvictResult{}, err
+	}
+	if opts == nil {
+		opts = &EvictOptions{}
 	}
 
-	var evicted []evictedObject
+	var res EvictResult
 	// lruSkipped counts skips charged against evictionSkipBudget; pfSkipped
 	// counts purge-first skips, which are reported but never end a pass.
 	var lruSkipped, pfSkipped int
@@ -2467,13 +2525,16 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 	if cdb.skipBudget > 0 {
 		skipBudget = cdb.skipBudget
 	}
+	// The LRU walk needs each candidate's metadata up front when it may
+	// demote rather than delete.
+	demoting := opts.Demote != nil
 
 	err := cdb.db.Update(func(txn *badger.Txn) error {
 		var freedBytes int64
 
 		// --- helper: returns true when the caller's targets are met ---
 		quotaReached := func() bool {
-			if maxObjects > 0 && len(evicted) >= maxObjects {
+			if maxObjects > 0 && len(res.Evicted)+res.Queued >= maxObjects {
 				return true
 			}
 			if maxBytes > 0 && freedBytes >= maxBytes {
@@ -2487,16 +2548,17 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 			return lruSkipped >= skipBudget || quotaReached()
 		}
 
-		// --- helper: delete one object by hash, record results ---
+		// --- helper: remove one object by hash, record results ---
 		//
 		// known is the object's metadata when the caller has already read it,
 		// and nil when it has not — in which case the record is read here.
-		evictOne := func(hash InstanceHash, known *CacheMetadata, skipCounter *int) {
+		// allowDemote is false for purge-first candidates.
+		evictOne := func(hash InstanceHash, known *CacheMetadata, skipCounter *int, allowDemote bool) error {
 			// Checked before the metadata read: a protected object is not
 			// going anywhere this pass, so there is nothing to learn about it.
-			if skip != nil && skip(hash) {
+			if opts.Skip != nil && opts.Skip(hash) {
 				*skipCounter++
-				return
+				return nil
 			}
 			// Objects with a recently issued pre-signed URL are protected the
 			// same way: a client may still be downloading directly from the
@@ -2505,8 +2567,27 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 			if cdb.redirectHeldInTxn(txn, hash) {
 				log.Debugf("Skipping eviction of %s: pre-signed URL issued within hold window", hash)
 				*skipCounter++
-				return
+				return nil
 			}
+
+			if allowDemote && demoting {
+				if known == nil {
+					var err error
+					if known, err = readMetadataInTxn(txn, hash); err != nil {
+						return err
+					}
+				}
+				if known != nil {
+					demoted := cdb.tryDemoteInTxn(hash, known, opts, &res)
+					if demoted > 0 {
+						freedBytes += demoted
+					}
+					if demoted != 0 {
+						return nil
+					}
+				}
+			}
+
 			var meta *CacheMetadata
 			var err error
 			if known != nil {
@@ -2516,12 +2597,12 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 			}
 			if err != nil {
 				log.Warnf("Failed to delete object %s during eviction: %v", hash, err)
-				return
+				return nil
 			}
 			if meta == nil {
-				return
+				return nil
 			}
-			evicted = append(evicted, evictedObject{
+			res.Evicted = append(res.Evicted, evictedObject{
 				instanceHash:   hash,
 				storageID:      meta.StorageID,
 				contentLen:     meta.ContentLength,
@@ -2542,6 +2623,7 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 			} else {
 				freedBytes += CalculateFileSize(meta.ContentLength)
 			}
+			return nil
 		}
 
 		// objectUsesDir reports whether an object touches the given
@@ -2563,10 +2645,10 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 		// the requested storageID (base or chunk), evict it immediately.
 		{
 			pfPrefix := []byte(PrefixPurgeFirst)
-			opts := badger.DefaultIteratorOptions
-			opts.PrefetchValues = false
+			itOpts := badger.DefaultIteratorOptions
+			itOpts.PrefetchValues = false
 
-			it := txn.NewIterator(opts)
+			it := txn.NewIterator(itOpts)
 			defer it.Close()
 
 			for it.Seek(pfPrefix); it.ValidForPrefix(pfPrefix); it.Next() {
@@ -2599,7 +2681,9 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 					continue
 				}
 
-				evictOne(hash, meta, &pfSkipped)
+				if err := evictOne(hash, meta, &pfSkipped, false); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -2607,10 +2691,10 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 		// This finds objects whose base (chunk 0) is in storageID.
 		if !limitReached() {
 			lruPrefix := []byte(fmt.Sprintf("%s%d:%d:", PrefixLRU, storageID, namespaceID))
-			opts := badger.DefaultIteratorOptions
-			opts.PrefetchValues = false
+			itOpts := badger.DefaultIteratorOptions
+			itOpts.PrefetchValues = false
 
-			it := txn.NewIterator(opts)
+			it := txn.NewIterator(itOpts)
 			defer it.Close()
 
 			for it.Seek(lruPrefix); it.ValidForPrefix(lruPrefix); it.Next() {
@@ -2621,7 +2705,9 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 				// This phase has no reason of its own to read the record:
 				// the LRU key already says the object's base chunk is in
 				// this storage+namespace.
-				evictOne(hash, nil, &lruSkipped)
+				if err := evictOne(hash, nil, &lruSkipped, true); err != nil {
+					return err
+				}
 				if limitReached() {
 					break
 				}
@@ -2636,10 +2722,10 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 		// already evicted in Phase 2 (their metadata will be gone).
 		if !limitReached() {
 			nsLRUPrefix := fmt.Appendf(nil, "%s", PrefixLRU)
-			opts := badger.DefaultIteratorOptions
-			opts.PrefetchValues = false
+			itOpts := badger.DefaultIteratorOptions
+			itOpts.PrefetchValues = false
 
-			it := txn.NewIterator(opts)
+			it := txn.NewIterator(itOpts)
 			defer it.Close()
 
 			for it.Seek(nsLRUPrefix); it.ValidForPrefix(nsLRUPrefix); it.Next() {
@@ -2674,7 +2760,9 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 				if !objectUsesDir(meta, storageID) {
 					continue
 				}
-				evictOne(hash, meta, &lruSkipped)
+				if err := evictOne(hash, meta, &lruSkipped, true); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -2682,15 +2770,38 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 	})
 
 	// Apply accumulated usage decrements via MergeOperator (outside
-	// the eviction transaction so they cannot cause conflicts).
-	for key, delta := range usageDeltas {
-		if err := cdb.AddUsage(key.StorageID, key.NamespaceID, delta); err != nil {
-			log.Warnf("Failed to decrease usage for storage %d namespace %d: %v",
-				key.StorageID, key.NamespaceID, err)
+	// the eviction transaction so they cannot cause conflicts).  A pass
+	// that failed to commit changed nothing, so there is nothing to refund.
+	if err == nil {
+		for key, delta := range usageDeltas {
+			if aErr := cdb.AddUsage(key.StorageID, key.NamespaceID, delta); aErr != nil {
+				log.Warnf("Failed to decrease usage for storage %d namespace %d: %v",
+					key.StorageID, key.NamespaceID, aErr)
+			}
 		}
 	}
 
-	return evicted, lruSkipped + pfSkipped, err
+	res.Skipped = lruSkipped + pfSkipped
+	return res, err
+}
+
+// tryDemoteInTxn demotes an eviction candidate instead of deleting it, when
+// the options allow it, by offering it to opts.Demote.  It returns
+// the bytes the demotion frees on the storage being evicted, or 0 when the
+// object was not demoted and should be deleted.  A candidate already queued
+// by an earlier pass is not demoted again and not deleted either; it reports
+// -1, which frees nothing.
+func (cdb *CacheDB) tryDemoteInTxn(hash InstanceHash, meta *CacheMetadata, opts *EvictOptions, res *EvictResult) int64 {
+	switch opts.Demote(hash, meta) {
+	case demoteQueued:
+		size := CalculateFileSize(meta.ContentLength)
+		res.Queued++
+		res.QueuedBytes += size
+		return max(size, 1)
+	case demotePending:
+		return -1
+	}
+	return 0
 }
 
 // badgerLogger adapts Pelican's logrus to BadgerDB's logger interface
