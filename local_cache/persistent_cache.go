@@ -1131,13 +1131,12 @@ func (pc *PersistentCache) resolveObject(
 			return nil, errors.Wrap(err, "failed to check cache")
 		}
 		// An object whose storage no longer exists -- most plausibly one left
-		// behind by a bucket that has since been removed from the
-		// configuration -- is a miss, not something to look for on disk.  Its
-		// storage ID resolves to no directory, and treating it as a hit would
-		// send the read to an arbitrary one.
-		if meta != nil && !pc.storage.storageIsResolvable(meta.StorageID) {
-			log.Warnf("Cached object %s names storage %d, which is not configured; treating as a miss",
-				instanceHash, meta.StorageID)
+		// behind by a directory or bucket that has since been removed from
+		// the configuration, possibly holding only some of its chunks -- is
+		// a miss, not something to read: see objectIsResolvable.
+		if meta != nil && !pc.storage.objectIsResolvable(meta) {
+			log.Warnf("Cached object %s is stored (in whole or part) on storage that is not configured; treating as a miss",
+				instanceHash)
 			meta = nil
 		}
 	}

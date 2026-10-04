@@ -128,7 +128,7 @@ func TestTierOnNonRedirectingBackend(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	assert.Equal(t, env.tierID, meta.StorageID)
-	_, statErr := os.Stat(env.storage.getObjectPathForDir(env.diskID, hash))
+	_, statErr := os.Stat(env.storage.chunkFilePath(env.diskID, hash, 0))
 	assert.True(t, os.IsNotExist(statErr), "the local copy should be released")
 	diskUsage, err := env.db.GetUsage(env.diskID, nsID)
 	require.NoError(t, err)

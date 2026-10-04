@@ -197,7 +197,7 @@ func TestChunkedObjectWriteRead(t *testing.T) {
 	// Verify all chunk files exist
 	for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
 		storageID := meta.GetChunkStorageID(chunkIdx)
-		chunkPath := storage.getChunkPath(storageID, instanceHash, chunkIdx)
+		chunkPath := storage.chunkFilePath(storageID, instanceHash, chunkIdx)
 		_, err := os.Stat(chunkPath)
 		require.NoError(t, err, "Chunk %d file should exist at %s", chunkIdx, chunkPath)
 	}
@@ -277,7 +277,7 @@ func TestChunkedObjectEviction(t *testing.T) {
 	var chunkPaths []string
 	for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
 		storageID := meta.GetChunkStorageID(chunkIdx)
-		chunkPath := storage.getChunkPath(storageID, instanceHash, chunkIdx)
+		chunkPath := storage.chunkFilePath(storageID, instanceHash, chunkIdx)
 		chunkPaths = append(chunkPaths, chunkPath)
 		// Verify chunks exist
 		_, err := os.Stat(chunkPath)
@@ -365,7 +365,7 @@ func TestChunkedObjectEvictByLRU(t *testing.T) {
 		var chunkPaths []string
 		for chunkIdx := 0; chunkIdx < chunkCount; chunkIdx++ {
 			storID := meta.GetChunkStorageID(chunkIdx)
-			chunkPath := storage.getChunkPath(storID, instanceHash, chunkIdx)
+			chunkPath := storage.chunkFilePath(storID, instanceHash, chunkIdx)
 			chunkPaths = append(chunkPaths, chunkPath)
 		}
 
@@ -514,7 +514,7 @@ func TestChunkedObjectConsistencyVerification(t *testing.T) {
 
 	t.Run("MissingChunk", func(t *testing.T) {
 		// Delete the second chunk file
-		chunkPath := storage.getChunkPath(meta.ChunkLocations[0].StorageID, instanceHash, 1)
+		chunkPath := storage.chunkFilePath(meta.ChunkLocations[0].StorageID, instanceHash, 1)
 		err := os.Remove(chunkPath)
 		require.NoError(t, err)
 
@@ -816,7 +816,7 @@ func TestLazyChunkAllocation(t *testing.T) {
 	// Verify no files exist yet
 	for storageID := StorageIDFirstDisk; storageID <= StorageIDFirstDisk+2; storageID++ {
 		for chunkIdx := 0; chunkIdx < expectedChunks; chunkIdx++ {
-			chunkPath := storage.getChunkPath(storageID, instanceHash, chunkIdx)
+			chunkPath := storage.chunkFilePath(storageID, instanceHash, chunkIdx)
 			_, err := os.Stat(chunkPath)
 			assert.True(t, os.IsNotExist(err), "Chunk %d should not exist yet", chunkIdx)
 		}
@@ -833,13 +833,13 @@ func TestLazyChunkAllocation(t *testing.T) {
 	assert.NotEqual(t, StorageIDInline, chunk1StorageID, "Chunk 1 should have a real storage ID")
 
 	// Verify only chunk 1 file exists
-	chunk1Path := storage.getChunkPath(chunk1StorageID, instanceHash, 1)
+	chunk1Path := storage.chunkFilePath(chunk1StorageID, instanceHash, 1)
 	_, err = os.Stat(chunk1Path)
 	assert.NoError(t, err, "Chunk 1 file should exist after allocation")
 
 	// Verify chunk 0 file doesn't exist anywhere
 	for storageID := StorageIDFirstDisk; storageID <= StorageIDFirstDisk+2; storageID++ {
-		chunk0Path := storage.getChunkPath(storageID, instanceHash, 0)
+		chunk0Path := storage.chunkFilePath(storageID, instanceHash, 0)
 		_, err := os.Stat(chunk0Path)
 		assert.True(t, os.IsNotExist(err), "Chunk 0 file should not exist")
 	}
@@ -855,7 +855,7 @@ func TestLazyChunkAllocation(t *testing.T) {
 	assert.NotEqual(t, StorageIDInline, chunk0StorageID, "Chunk 0 should have a real storage ID")
 
 	// Verify both chunk files exist
-	chunk0Path := storage.getChunkPath(chunk0StorageID, instanceHash, 0)
+	chunk0Path := storage.chunkFilePath(chunk0StorageID, instanceHash, 0)
 	_, err = os.Stat(chunk0Path)
 	assert.NoError(t, err, "Chunk 0 file should exist after allocation")
 	_, err = os.Stat(chunk1Path)
@@ -966,8 +966,8 @@ func TestLazyChunkedEviction(t *testing.T) {
 	assert.False(t, meta.IsChunkAllocated(1), "Chunk 1 should still be unallocated")
 
 	// Record the paths of allocated chunks
-	chunk0Path := storage.getChunkPath(meta.GetChunkStorageID(0), instanceHash, 0)
-	chunk2Path := storage.getChunkPath(meta.GetChunkStorageID(2), instanceHash, 2)
+	chunk0Path := storage.chunkFilePath(meta.GetChunkStorageID(0), instanceHash, 0)
+	chunk2Path := storage.chunkFilePath(meta.GetChunkStorageID(2), instanceHash, 2)
 
 	// Verify allocated chunks exist on disk
 	_, err = os.Stat(chunk0Path)

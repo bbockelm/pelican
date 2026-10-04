@@ -372,7 +372,7 @@ func TestTierLifecycle(t *testing.T) {
 	assert.Empty(t, intents)
 
 	// The local file is gone; usage moved from the directory to the bucket.
-	localPath := env.storage.getObjectPathForDir(env.diskID, hash)
+	localPath := env.storage.chunkFilePath(env.diskID, hash, 0)
 	_, statErr := os.Stat(localPath)
 	assert.True(t, os.IsNotExist(statErr), "local file should be deleted after tiering")
 	diskUsage, err := env.db.GetUsage(env.diskID, nsID)
@@ -517,7 +517,7 @@ func TestTierChunkedObject(t *testing.T) {
 	var chunkPaths []string
 	for i := 0; i < chunkCount; i++ {
 		sid := meta.GetChunkStorageID(i)
-		chunkPaths = append(chunkPaths, storage.getChunkPath(sid, hash, i))
+		chunkPaths = append(chunkPaths, storage.chunkFilePath(sid, hash, i))
 	}
 
 	// Tier the chunked object.
@@ -574,7 +574,7 @@ func tierWithReaderOpen(t *testing.T, ctx context.Context, env *tierTestEnv, has
 	meta, err := env.storage.GetMetadata(hash)
 	require.NoError(t, err)
 	require.Equal(t, env.tierID, meta.StorageID, "relocation should commit while the reader is open")
-	localPath := env.storage.getObjectPathForDir(env.diskID, hash)
+	localPath := env.storage.chunkFilePath(env.diskID, hash, 0)
 	_, statErr := os.Stat(localPath)
 	require.NoError(t, statErr, "the local copy is held for the reader")
 	return reader, localPath, data
@@ -937,7 +937,7 @@ func TestTierDefersReleaseWhileReaderOpen(t *testing.T) {
 	hash := testInstanceHash(12)
 	nsID := NamespaceID(4)
 	storeTestObject(t, ctx, env.storage, hash, data, env.diskID, nsID)
-	localPath := env.storage.getObjectPathForDir(env.diskID, hash)
+	localPath := env.storage.chunkFilePath(env.diskID, hash, 0)
 
 	// A client is part-way through the object.
 	reader, err := env.storage.NewObjectReader(hash)
@@ -1022,7 +1022,7 @@ func TestTierUploaderRecoveryAccounting(t *testing.T) {
 		hash := testInstanceHash(14)
 		nsID := NamespaceID(6)
 		storeTestObject(t, ctx, env.storage, hash, data, env.diskID, nsID)
-		localPath := env.storage.getObjectPathForDir(env.diskID, hash)
+		localPath := env.storage.chunkFilePath(env.diskID, hash, 0)
 		fileSize := CalculateFileSize(int64(len(data)))
 
 		// Relocation committed, local cleanup did not: the object is on the

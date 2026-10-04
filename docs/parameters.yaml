@@ -2890,6 +2890,15 @@ description: |+
   A UUID file is placed in each directory so that storage IDs remain stable even if
   paths are reordered or changed.
 
+  Symbolic links inside a storage directory are not supported: the directory itself may be
+  a symbolic link, but to spread the cache over several disks, list each disk as its own
+  storage directory rather than linking subdirectories elsewhere.
+  The cache refuses to start if it finds such a link among the directory's fan-out
+  subdirectories.
+  Each directory is opened once, when the cache starts, and used for the life of the
+  process: replacing, renaming, or remounting a storage directory while the cache runs
+  has no effect until it restarts (the cache keeps using the directory it opened).
+
   Each entry is an object with the following keys:
 
   - **Path** (string, required): absolute path to the storage directory.

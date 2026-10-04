@@ -20,7 +20,6 @@ package local_cache
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/pkg/errors"
 )
@@ -101,47 +100,38 @@ func (ci *ChaosInjector) resolveInstanceHash(objectURL, etag, instanceHash strin
 	return hash, meta, nil
 }
 
-// safeChunkPath resolves the on-disk chunk file path and verifies it stays
-// within its storage directory, defending against path traversal.  The
-// object-relative portion is built from the (already hex-validated) instance
-// hash; filepath.IsLocal confirms it cannot escape the storage root before it
-// is joined to the trusted directory.
-func (ci *ChaosInjector) safeChunkPath(storageID StorageID, hash InstanceHash, chunkIndex int) (string, error) {
-	root, ok := ci.storage.GetDirs()[storageID]
-	if !ok {
-		return "", errors.Errorf("unknown storage id %d", storageID)
+// openChunkForChaos opens a chunk file for modification through the storage
+// manager, which confines it to its storage directory, and returns it with
+// its path for the report.
+func (ci *ChaosInjector) openChunkForChaos(storageID StorageID, hash InstanceHash, chunkIndex int) (*os.File, string, error) {
+	chunkPath := ci.storage.chunkFilePath(storageID, hash, chunkIndex)
+	f, err := ci.storage.openChunkFile(storageID, hash, chunkIndex, os.O_RDWR)
+	if err != nil {
+		return nil, chunkPath, errors.Wrapf(err, "failed to open chunk file %s", chunkPath)
 	}
-	rel := GetChunkPath(GetInstanceStoragePath(hash), chunkIndex)
-	if !filepath.IsLocal(rel) {
-		return "", errors.Errorf("refusing non-local chunk path %q for instance %s", rel, hash)
-	}
-	return filepath.Join(root, rel), nil
+	return f, chunkPath, nil
 }
 
 // chunkFileForBlock maps a global block number to the on-disk chunk file that
 // stores it and the byte offset of the (encrypted) block within that file.
-func (ci *ChaosInjector) chunkFileForBlock(hash InstanceHash, meta *CacheMetadata, blockNum uint32) (chunkPath string, chunkIndex int, diskOffset int64, err error) {
+func (ci *ChaosInjector) chunkFileForBlock(meta *CacheMetadata, blockNum uint32) (storageID StorageID, chunkIndex int, diskOffset int64, err error) {
 	contentOffset := int64(blockNum) * BlockDataSize
 	if contentOffset >= meta.ContentLength {
-		return "", 0, 0, errors.Errorf("block %d is past the end of the object (%d block(s), %d bytes)",
+		return 0, 0, 0, errors.Errorf("block %d is past the end of the object (%d block(s), %d bytes)",
 			blockNum, CalculateBlockCount(meta.ContentLength), meta.ContentLength)
 	}
 
 	chunkIndex = ContentOffsetToChunk(contentOffset, meta.ChunkSizeCode)
-	storageID := meta.GetChunkStorageID(chunkIndex)
+	storageID = meta.GetChunkStorageID(chunkIndex)
 	if storageID == StorageIDInline {
-		return "", 0, 0, errors.Errorf("chunk %d is not yet allocated on disk", chunkIndex)
-	}
-	chunkPath, err = ci.safeChunkPath(storageID, hash, chunkIndex)
-	if err != nil {
-		return "", 0, 0, err
+		return 0, 0, 0, errors.Errorf("chunk %d is not yet allocated on disk", chunkIndex)
 	}
 
 	// The on-disk offset is the (zero-based) block index within this chunk file
 	// times the encrypted block size.
 	localBlock := uint32(OffsetInChunk(contentOffset, meta.ChunkSizeCode) / BlockDataSize)
 	diskOffset = BlockOffset(localBlock)
-	return chunkPath, chunkIndex, diskOffset, nil
+	return storageID, chunkIndex, diskOffset, nil
 }
 
 // CorruptBlock flips the first numBytes bytes of the on-disk (encrypted)
@@ -165,7 +155,7 @@ func (ci *ChaosInjector) CorruptBlock(objectURL, etag, instanceHash string, bloc
 		return nil, errors.New("object is stored inline in the database; chaos injection only supports disk-backed objects")
 	}
 
-	chunkPath, chunkIndex, diskOffset, err := ci.chunkFileForBlock(hash, meta, blockNum)
+	storageID, chunkIndex, diskOffset, err := ci.chunkFileForBlock(meta, blockNum)
 	if err != nil {
 		return nil, err
 	}
@@ -177,9 +167,9 @@ func (ci *ChaosInjector) CorruptBlock(objectURL, etag, instanceHash string, bloc
 		numBytes = BlockTotalSize
 	}
 
-	f, err := os.OpenFile(chunkPath, os.O_RDWR, 0)
+	f, chunkPath, err := ci.openChunkForChaos(storageID, hash, chunkIndex)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to open chunk file %s", chunkPath)
+		return nil, err
 	}
 	defer f.Close()
 
@@ -249,18 +239,13 @@ func (ci *ChaosInjector) TruncateObject(objectURL, etag, instanceHash string, ch
 	if storageID == StorageIDInline {
 		return nil, errors.Errorf("chunk %d is not yet allocated on disk", chunkIndex)
 	}
-	chunkPath, err := ci.safeChunkPath(storageID, hash, chunkIndex)
-	if err != nil {
-		return nil, err
-	}
-
 	if dropBytes <= 0 {
 		dropBytes = BlockTotalSize
 	}
 
-	f, err := os.OpenFile(chunkPath, os.O_RDWR, 0)
+	f, chunkPath, err := ci.openChunkForChaos(storageID, hash, chunkIndex)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to open chunk file %s", chunkPath)
+		return nil, err
 	}
 	defer f.Close()
 

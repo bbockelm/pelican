@@ -2228,45 +2228,7 @@ func (pc *PersistentCache) introspectStatsHandler(c *gin.Context) {
 //
 // POST /api/v1.0/cache/introspect/disk-usage
 func (pc *PersistentCache) introspectDiskUsageHandler(c *gin.Context) {
-	start := time.Now()
-	result := &DiskUsageResult{
-		Directories: make(map[string]*DirDiskStat),
-	}
-
-	dirs := pc.storage.GetDirs()
-	for storageID, objectsDir := range dirs {
-		dirKey := fmt.Sprintf("storage-%d", storageID)
-		ds := &DirDiskStat{
-			StorageID: uint8(storageID),
-			Path:      objectsDir,
-		}
-
-		walkErr := filepath.WalkDir(objectsDir, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil
-			}
-			if d.IsDir() {
-				return nil
-			}
-			info, infoErr := d.Info()
-			if infoErr != nil {
-				return nil
-			}
-			ds.FileCount++
-			ds.BytesUsed += info.Size()
-			return nil
-		})
-		if walkErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": walkErr.Error()})
-			return
-		}
-
-		result.Directories[dirKey] = ds
-		result.TotalBytesOnDisk += ds.BytesUsed
-		result.TotalFiles += ds.FileCount
-	}
-
-	result.Duration = time.Since(start).String()
+	result := pc.storage.DiskUsage()
 	c.JSON(http.StatusOK, result)
 }
 

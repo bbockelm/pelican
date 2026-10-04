@@ -960,7 +960,7 @@ func TestZeroBlockReadFailure(t *testing.T) {
 
 	// Create directory for the object file and pre-allocate it to the
 	// exact encrypted size (same as InitDiskStorage / NewBlockWriter).
-	objPath := storage.getObjectPath(instanceHash)
+	objPath := storage.chunkFilePath(StorageIDFirstDisk, instanceHash, 0)
 	require.NoError(t, os.MkdirAll(filepath.Dir(objPath), 0750))
 	totalSize := CalculateFileSize(dataSize)
 	fp, err := os.OpenFile(objPath, os.O_RDWR|os.O_CREATE, 0600)
@@ -1790,7 +1790,7 @@ func TestDataScan_WrongChecksum(t *testing.T) {
 	assert.Equal(t, int64(1), stats.ChecksumMismatches, "one mismatch expected")
 
 	// The corrupt object's disk file should have been deleted.
-	corruptPath := storage.getObjectPathForDir(diskID, corruptHash)
+	corruptPath := storage.chunkFilePath(diskID, corruptHash, 0)
 	_, statErr := os.Stat(corruptPath)
 	assert.True(t, os.IsNotExist(statErr), "corrupt object file should be removed")
 
