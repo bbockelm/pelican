@@ -967,6 +967,9 @@ description: |+
   Client:
     FileRedirectRoots: ["/mnt/pelican-cache/objects"]
   ```
+
+  For a cache with a shared-filesystem tiering target (see ${Cache.TieringTargets}), name
+  that target's directory or its `objects/` subdirectory.
 type: stringSlice
 default: none
 components: ["client"]
@@ -3312,14 +3315,16 @@ description: |+
 
   Targets are object stores, reached through the same library the origin's object backends
   use: S3 and S3-compatible services (MinIO, Ceph RGW), Google Cloud Storage, and Azure Blob
-  Storage.
+  Storage — or a directory on a filesystem the cache shares with its clients (see
+  "Shared-filesystem targets" below).
 
   Each entry is an object.  Name the target either with a single provider URL:
 
   - **ProviderURL** (string): the backend in URL form — `s3://bucket`, `gs://bucket`,
-    `azblob://container`.  Takes precedence over the S3-specific keys below.  A target
-    named this way takes its credentials from the provider's ambient credential chain
-    (environment variables, the provider's shared configuration, or an instance role).
+    `azblob://container`, or `file:///absolute/path` for a shared filesystem.  Takes
+    precedence over the S3-specific keys below.  A target named this way takes its
+    credentials from the provider's ambient credential chain (environment variables, the
+    provider's shared configuration, or an instance role).
     **Credentials must not be embedded in the URL**, neither as userinfo
     (`s3://KEY:SECRET@bucket`) nor as query parameters; the cache refuses to start if they
     are.  Embedded credentials do not work in any case — the S3 driver ignores userinfo and
@@ -3339,7 +3344,8 @@ description: |+
 
   The remaining keys apply to every target:
 
-  - **Prefix** (string, optional): a key prefix under which objects are stored.
+  - **Prefix** (string, optional): a key prefix under which objects are stored; for a
+    `file://` target, a subdirectory path below the named directory, created if missing.
   - **MaxSize** (string, required): maximum bytes of cache data stored on the target
     (e.g. "5TB").  Unlike directory targets it cannot be auto-detected.
   - **HighWaterMarkPercentage** / **LowWaterMarkPercentage** (int, optional): eviction
@@ -3352,6 +3358,16 @@ description: |+
     and the target is genuinely its own.  Without it, the cache refuses to start against
     such a target (see the ownership note below).  Never use it to point two caches at
     one target.
+
+  Two keys apply only to a `file://` target:
+
+  - **DisableNamesView** (bool, optional, default false): do not maintain the names view
+    described below.
+  - **ExposedNamespaces** (list of strings, optional): namespace prefixes (e.g. `/ns/data`)
+    whose objects may be tiered to the shared filesystem — and appear in its names view —
+    even though reading them through Pelican requires a token.  Listing a namespace makes
+    the *contents* of its cached objects readable by every user who can read the
+    filesystem, not just their names.
 
   Example YAML:
   ```yaml
@@ -3401,6 +3417,77 @@ description: |+
   server-side encryption plus versioning or object lock.  Operators who need the
   on-disk guarantees for a given namespace should not tier it — raise
   ${Cache.TieringThreshold} above the object sizes involved.
+
+  **Shared-filesystem targets.**  A `file://` target is a directory on a filesystem that
+  the cache and its clients both mount — NFS, Lustre, GPFS, CephFS.  It exists so that
+  clients on the same site can read cached objects straight off that filesystem:
+
+  - The cache keeps objects under `objects/` (named by hash, like a bucket), writes each one
+    to a temporary file under `.pelican-tmp/` and renames it into place, so no reader ever
+    sees a partial object.  Files are created mode 0644 and directories 0755 regardless of
+    the cache's umask: readable by every user of the filesystem, writable only by the cache.
+  - A client that sets `${Client.FileRedirectRoots}` to the target's directory (or its
+    `objects/` subdirectory) is answered with a `file://` redirect to the object's path and
+    reads it directly; other clients are served by the cache as usual.  Clients must mount
+    the filesystem at the same path as the cache.
+  - The **names view** under `names/` lets anyone who can read the filesystem browse objects
+    by their federation path, without Pelican: `names/<namespace>/<path>@<etag>` is each
+    cached version, and `names/<namespace>/<path>` resolves to the version the cache
+    considers current.  Links are relative symlinks into `objects/`, replaced atomically.
+    In both path and entity tag, `%`, `@`, `"`, `/` and control characters are
+    percent-encoded (so `@` only ever separates the name from the version), and a strong
+    entity tag loses its quotes.  On a filesystem that treats names differing only in case
+    or Unicode normalization as the same (detected when the target opens), upper-case
+    letters and non-ASCII characters are percent-encoded as well, so that two objects never
+    share a name.  Names longer than 255 bytes, and paths not in canonical form (`/a//b`),
+    are omitted.  Links are added when an object is tiered and removed when it is evicted or
+    deleted; the bare name moves to a newer version as soon as the cache learns of one, or
+    is removed if that version is not on the target.  The hourly consistency sweep rebuilds
+    the view from the cache's records, restoring missing links and removing stale or foreign
+    ones; `pelican_cache_tiering_names_sweep_duration_seconds` reports how long it took.
+    Only objects tiered to the target appear: objects below ${Cache.TieringThreshold} stay
+    on the cache's (encrypted) local disk, so lower the threshold if, for example,
+    prestaged datasets should be browsable.
+  - Because every user of the filesystem can read what is stored there, a `file://` target
+    only takes objects from namespaces that are publicly readable through Pelican, plus
+    those listed in **ExposedNamespaces**.  Other objects stay on local storage (or go to
+    another target).  A namespace that is temporarily absent from the director's list (its
+    origin is down, say) counts as unknown rather than private: nothing is tiered under it
+    and nothing is withdrawn.  An object whose namespace is known to have stopped being
+    public leaves the names view at the next sweep, but its file remains until it is
+    evicted.
+  - Clients and names-view readers reach the files by path, so the path must be one only
+    the cache can change.  The cache refuses to start if the directory, or its `objects/`,
+    `names/` or `.pelican-tmp/` subdirectory, is writable by group or other users or owned
+    by a user other than the cache's; or if any directory on the way to it (following
+    symbolic links) is owned by anyone but root or the cache's user, or is writable by
+    group or other users without the sticky bit — whoever could write such a directory
+    could rename the target away and put their own in its place.  A typical fix for a
+    group-writable project directory is to create a directory there owned by the cache's
+    user and set the sticky bit on the project directory, or to put the target elsewhere.
+    The same checks run every minute as the target's liveness check, which also verifies
+    that the path still names the directory the cache opened (catching a directory swapped
+    or a filesystem mounted over it).  While the check fails, clients are not redirected to
+    the target and the names view is left alone.
+  - The named directory is created if missing, but its parent must exist: a missing parent
+    usually means the filesystem is not mounted.  Keep the whole target on one filesystem
+    (not split across filesets or projects), since objects are renamed into place.
+  - A hung mount (an NFS server that stopped answering) does not hang the cache: each
+    filesystem call is abandoned after a minute, and while one is outstanding further calls
+    fail at once and the liveness check reports the target down; opening the target at
+    startup is bounded the same way.
+  - A filesystem has no entity tag, so the cache derives one from each file's inode, size
+    and modification time; any rewrite of an object changes it, and reads the cache proxies
+    are refused if it does not match the recorded copy.
+  - Shared-filesystem targets are not supported on Windows.
+
+  Example YAML:
+  ```yaml
+  Cache:
+    TieringTargets:
+      - ProviderURL: file:///mnt/shared/pelican-cache
+        MaxSize: 50TB
+  ```
 
   Every minute the cache writes a small object (`.pelican-health`, beside the identity
   object) to each target and reads it back.  A target that fails is not given new uploads

@@ -219,6 +219,14 @@ func (pc *PersistentCache) tryTierRedirect(w http.ResponseWriter, r *http.Reques
 		// URL the client could fetch on its own; proxy instead.
 		return false
 	}
+	if target.servesByPath() && !target.healthy.Load() {
+		// The client would read by path, and the failing probe may be
+		// saying that the path no longer leads to the cache's files (or
+		// that the filesystem is hung).  The cache's own handle still
+		// does, so serve through it.
+		reqLog.Debug("Shared-filesystem tier target is failing its liveness probe; not redirecting to it")
+		return false
+	}
 	// A URL the client fetches over something other than HTTP -- a file://
 	// path on shared storage, say -- only works if the client is in a
 	// position to use it, and nothing observable about a request says

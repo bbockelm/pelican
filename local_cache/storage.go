@@ -681,7 +681,7 @@ func (sm *StorageManager) RegisterTierTargets(ctx context.Context, configs []Tie
 	claimedUUIDs := make(map[string]string, len(configs))
 	for i := range configs {
 		cfg := configs[i]
-		if !strings.EqualFold(cfg.TransportScheme(), "https") {
+		if scheme := strings.ToLower(cfg.TransportScheme()); scheme != "https" && scheme != tierFileScheme {
 			log.Warnf("Cache tiering target %s is configured over %s: object data and pre-signed URLs "+
 				"will cross the network in cleartext", cfg.DisplayURL(), cfg.TransportScheme())
 		}
@@ -762,6 +762,11 @@ func (sm *StorageManager) RegisterTierTargets(ctx context.Context, configs []Tie
 		}
 		tierRedirectCapable.WithLabelValues(target.metricLabel()).Set(capable)
 		result[id] = cfg
+		if target.names != nil {
+			// A names view's bare names must follow the latest version
+			// as soon as the cache learns of one.
+			sm.db.SetLatestETagObserver(sm.onLatestETagChanged)
+		}
 	}
 	return result, nil
 }
@@ -2067,6 +2072,7 @@ func (sm *StorageManager) Delete(instanceHash InstanceHash) error {
 	// delete all chunk files on disk.
 	if meta != nil {
 		if target := sm.getTierTarget(meta.StorageID); target != nil {
+			sm.unpublishTierName(target, instanceHash, meta.SourceURL, meta.ETag)
 			delCtx, delCancel := context.WithTimeout(context.Background(), tierSweepOpTimeout)
 			err := target.deleteObject(delCtx, instanceHash)
 			delCancel()
@@ -2159,6 +2165,7 @@ func (sm *StorageManager) EvictByLRU(storageID StorageID, namespaceID NamespaceI
 		// Delete the backing data: remote object for tiered objects,
 		// chunk files on disk otherwise.
 		if target := sm.getTierTarget(obj.storageID); target != nil {
+			sm.unpublishTierName(target, obj.instanceHash, obj.sourceURL, obj.etag)
 			delCtx, delCancel := context.WithTimeout(context.Background(), tierSweepOpTimeout)
 			err := target.deleteObject(delCtx, obj.instanceHash)
 			delCancel()
