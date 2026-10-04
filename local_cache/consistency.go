@@ -21,6 +21,8 @@ package local_cache
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"hash"
@@ -393,10 +395,10 @@ func (cc *ConsistencyChecker) dataScanLoop(ctx context.Context) error {
 // of a hex-encoded hash.  Used to estimate scan progress: bucket 0x00
 // means 1/256 complete, 0xff means 256/256 complete.
 func hashBucket(h InstanceHash) int {
-	if len(h) < 2 {
+	if len(h.hex) < 2 {
 		return 0
 	}
-	b, err := hex.DecodeString(string(h[:2]))
+	b, err := hex.DecodeString(h.hex[:2])
 	if err != nil || len(b) == 0 {
 		return 0
 	}
@@ -537,7 +539,7 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 				if !ok[i] {
 					continue
 				}
-				if minIdx == -1 || heads[i].instanceHash < heads[minIdx].instanceHash {
+				if minIdx == -1 || heads[i].instanceHash.Compare(heads[minIdx].instanceHash) < 0 {
 					minIdx = i
 				}
 			}
@@ -585,7 +587,7 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 	usageDuringScan := make(map[StorageUsageKey]int64)
 
 	// Track where to resume DB scan after each transaction restart
-	lastDBKey := InstanceHash("")
+	var lastDBKey InstanceHash
 	transactionStartTime := time.Now()
 	const transactionTimeout = 5 * time.Second
 
@@ -638,7 +640,7 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 			entriesThisTransaction++
 
 			// Process all files that are less than current DB entry (orphaned files)
-			for fileOk && currentFile.instanceHash < instanceHash {
+			for fileOk && currentFile.instanceHash.Compare(instanceHash) < 0 {
 				if len(deletions) < maxDeletionsPerTx {
 					deletions = append(deletions, deleteAction{
 						instanceHash: currentFile.instanceHash,
@@ -1104,11 +1106,16 @@ func (cc *ConsistencyChecker) RunDataScan(ctx context.Context, progressCh chan<-
 	objectsVerified := int64(0)
 	lastProgressSend := scanStartTime
 
-	// Generate random 4-byte hex starting point (16 bits = 4 hex chars)
-	// This randomizes where we start scanning through the database
+	// Pick a random starting point (16 bits = the first 4 hex digits, the
+	// rest zero) so successive scans do not always begin at the same
+	// objects.  It is a seek position, not an object: no real hash will
+	// equal it (that would take a 240-bit coincidence), so nothing is
+	// skipped by ScanMetadataFrom passing over its start key.
 	rng := rand.New(rand.NewSource(scanStartTime.UnixNano()))
-	randomStart := fmt.Sprintf("%04x", rng.Intn(1<<16))
-	startBucket := hashBucket(InstanceHash(randomStart))
+	var startDigest [sha256.Size]byte
+	binary.BigEndian.PutUint16(startDigest[:2], uint16(rng.Intn(1<<16)))
+	randomStart := InstanceHashFromSHA256(startDigest)
+	startBucket := hashBucket(randomStart)
 
 	// Channel for streaming objects from DB scan
 	objectChan := make(chan scanItem, 1000)
@@ -1130,7 +1137,7 @@ func (cc *ConsistencyChecker) RunDataScan(ctx context.Context, progressCh chan<-
 
 		const transactionTimeout = 5 * time.Second
 
-		startKey := InstanceHash(randomStart)
+		startKey := randomStart
 		lastKey := startKey
 
 		for {
@@ -1156,7 +1163,7 @@ func (cc *ConsistencyChecker) RunDataScan(ctx context.Context, progressCh chan<-
 				}
 
 				// If we've wrapped around and reached our starting point, we're done
-				if wrappedAround.Load() && instanceHash >= startKey {
+				if wrappedAround.Load() && instanceHash.Compare(startKey) >= 0 {
 					return errScanDone
 				}
 
@@ -1197,8 +1204,8 @@ func (cc *ConsistencyChecker) RunDataScan(ctx context.Context, progressCh chan<-
 				}
 				// Wrap around to beginning
 				wrappedAround.Store(true)
-				lastKey = ""
-				sl.WithField("startKey", string(startKey)).Debug("Data scan wrapping around from end to beginning")
+				lastKey = InstanceHash{}
+				sl.WithField("startKey", startKey.String()).Debug("Data scan wrapping around from end to beginning")
 			}
 		}
 	}()

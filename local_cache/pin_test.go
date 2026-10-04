@@ -20,7 +20,6 @@ package local_cache
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -56,7 +55,7 @@ func newPinTestStorage(t *testing.T) (*StorageManager, *CacheDB, context.Context
 // prefix scan is the order they were created in.
 func writePinTestObject(t *testing.T, sm *StorageManager, db *CacheDB, ctx context.Context, idx int) InstanceHash {
 	t.Helper()
-	return writePinTestObjectAs(t, sm, db, ctx, InstanceHash(fmt.Sprintf("%064x", idx+0x200)), idx, "")
+	return writePinTestObjectAs(t, sm, db, ctx, testInstanceHash(idx+0x200), idx, "")
 }
 
 // writePinTestObjectAs stores one complete object under a caller-chosen
@@ -102,7 +101,7 @@ func writePinTestObjectAs(t *testing.T, sm *StorageManager, db *CacheDB, ctx con
 
 func TestPinSetRefCounting(t *testing.T) {
 	p := newPinSet()
-	h := InstanceHash("abc")
+	h := namedInstanceHash("abc")
 
 	assert.False(t, p.isPinned(h))
 

@@ -575,7 +575,7 @@ func (em *EvictionManager) evictFromNamespace(rl *log.Entry, storageID StorageID
 			// On conflict the DB returns the objects it attempted (but did not commit).
 			// Log the first one to aid debugging.
 			if len(evicted) > 0 {
-				fields["conflictObject"] = string(evicted[0].instanceHash)
+				fields["conflictObject"] = evicted[0].instanceHash.String()
 				fields["attemptedObjects"] = len(evicted)
 			}
 			rl.WithFields(fields).Warn("Transaction conflict during eviction, retrying with smaller batch")
@@ -592,7 +592,7 @@ func (em *EvictionManager) evictFromNamespace(rl *log.Entry, storageID StorageID
 
 		for _, obj := range evicted {
 			rl.WithFields(log.Fields{
-				"object":      string(obj.instanceHash),
+				"object":      obj.instanceHash.String(),
 				"bytes":       obj.contentLen,
 				"namespaceID": obj.namespaceID,
 			}).Debug("Evicted object")

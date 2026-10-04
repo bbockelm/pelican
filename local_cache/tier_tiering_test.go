@@ -23,7 +23,6 @@ package local_cache
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -259,7 +258,7 @@ func TestParseTierTargetsConfig(t *testing.T) {
 }
 
 func TestTierKeyLayout(t *testing.T) {
-	hash := InstanceHash("42561abfe18be8fca1dcd5b6ac0f6b6d42561abfe18be8fca1dcd5b6ac0f6b6d")
+	hash := mustInstanceHash("42561abfe18be8fca1dcd5b6ac0f6b6d42561abfe18be8fca1dcd5b6ac0f6b6d")
 	target := &tierTarget{cfg: TierTargetConfig{Bucket: "b", Prefix: "objects"}}
 
 	// Keys are prefix-relative even when a prefix is configured: the backend
@@ -272,7 +271,7 @@ func TestTierKeyLayout(t *testing.T) {
 	// The leading bytes of the key are the leading bytes of the hash, which
 	// is what makes a key-ordered listing also a hash-ordered one and lets
 	// the consistency sweep merge-join it against metadata.
-	lower := target.objectKey(InstanceHash("0" + string(hash)[1:]))
+	lower := target.objectKey(mustInstanceHash("0" + hash.String()[1:]))
 	assert.Less(t, lower, key, "key order must follow hash order")
 
 	// Non-object keys are ignored rather than mistaken for objects.
@@ -283,7 +282,7 @@ func TestTierKeyLayout(t *testing.T) {
 		"42/56",
 		"4/256/1abfe18be8fca1dcd5b6ac0f6b6d42561abfe18be8fca1dcd5b6ac0f6b6d",
 	} {
-		assert.Equal(t, InstanceHash(""), target.hashFromKey(notAnObject), "key %q", notAnObject)
+		assert.Equal(t, InstanceHash{}, target.hashFromKey(notAnObject), "key %q", notAnObject)
 	}
 }
 
@@ -356,7 +355,7 @@ func TestTierLifecycle(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
-	hash := InstanceHash(fmt.Sprintf("%064d", 1))
+	hash := testInstanceHash(1)
 	nsID := NamespaceID(1)
 	storeTestObject(t, ctx, env.storage, hash, data, env.diskID, nsID)
 	fileSize := CalculateFileSize(int64(len(data)))
@@ -498,7 +497,7 @@ func TestTierChunkedObject(t *testing.T) {
 		data[i] = byte(i % 251)
 	}
 	nsID := NamespaceID(7)
-	hash := InstanceHash(fmt.Sprintf("%064x", 0xC0FFEE))
+	hash := testInstanceHash(0xC0FFEE)
 
 	meta, err := storage.InitLazyChunkedStorage(ctx, hash, objectSize, chunkSizeCode)
 	require.NoError(t, err)
@@ -593,7 +592,7 @@ func TestTierDeferredReleaseSurvivesEviction(t *testing.T) {
 	defer cancel()
 	env := setupTierTestEnv(t, ctx)
 
-	hash := InstanceHash(fmt.Sprintf("%064d", 31))
+	hash := testInstanceHash(31)
 	nsID := NamespaceID(5)
 	reader, localPath, _ := tierWithReaderOpen(t, ctx, env, hash, nsID)
 	require.NoError(t, env.db.UpdateLRU(hash, 0)) // give it an LRU entry on the target to evict by
@@ -638,7 +637,7 @@ func TestTierDeferredReleaseRunsWhenReaderCloses(t *testing.T) {
 	}()
 	t.Cleanup(func() { cancel(); <-loopDone })
 
-	hash := InstanceHash(fmt.Sprintf("%064d", 32))
+	hash := testInstanceHash(32)
 	nsID := NamespaceID(6)
 	reader, localPath, _ := tierWithReaderOpen(t, ctx, env, hash, nsID)
 	require.NoError(t, reader.Close())
@@ -663,7 +662,7 @@ func TestTierDeferredReleaseLeavesARebornCopyAlone(t *testing.T) {
 	defer cancel()
 	env := setupTierTestEnv(t, ctx)
 
-	hash := InstanceHash(fmt.Sprintf("%064d", 33))
+	hash := testInstanceHash(33)
 	nsID := NamespaceID(7)
 	reader, localPath, data := tierWithReaderOpen(t, ctx, env, hash, nsID)
 
@@ -724,7 +723,7 @@ func TestTierRecordsTheUploadedCopy(t *testing.T) {
 	uploads := testutil.ToFloat64(tierUploadsTotal.WithLabelValues(label, tierUploadSucceeded))
 	uploadBytes := testutil.ToFloat64(tierUploadBytesTotal.WithLabelValues(label, tierUploadSucceeded))
 
-	data, meta := tierObjectForIntegrity(t, ctx, env, InstanceHash(fmt.Sprintf("%064d", 41)))
+	data, meta := tierObjectForIntegrity(t, ctx, env, testInstanceHash(41))
 	assert.Equal(t, uploads+1, testutil.ToFloat64(tierUploadsTotal.WithLabelValues(label, tierUploadSucceeded)))
 	assert.Equal(t, uploadBytes+float64(len(data)), testutil.ToFloat64(tierUploadBytesTotal.WithLabelValues(label, tierUploadSucceeded)))
 	require.NotNil(t, meta.Remote, "the uploaded copy should be recorded")
@@ -745,7 +744,7 @@ func TestTierDetectsSubstitution(t *testing.T) {
 	checker := NewConsistencyChecker(env.db, env.storage, ConsistencyConfig{})
 
 	t.Run("ProxiedReadRefusesTheChangedCopy", func(t *testing.T) {
-		hash := InstanceHash(fmt.Sprintf("%064d", 42))
+		hash := testInstanceHash(42)
 		data, meta := tierObjectForIntegrity(t, ctx, env, hash)
 		overwriteTieredCopy(t, ctx, env, hash, len(data))
 
@@ -764,7 +763,7 @@ func TestTierDetectsSubstitution(t *testing.T) {
 	})
 
 	t.Run("IntegrityScanFindsIt", func(t *testing.T) {
-		hash := InstanceHash(fmt.Sprintf("%064d", 43))
+		hash := testInstanceHash(43)
 		data, meta := tierObjectForIntegrity(t, ctx, env, hash)
 
 		ok, err := checker.VerifyObject(hash)
@@ -810,7 +809,7 @@ func TestTierPinsReadsToTheUploadedVersion(t *testing.T) {
 		t.Skipf("this MinIO cannot enable bucket versioning: %v", err)
 	}
 
-	hash := InstanceHash(fmt.Sprintf("%064d", 44))
+	hash := testInstanceHash(44)
 	data, meta := tierObjectForIntegrity(t, ctx, env, hash)
 	require.NotNil(t, meta.Remote)
 	require.NotEmpty(t, meta.Remote.Version, "a versioned bucket should report the uploaded version")
@@ -843,7 +842,7 @@ func TestTierSkipsSmallAndInlineObjects(t *testing.T) {
 
 	t.Run("BelowThreshold", func(t *testing.T) {
 		data := []byte("small object below the threshold")
-		hash := InstanceHash(fmt.Sprintf("%064d", 2))
+		hash := testInstanceHash(2)
 		storeTestObject(t, ctx, env.storage, hash, data, env.diskID, 1)
 
 		require.NoError(t, env.uploader.processObject(ctx, hash))
@@ -860,7 +859,7 @@ func TestTierSkipsSmallAndInlineObjects(t *testing.T) {
 		// content length above the threshold to prove the inline check, not
 		// the size check, is what excludes it.
 		data := []byte("inline object")
-		hash := InstanceHash(fmt.Sprintf("%064d", 3))
+		hash := testInstanceHash(3)
 		meta := &CacheMetadata{
 			ETag:          "inline-etag",
 			ContentLength: int64(len(data)),
@@ -896,7 +895,7 @@ func TestTierRelocationMovesLRUEntry(t *testing.T) {
 	env := setupTierTestEnv(t, ctx)
 
 	data := make([]byte, 2*BlockDataSize)
-	hash := InstanceHash(fmt.Sprintf("%064d", 11))
+	hash := testInstanceHash(11)
 	nsID := NamespaceID(3)
 	storeTestObject(t, ctx, env.storage, hash, data, env.diskID, nsID)
 
@@ -935,7 +934,7 @@ func TestTierDefersReleaseWhileReaderOpen(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
-	hash := InstanceHash(fmt.Sprintf("%064d", 12))
+	hash := testInstanceHash(12)
 	nsID := NamespaceID(4)
 	storeTestObject(t, ctx, env.storage, hash, data, env.diskID, nsID)
 	localPath := env.storage.getObjectPathForDir(env.diskID, hash)
@@ -989,7 +988,7 @@ func TestTierUploaderRecoveryAccounting(t *testing.T) {
 		env := setupTierTestEnv(t, ctx)
 
 		nsID := NamespaceID(5)
-		hash := InstanceHash(fmt.Sprintf("%064d", 13))
+		hash := testInstanceHash(13)
 		size := int64(4 * BlockDataSize)
 
 		// The state a crash leaves behind when the object was deleted after
@@ -1020,7 +1019,7 @@ func TestTierUploaderRecoveryAccounting(t *testing.T) {
 		env := setupTierTestEnv(t, ctx)
 
 		data := make([]byte, 2*BlockDataSize)
-		hash := InstanceHash(fmt.Sprintf("%064d", 14))
+		hash := testInstanceHash(14)
 		nsID := NamespaceID(6)
 		storeTestObject(t, ctx, env.storage, hash, data, env.diskID, nsID)
 		localPath := env.storage.getObjectPathForDir(env.diskID, hash)
@@ -1067,7 +1066,7 @@ func TestTierConcurrentWorkers(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251)
 	}
-	hash := InstanceHash(fmt.Sprintf("%064d", 15))
+	hash := testInstanceHash(15)
 	nsID := NamespaceID(7)
 	storeTestObject(t, ctx, env.storage, hash, data, env.diskID, nsID)
 
@@ -1126,13 +1125,13 @@ func TestEvictionDrainsPastHeldNamespace(t *testing.T) {
 	heldNS, freeNS := NamespaceID(21), NamespaceID(22)
 	var heldHashes []InstanceHash
 	for i := 0; i < 3; i++ {
-		h := InstanceHash(fmt.Sprintf("%064d", 30+i))
+		h := testInstanceHash(30 + i)
 		storeTestObject(t, ctx, env.storage, h, data, env.diskID, heldNS)
 		require.NoError(t, env.uploader.processObject(ctx, h))
 		require.NoError(t, env.db.UpdateLRU(h, 0))
 		heldHashes = append(heldHashes, h)
 	}
-	freeHash := InstanceHash(fmt.Sprintf("%064d", 40))
+	freeHash := testInstanceHash(40)
 	storeTestObject(t, ctx, env.storage, freeHash, data, env.diskID, freeNS)
 	require.NoError(t, env.uploader.processObject(ctx, freeHash))
 	require.NoError(t, env.db.UpdateLRU(freeHash, 0))
@@ -1172,7 +1171,7 @@ func TestParseInstanceHash(t *testing.T) {
 	valid := strings.Repeat("0123456789abcdef", 4)
 	hash, err := ParseInstanceHash(valid)
 	require.NoError(t, err)
-	assert.Equal(t, InstanceHash(valid), hash)
+	assert.Equal(t, mustInstanceHash(valid), hash)
 
 	for _, bad := range []string{
 		"",
@@ -1199,11 +1198,11 @@ func TestParseChunkFilenameRefusesStrayFiles(t *testing.T) {
 		chunk int
 		ok    bool
 	}{
-		{valid, InstanceHash(valid), 0, true},
-		{valid + "-3", InstanceHash(valid), 2, true},
-		{"notes.txt", "", 0, false},
-		{"notes-2", "", 0, false},
-		{valid + ".tmp", "", 0, false},
+		{valid, mustInstanceHash(valid), 0, true},
+		{valid + "-3", mustInstanceHash(valid), 2, true},
+		{"notes.txt", InstanceHash{}, 0, false},
+		{"notes-2", InstanceHash{}, 0, false},
+		{valid + ".tmp", InstanceHash{}, 0, false},
 	} {
 		hash, chunk, ok := ParseChunkFilename(tt.name)
 		assert.Equal(t, tt.ok, ok, tt.name)
@@ -1320,7 +1319,7 @@ func TestTierUploaderRecovery(t *testing.T) {
 	env := setupTierTestEnv(t, ctx)
 
 	data := make([]byte, 8192)
-	hash := InstanceHash(fmt.Sprintf("%064d", 3))
+	hash := testInstanceHash(3)
 	nsID := NamespaceID(1)
 	storeTestObject(t, ctx, env.storage, hash, data, env.diskID, nsID)
 	fileSize := CalculateFileSize(int64(len(data)))
@@ -1767,7 +1766,7 @@ func TestTierRedirectServing(t *testing.T) {
 // allTierIntents returns every recorded upload intent, keyed by hash.
 func allTierIntents(t *testing.T, db *CacheDB) map[InstanceHash]*TierUploadIntent {
 	t.Helper()
-	page, err := db.ListTierUploadIntents("", 1<<20)
+	page, err := db.ListTierUploadIntents(InstanceHash{}, 1<<20)
 	require.NoError(t, err)
 	intents := make(map[InstanceHash]*TierUploadIntent, len(page))
 	for _, e := range page {
@@ -1875,16 +1874,16 @@ func TestTierConsistencySweep(t *testing.T) {
 
 	// A valid tiered object that must survive both sweeps.
 	keepData := make([]byte, 4096)
-	keepHash := InstanceHash(fmt.Sprintf("%064d", 4))
+	keepHash := testInstanceHash(4)
 	storeTestObject(t, ctx, env.storage, keepHash, keepData, env.diskID, nsID)
 	require.NoError(t, env.uploader.processObject(ctx, keepHash))
 
 	// A stray bucket object with no metadata.
-	strayHash := InstanceHash(fmt.Sprintf("%064d", 5))
+	strayHash := testInstanceHash(5)
 	require.NoError(t, discardInfo(env.target.uploadObject(ctx, strayHash, "", 128, newZeroReader(128))))
 
 	// An S3-resident DB entry whose bucket object is missing.
-	ghostHash := InstanceHash(fmt.Sprintf("%064d", 6))
+	ghostHash := testInstanceHash(6)
 	require.NoError(t, env.db.SetMetadata(ghostHash, &CacheMetadata{
 		ContentLength: 2048,
 		SourceURL:     "pelican://example.com/ghost",

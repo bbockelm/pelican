@@ -21,17 +21,9 @@ package local_cache
 import (
 	"os"
 	"path/filepath"
-	"regexp"
 
 	"github.com/pkg/errors"
 )
-
-// hexHashPattern matches a non-empty hexadecimal string.  Instance/object
-// hashes are hex-encoded HMAC-SHA256 digests, so validating a hash against this
-// (anchored) pattern before it is used to build a filesystem path prevents path
-// traversal from a caller-supplied instance value — a hex-only string cannot
-// contain a path separator or "..".
-var hexHashPattern = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 
 // ChaosInjector injects corruption into a running cache's already-open
 // database and storage, for fault-injection ("chaos") testing of the cache's
@@ -76,13 +68,13 @@ func (ci *ChaosInjector) resolveInstanceHash(objectURL, etag, instanceHash strin
 	if instanceHash != "" {
 		parsed, err := ParseInstanceHash(instanceHash)
 		if err != nil {
-			return "", nil, err
+			return InstanceHash{}, nil, err
 		}
 		hash = parsed
 	} else {
 		normalized := NormalizePelicanURL(objectURL)
 		if normalized == "" {
-			return "", nil, errors.New("either an object URL or an instance hash is required")
+			return InstanceHash{}, nil, errors.New("either an object URL or an instance hash is required")
 		}
 		objectHash := ci.db.ObjectHash(normalized)
 		if etag == "" {
@@ -90,27 +82,21 @@ func (ci *ChaosInjector) resolveInstanceHash(objectURL, etag, instanceHash strin
 			var err error
 			etag, found, err = ci.db.GetLatestETag(objectHash)
 			if err != nil {
-				return "", nil, errors.Wrap(err, "failed to get latest ETag")
+				return InstanceHash{}, nil, errors.Wrap(err, "failed to get latest ETag")
 			}
 			if !found {
-				return "", nil, errors.New("no cached version found for this object")
+				return InstanceHash{}, nil, errors.New("no cached version found for this object")
 			}
 		}
 		hash = ci.db.InstanceHash(etag, objectHash)
 	}
 
-	// Guard against path traversal from a caller-supplied instance hash before
-	// the hash is ever used to construct a filesystem path.
-	if !hexHashPattern.MatchString(string(hash)) {
-		return "", nil, errors.Errorf("invalid instance hash %q: must be hexadecimal", hash)
-	}
-
 	meta, err := ci.storage.GetMetadata(hash)
 	if err != nil {
-		return "", nil, errors.Wrap(err, "failed to read object metadata")
+		return InstanceHash{}, nil, errors.Wrap(err, "failed to read object metadata")
 	}
 	if meta == nil {
-		return "", nil, errors.Errorf("no cached object found for instance %s", hash)
+		return InstanceHash{}, nil, errors.Errorf("no cached object found for instance %s", hash)
 	}
 	return hash, meta, nil
 }
@@ -224,7 +210,7 @@ func (ci *ChaosInjector) CorruptBlock(objectURL, etag, instanceHash string, bloc
 	}
 
 	return &ChaosResult{
-		InstanceHash: string(hash),
+		InstanceHash: hash.String(),
 		SourceURL:    meta.SourceURL,
 		ETag:         meta.ETag,
 		Operation:    "corrupt-block",
@@ -292,7 +278,7 @@ func (ci *ChaosInjector) TruncateObject(objectURL, etag, instanceHash string, ch
 	}
 
 	return &ChaosResult{
-		InstanceHash: string(hash),
+		InstanceHash: hash.String(),
 		SourceURL:    meta.SourceURL,
 		ETag:         meta.ETag,
 		Operation:    "truncate",

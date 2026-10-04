@@ -116,7 +116,7 @@ const (
 
 // garbageInstanceKey returns the queue key for an object version.
 func garbageInstanceKey(h local_cache.InstanceHash) []byte {
-	return []byte(local_cache.PrefixGarbage + garbageKindInstance + string(h))
+	return []byte(local_cache.PrefixGarbage + garbageKindInstance + h.String())
 }
 
 // garbageSubtreeKey returns the queue key for a detached subtree.
@@ -127,7 +127,7 @@ func garbageSubtreeKey(cleanPath string) []byte {
 // enqueueInstance queues an object version for reclamation.  It must be called
 // inside the transaction that makes the version unreachable.
 func enqueueInstance(txn *badger.Txn, h local_cache.InstanceHash) error {
-	if h == "" {
+	if h.IsZero() {
 		return nil
 	}
 	return errors.Wrapf(txn.Set(garbageInstanceKey(h), nil),
@@ -138,7 +138,7 @@ func enqueueInstance(txn *badger.Txn, h local_cache.InstanceHash) error {
 // inside the transaction that makes the version reachable, so that a version is
 // never simultaneously reachable and scheduled for reclamation.
 func dequeueInstance(txn *badger.Txn, h local_cache.InstanceHash) error {
-	if h == "" {
+	if h.IsZero() {
 		return nil
 	}
 	return errors.Wrapf(txn.Delete(garbageInstanceKey(h)),
@@ -479,7 +479,7 @@ func newQueuedInstance(hash string) queuedInstance {
 // caller can learn that a version is on the queue without ever holding
 // something it could delete.  See queuedCursor.
 func (q queuedInstance) compare(h local_cache.InstanceHash) int {
-	return strings.Compare(q.unsafeHash, string(h))
+	return strings.Compare(q.unsafeHash, h.String())
 }
 
 // claim runs the interlock that separates the queue's two meanings, and yields
@@ -507,18 +507,24 @@ func (q queuedInstance) compare(h local_cache.InstanceHash) int {
 // through.  The cost is unchanged: a pinned entry returns before any database
 // read, and every other entry costs the single re-read it always did.
 func (q queuedInstance) claim(s *Store) (local_cache.InstanceHash, reclaimOutcome, error) {
-	h := local_cache.InstanceHash(q.unsafeHash)
+	// The queue holds only keys this store wrote, but a key that is not an
+	// instance hash names no version it could delete: report it rather
+	// than act on it, and leave the entry for an operator.
+	h, err := local_cache.ParseInstanceHash(q.unsafeHash)
+	if err != nil {
+		return local_cache.InstanceHash{}, reclaimWithdrawn, errors.Wrap(err, "malformed reclamation queue entry")
+	}
 
 	if s.storage.IsObjectPinned(h) {
-		return "", reclaimPinned, nil
+		return local_cache.InstanceHash{}, reclaimPinned, nil
 	}
 
 	stillQueued, err := s.instanceQueued(h)
 	if err != nil {
-		return "", reclaimWithdrawn, err
+		return local_cache.InstanceHash{}, reclaimWithdrawn, err
 	}
 	if !stillQueued {
-		return "", reclaimWithdrawn, nil
+		return local_cache.InstanceHash{}, reclaimWithdrawn, nil
 	}
 	return h, reclaimEligible, nil
 }

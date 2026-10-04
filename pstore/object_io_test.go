@@ -1171,9 +1171,12 @@ func assertOnlyInstancesRemain(t *testing.T, s *Store, want ...local_cache.Insta
 		defer it.Close()
 
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			h := local_cache.InstanceHash(it.Item().Key()[len(prefix):])
+			h, err := local_cache.InstanceHashFromKey(it.Item().Key(), local_cache.PrefixMeta)
+			if err != nil {
+				return err
+			}
 			if !wanted[h] {
-				surplus = append(surplus, string(h))
+				surplus = append(surplus, h.String())
 			}
 		}
 		return nil
@@ -1235,7 +1238,7 @@ func TestJanitorReclaimsAbandonedStreamingWrites(t *testing.T) {
 	// the append sweep has to exist.
 	instances, _, _, err := s2.collectGarbage()
 	require.NoError(t, err)
-	require.NotContains(t, instances, newQueuedInstance(string(hash)))
+	require.NotContains(t, instances, newQueuedInstance(hash.String()))
 
 	// A pass at the real grace period leaves it alone: an upload that is
 	// merely slow must never be deleted out from under its client.

@@ -1753,7 +1753,7 @@ func (pc *PersistentCache) introspectEtagsHandler(c *gin.Context) {
 			expires = meta.ComputeExpires()
 		}
 		instances = append(instances, ObjectInstance{
-			InstanceHash:  string(instanceHash),
+			InstanceHash:  instanceHash.String(),
 			ETag:          meta.ETag,
 			SourceURL:     meta.SourceURL,
 			ContentLength: meta.ContentLength,
@@ -1805,7 +1805,7 @@ func (pc *PersistentCache) introspectMetadataHandler(c *gin.Context) {
 				return
 			}
 		}
-		instanceHashStr = string(pc.db.InstanceHash(etag, objectHash))
+		instanceHashStr = pc.db.InstanceHash(etag, objectHash).String()
 	}
 
 	hash, err := ParseInstanceHash(instanceHashStr)
@@ -1915,7 +1915,7 @@ func (pc *PersistentCache) introspectVerifyHandler(c *gin.Context) {
 				return
 			}
 		}
-		instanceHashStr = string(pc.db.InstanceHash(etag, objectHash))
+		instanceHashStr = pc.db.InstanceHash(etag, objectHash).String()
 	}
 
 	hash, err := ParseInstanceHash(instanceHashStr)

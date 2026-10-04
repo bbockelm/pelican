@@ -207,17 +207,17 @@ func TestFsckDetectsOrphanedInstance(t *testing.T) {
 	// test waives it explicitly.
 	graced, err := s.Fsck(t.Context(), false)
 	require.NoError(t, err)
-	assert.NotContains(t, graced.OrphanedInstances, string(hash),
+	assert.NotContains(t, graced.OrphanedInstances, hash.String(),
 		"a version this young could still be a write in flight")
-	assert.Contains(t, graced.PendingInstances, string(hash))
+	assert.Contains(t, graced.PendingInstances, hash.String())
 
 	report, err := s.FsckWith(t.Context(), FsckOptions{MinAge: FsckNoGracePeriod})
 	require.NoError(t, err)
-	assert.Contains(t, report.OrphanedInstances, string(hash))
+	assert.Contains(t, report.OrphanedInstances, hash.String())
 
 	report, err = s.FsckWith(t.Context(), FsckOptions{Repair: true, MinAge: FsckNoGracePeriod})
 	require.NoError(t, err)
-	require.Contains(t, report.OrphanedInstances, string(hash))
+	require.Contains(t, report.OrphanedInstances, hash.String())
 
 	// Repair queues it rather than deleting inline, so reclamation still
 	// respects reader pins.
@@ -248,7 +248,16 @@ func TestFsckIgnoresQueuedInstances(t *testing.T) {
 // ascending n gives ascending BadgerDB key order, which is what the queue
 // cursor's merge depends on.
 func synthHash(n int) local_cache.InstanceHash {
-	return local_cache.InstanceHash(fmt.Sprintf("%064x", n))
+	return mustHash(fmt.Sprintf("%064x", n))
+}
+
+// mustHash parses a literal instance hash, panicking if it is malformed.
+func mustHash(s string) local_cache.InstanceHash {
+	h, err := local_cache.ParseInstanceHash(s)
+	if err != nil {
+		panic(err)
+	}
+	return h
 }
 
 // enqueueSynthetic puts hashes on the reclamation queue directly, without the
@@ -306,8 +315,8 @@ func TestQueuedCursorMergesAcrossBatches(t *testing.T) {
 func TestQueuedCursorHonorsShard(t *testing.T) {
 	s := newTestStore(t)
 
-	inShard := local_cache.InstanceHash("a" + fmt.Sprintf("%063x", 1))
-	outOfShard := local_cache.InstanceHash("b" + fmt.Sprintf("%063x", 1))
+	inShard := mustHash("a" + fmt.Sprintf("%063x", 1))
+	outOfShard := mustHash("b" + fmt.Sprintf("%063x", 1))
 	enqueueSynthetic(t, s, []local_cache.InstanceHash{inShard, outOfShard})
 
 	c := s.newQueuedCursor(t.Context(), "a")
@@ -343,7 +352,7 @@ func TestFsckIgnoresQueuedInstancesWithALargeQueue(t *testing.T) {
 	for i := range fsckBatchSize * 3 {
 		filler = append(filler, synthHash(i))
 		filler = append(filler,
-			local_cache.InstanceHash("f"+fmt.Sprintf("%063x", i)))
+			mustHash("f"+fmt.Sprintf("%063x", i)))
 	}
 	enqueueSynthetic(t, s, filler)
 
@@ -856,7 +865,7 @@ func TestFsckShardedOrphanScanCoversEverything(t *testing.T) {
 		writeObject(t, s, name, randomBytes(64, int64(i)))
 		d, err := s.Stat(name)
 		require.NoError(t, err)
-		want[string(instanceHashFor(s.db, d.Generation))] = true
+		want[instanceHashFor(s.db, d.Generation).String()] = true
 		require.NoError(t, s.bdb.Update(func(txn *badger.Txn) error {
 			return deleteDirent(txn, name)
 		}))
@@ -916,8 +925,8 @@ func dataScanInconsistentTotal(t *testing.T) float64 {
 func TestTruncateHashIsDeterministicAndDistinct(t *testing.T) {
 	t.Parallel()
 
-	a := local_cache.InstanceHash(strings.Repeat("a1b2c3d4", 8))
-	b := local_cache.InstanceHash(strings.Repeat("f9e8d7c6", 8))
+	a := mustHash(strings.Repeat("a1b2c3d4", 8))
+	b := mustHash(strings.Repeat("f9e8d7c6", 8))
 
 	require.Equal(t, truncateHash(a), truncateHash(a),
 		"the same hash must always produce the same key, or a live version could go missing")
@@ -927,11 +936,13 @@ func TestTruncateHashIsDeterministicAndDistinct(t *testing.T) {
 	// collide. That is the accepted failure mode, and it is one-directional:
 	// it can only hide an orphan.
 	shared := strings.Repeat("ab", 16)
-	c := local_cache.InstanceHash(shared + strings.Repeat("00", 16))
-	d := local_cache.InstanceHash(shared + strings.Repeat("ff", 16))
+	c := mustHash(shared + strings.Repeat("00", 16))
+	d := mustHash(shared + strings.Repeat("ff", 16))
 	require.Equal(t, truncateHash(c), truncateHash(d),
 		"a 128-bit prefix collision is expected; the safety argument is the direction, not the odds")
 
-	// A malformed hash must not silently alias onto a well-formed one.
-	require.NotEqual(t, truncateHash(a), truncateHash(local_cache.InstanceHash("not-hex")))
+	// A malformed hash cannot be constructed at all (local_cache.InstanceHash
+	// validates), so the only other input is the zero value, which no
+	// reachable version has.
+	require.NotEqual(t, truncateHash(a), truncateHash(local_cache.InstanceHash{}))
 }

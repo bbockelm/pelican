@@ -64,7 +64,7 @@ func instanceHashFor(db *local_cache.CacheDB, generation string) local_cache.Ins
 	h := hmac.New(sha256.New, db.Salt())
 	h.Write([]byte("gen:"))
 	h.Write([]byte(generation))
-	return local_cache.InstanceHash(hex.EncodeToString(h.Sum(nil)))
+	return local_cache.InstanceHashFromSHA256([sha256.Size]byte(h.Sum(nil)))
 }
 
 // etagFor renders a generation as a strong HTTP entity tag.

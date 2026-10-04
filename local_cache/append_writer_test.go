@@ -21,8 +21,6 @@ package local_cache
 import (
 	"bytes"
 	"context"
-	crand "crypto/rand"
-	"encoding/hex"
 	"io"
 	"io/fs"
 	"math/rand"
@@ -70,7 +68,7 @@ func appendAndVerify(t *testing.T, sm *StorageManager, chunkSize uint64, size in
 	ctx := t.Context()
 
 	sizeCode := BytesToChunkSizeCode(chunkSize)
-	hash := InstanceHash(randomHexForTest(t, 32))
+	hash := randomInstanceHash(t)
 
 	data := make([]byte, size)
 	rng := rand.New(rand.NewSource(size))
@@ -103,20 +101,6 @@ func appendAndVerify(t *testing.T, sm *StorageManager, chunkSize uint64, size in
 	require.NoError(t, err)
 	require.Equal(t, size, int64(len(got)), "read back the same number of bytes")
 	assert.True(t, bytes.Equal(data, got), "round-tripped content must match")
-}
-
-// randomHexForTest returns a fresh 2n-character hex string.
-//
-// It must actually be random, not derived from n: every caller passes the same
-// n, so a deterministic string would hand every subtest of every table-driven
-// test below the same instance hash in a shared store.  Each would silently
-// overwrite its predecessor, and no assertion here could notice.
-func randomHexForTest(t *testing.T, n int) string {
-	t.Helper()
-	buf := make([]byte, n)
-	_, err := crand.Read(buf)
-	require.NoError(t, err)
-	return hex.EncodeToString(buf)
 }
 
 // countStoredFiles returns the number of regular files across every configured
@@ -201,7 +185,7 @@ func TestAppendWriterRefundsOverAllocation(t *testing.T) {
 
 	const chunkSize = 2 * 1024 * 1024
 	sizeCode := BytesToChunkSizeCode(chunkSize)
-	hash := InstanceHash(randomHexForTest(t, 31))
+	hash := randomInstanceHash(t)
 	nsID := NamespaceID(7)
 
 	w, err := sm.NewAppendWriter(t.Context(), hash, nsID, sizeCode)
@@ -234,7 +218,7 @@ func TestAppendWriterAbort(t *testing.T) {
 	db, sm := newAppendTestStorage(t, 1)
 
 	sizeCode := BytesToChunkSizeCode(2 * 1024 * 1024)
-	hash := InstanceHash(randomHexForTest(t, 32))
+	hash := randomInstanceHash(t)
 
 	baselineUsage := totalDirUsage(t, db, StorageIDFirstDisk)
 	baselineFiles := countStoredFiles(t, sm)
@@ -269,7 +253,7 @@ func TestAppendWriterRejectsUseAfterFinalize(t *testing.T) {
 	_, sm := newAppendTestStorage(t, 1)
 
 	sizeCode := BytesToChunkSizeCode(2 * 1024 * 1024)
-	hash := InstanceHash(randomHexForTest(t, 32))
+	hash := randomInstanceHash(t)
 
 	w, err := sm.NewAppendWriter(t.Context(), hash, NamespaceID(1), sizeCode)
 	require.NoError(t, err)
@@ -287,7 +271,7 @@ func TestAppendWriterRejectsUseAfterFinalize(t *testing.T) {
 func TestAppendWriterRejectsChunkingDisabled(t *testing.T) {
 	_, sm := newAppendTestStorage(t, 1)
 
-	_, err := sm.NewAppendWriter(t.Context(), InstanceHash(randomHexForTest(t, 32)),
+	_, err := sm.NewAppendWriter(t.Context(), randomInstanceHash(t),
 		NamespaceID(1), ChunkingDisabled)
 	assert.ErrorContains(t, err, "requires chunking enabled")
 }
@@ -303,7 +287,7 @@ func TestAppendWriterZeroByteObject(t *testing.T) {
 	db, sm := newAppendTestStorage(t, 1)
 
 	sizeCode := BytesToChunkSizeCode(2 * 1024 * 1024)
-	hash := InstanceHash(randomHexForTest(t, 32))
+	hash := randomInstanceHash(t)
 
 	w, err := sm.NewAppendWriter(t.Context(), hash, NamespaceID(1), sizeCode)
 	require.NoError(t, err)
@@ -369,7 +353,7 @@ func TestAppendWriterCompletedOnlyAtFinalize(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hash := InstanceHash(randomHexForTest(t, 32))
+			hash := randomInstanceHash(t)
 			w, err := sm.NewAppendWriter(t.Context(), hash, NamespaceID(1), sizeCode)
 			require.NoError(t, err)
 
@@ -410,7 +394,7 @@ func TestReclaimAbandonedAppends(t *testing.T) {
 
 	const chunkSize = 2 * 1024 * 1024
 	sizeCode := BytesToChunkSizeCode(chunkSize)
-	hash := InstanceHash(randomHexForTest(t, 32))
+	hash := randomInstanceHash(t)
 
 	baselineUsage := totalDirUsage(t, db, StorageIDFirstDisk)
 	baselineFiles := countStoredFiles(t, sm)
@@ -465,7 +449,7 @@ func TestReclaimAbandonedAppendsKeepsFinishedObjects(t *testing.T) {
 	db, sm := newAppendTestStorage(t, 1)
 
 	sizeCode := BytesToChunkSizeCode(2 * 1024 * 1024)
-	hash := InstanceHash(randomHexForTest(t, 32))
+	hash := randomInstanceHash(t)
 
 	w, err := sm.NewAppendWriter(t.Context(), hash, NamespaceID(1), sizeCode)
 	require.NoError(t, err)
@@ -497,7 +481,7 @@ func TestReclaimAbandonedAppendsHonorsMinAge(t *testing.T) {
 	db, sm := newAppendTestStorage(t, 1)
 
 	sizeCode := BytesToChunkSizeCode(2 * 1024 * 1024)
-	hash := InstanceHash(randomHexForTest(t, 32))
+	hash := randomInstanceHash(t)
 
 	w, err := sm.NewAppendWriter(t.Context(), hash, NamespaceID(1), sizeCode)
 	require.NoError(t, err)
@@ -530,7 +514,7 @@ func TestAppendWriterWriteReportsBytesOnError(t *testing.T) {
 	_, sm := newAppendTestStorage(t, 1)
 
 	sizeCode := BytesToChunkSizeCode(2 * 1024 * 1024)
-	hash := InstanceHash(randomHexForTest(t, 32))
+	hash := randomInstanceHash(t)
 
 	w, err := sm.NewAppendWriter(t.Context(), hash, NamespaceID(1), sizeCode)
 	require.NoError(t, err)

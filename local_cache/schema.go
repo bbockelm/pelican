@@ -33,20 +33,158 @@ import (
 	"golang.org/x/net/idna"
 
 	"github.com/pkg/errors"
+	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/utils"
 )
 
 // ObjectHash is an HMAC-SHA-256 digest that identifies a logical object
-// (URL) regardless of version or ETag.  Using a dedicated type prevents
-// accidental confusion with InstanceHash or arbitrary strings.
-type ObjectHash string
+// (URL) regardless of version or ETag.
+//
+// It is a struct, not a defined string type, so that the only way to hold one
+// is to compute it (ComputeObjectHash): a string cannot be converted into an
+// ObjectHash, so arbitrary input can never be mistaken for one, nor can an
+// ObjectHash be confused with an InstanceHash.  It is comparable and may be
+// used as a map key; the zero value is "no hash".
+type ObjectHash struct {
+	hex string
+}
+
+// String returns the hash as 64 lowercase hex digits -- the form used in
+// database keys.  fmt's %s and %v print the same.
+func (h ObjectHash) String() string { return h.hex }
+
+// IsZero reports whether h is the zero value rather than a computed hash.
+func (h ObjectHash) IsZero() bool { return h.hex == "" }
+
+// MarshalText encodes the hash as its hex text.  It, UnmarshalText,
+// EncodeMsgpack and DecodeMsgpack make an ObjectHash serialize exactly as the
+// string type it replaced: see the matching InstanceHash methods.
+func (h ObjectHash) MarshalText() ([]byte, error) { return []byte(h.hex), nil }
+
+// UnmarshalText decodes hex text, validating it.  Empty is the zero value.
+func (h *ObjectHash) UnmarshalText(text []byte) error {
+	s, err := parseHashHex("object", string(text))
+	if err != nil {
+		return err
+	}
+	*h = ObjectHash{hex: s}
+	return nil
+}
+
+// EncodeMsgpack writes the hash as a msgpack str.
+func (h ObjectHash) EncodeMsgpack(enc *msgpack.Encoder) error { return enc.EncodeString(h.hex) }
+
+// DecodeMsgpack reads a hash written as a msgpack str, validating it.
+func (h *ObjectHash) DecodeMsgpack(dec *msgpack.Decoder) error {
+	s, err := dec.DecodeString()
+	if err != nil {
+		return err
+	}
+	return h.UnmarshalText([]byte(s))
+}
 
 // InstanceHash is an HMAC-SHA-256 digest that identifies a specific
-// version (ETag) of an object.  Using a dedicated type prevents
-// accidental confusion with ObjectHash or arbitrary strings.
-type InstanceHash string
+// version (ETag) of an object.  It names the object's files on disk
+// (GetInstanceStoragePath), its keys on a tiering target, and its records in
+// the database.
+//
+// It is a struct rather than a defined string type so that an InstanceHash
+// cannot be made without validation: a defined string type converts from any
+// string in one token, and an unchecked string that reaches a path or key
+// constructor (a "../" in a request, a stray key in a listing) names the wrong
+// file.  Every non-zero InstanceHash is therefore 64 lowercase hex digits,
+// and comes from one of:
+//
+//   - ComputeInstanceHash / InstanceHashFromSHA256, for a hash the caller
+//     derives itself;
+//   - ParseInstanceHash, for one read from anywhere else -- a request, a
+//     directory listing, a bucket key;
+//   - InstanceHashFromKey, for one read back out of a database key.
+//
+// The hex text is kept rather than the raw digest because every consumer --
+// database keys, paths, logs -- wants the text, and because ordering by the
+// text (Compare) is the order the database keys and the tiering target's
+// listings sort in.
+//
+// It is comparable and may be used as a map key.  The zero value means "no
+// hash"; it sorts before every real hash, so it is also the natural start
+// cursor for a paged scan.
+type InstanceHash struct {
+	hex string
+}
+
+// String returns the hash as 64 lowercase hex digits (or "" for the zero
+// value) -- the encoding used in database keys and on disk.  fmt's %s and %v
+// print the same.
+func (h InstanceHash) String() string { return h.hex }
+
+// IsZero reports whether h is the zero value rather than a real hash.
+func (h InstanceHash) IsZero() bool { return h.hex == "" }
+
+// Compare orders two hashes, returning -1, 0, or +1.  It is the order of the
+// hex text, which is the order database keys and tiering-target listings
+// sort in (the hex digits are ASCII-ordered, so this is also the order of
+// the underlying digests); merge-joins over those depend on it.
+func (h InstanceHash) Compare(other InstanceHash) int {
+	return strings.Compare(h.hex, other.hex)
+}
+
+// MarshalText encodes the hash as its hex text, so an InstanceHash in JSON or
+// a structured log field is the string it always was rather than "{}".
+//
+// Together with EncodeMsgpack this makes a hash field serialize byte for byte
+// as a string field would: a record written with one can be read with the
+// other, so a field may change between the two types without a schema
+// change.
+func (h InstanceHash) MarshalText() ([]byte, error) {
+	return []byte(h.hex), nil
+}
+
+// UnmarshalText decodes hex text, validating it as ParseInstanceHash does.
+// An empty input decodes to the zero value.
+func (h *InstanceHash) UnmarshalText(text []byte) error {
+	s, err := parseHashHex("instance", string(text))
+	if err != nil {
+		return err
+	}
+	*h = InstanceHash{hex: s}
+	return nil
+}
+
+// EncodeMsgpack writes the hash as a msgpack str.  Without it msgpack would
+// use MarshalText and write bin, which a string field does not decode.
+func (h InstanceHash) EncodeMsgpack(enc *msgpack.Encoder) error {
+	return enc.EncodeString(h.hex)
+}
+
+// DecodeMsgpack reads a hash written as a msgpack str (or nil, the zero
+// value), validating it.
+func (h *InstanceHash) DecodeMsgpack(dec *msgpack.Decoder) error {
+	s, err := dec.DecodeString()
+	if err != nil {
+		return err
+	}
+	return h.UnmarshalText([]byte(s))
+}
+
+// parseHashHex validates the text form shared by both hash types: empty (the
+// zero value) or 64 lowercase hex digits.
+func parseHashHex(kind, s string) (string, error) {
+	if s == "" {
+		return "", nil
+	}
+	if len(s) != instanceHashLen {
+		return "", errors.Errorf("invalid %s hash %q: want %d hex digits", kind, s, instanceHashLen)
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return "", errors.Errorf("invalid %s hash %q: want %d hex digits", kind, s, instanceHashLen)
+		}
+	}
+	return s, nil
+}
 
 // instanceHashLen is the length of an instance hash: hex-encoded SHA-256.
 const instanceHashLen = 2 * sha256.Size
@@ -56,15 +194,40 @@ const instanceHashLen = 2 * sha256.Size
 // files and remote objects, so one taken from outside the cache (a request,
 // a directory listing, a bucket key) must go through here.
 func ParseInstanceHash(s string) (InstanceHash, error) {
-	if len(s) != instanceHashLen {
-		return "", errors.Errorf("invalid instance hash %q: want %d hex digits", s, instanceHashLen)
+	if s == "" {
+		return InstanceHash{}, errors.Errorf("invalid instance hash %q: want %d hex digits", s, instanceHashLen)
 	}
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
-			return "", errors.Errorf("invalid instance hash %q: want %d hex digits", s, instanceHashLen)
-		}
+	hexText, err := parseHashHex("instance", s)
+	if err != nil {
+		return InstanceHash{}, err
 	}
-	return InstanceHash(s), nil
+	return InstanceHash{hex: hexText}, nil
+}
+
+// InstanceHashFromKey extracts the instance hash from a database key of the
+// form prefix + hash (MetaKey, StateKey, TierUploadIntentKey, ...).
+//
+// These are keys the cache wrote itself, but the hash is validated anyway,
+// for the same price as ParseInstanceHash (64 byte compares, nothing next to
+// reading the key out of BadgerDB).  The database is shared with pstore and
+// survives across binary versions, and a key that is not what this code
+// expects -- corruption, a bug, a different writer -- would otherwise become
+// a path under a storage directory.  Validating here keeps the type's
+// invariant unconditional: there is no way at all to hold an unchecked
+// InstanceHash, so nothing downstream has to wonder.
+func InstanceHashFromKey(key []byte, prefix string) (InstanceHash, error) {
+	if len(key) < len(prefix) || string(key[:len(prefix)]) != prefix {
+		return InstanceHash{}, errors.Errorf("key %q does not have prefix %q", key, prefix)
+	}
+	return ParseInstanceHash(string(key[len(prefix):]))
+}
+
+// InstanceHashFromSHA256 wraps a SHA-256 (or HMAC-SHA-256) digest the caller
+// computed itself.  The array type guarantees the length, so this cannot
+// fail.  ComputeInstanceHash uses it; pstore, which derives its storage keys
+// from a generation token rather than an ETag, does too.
+func InstanceHashFromSHA256(digest [sha256.Size]byte) InstanceHash {
+	return InstanceHash{hex: hex.EncodeToString(digest[:])}
 }
 
 // Key prefixes for BadgerDB.
@@ -844,7 +1007,7 @@ func ComputeObjectHash(salt []byte, pelicanURL string) ObjectHash {
 	normalized := normalizeURL(pelicanURL)
 	h := hmac.New(sha256.New, salt)
 	h.Write([]byte(normalized))
-	return ObjectHash(hex.EncodeToString(h.Sum(nil)))
+	return ObjectHash{hex: hex.EncodeToString(h.Sum(nil))}
 }
 
 // ComputeInstanceHash computes HMAC-SHA-256(salt, etag + ":" + objectHash).
@@ -854,8 +1017,8 @@ func ComputeInstanceHash(salt []byte, etag string, objectHash ObjectHash) Instan
 	h := hmac.New(sha256.New, salt)
 	h.Write([]byte(etag))
 	h.Write([]byte{':'})
-	h.Write([]byte(objectHash))
-	return InstanceHash(hex.EncodeToString(h.Sum(nil)))
+	h.Write([]byte(objectHash.hex))
+	return InstanceHashFromSHA256([sha256.Size]byte(h.Sum(nil)))
 }
 
 // normalizeURL normalizes a pelican URL for consistent hashing.
@@ -932,31 +1095,32 @@ func normalizeHost(host string) string {
 // GetInstanceStoragePath returns the 2-level directory path for storing a file
 // Given hash "42561abfe18be...", returns "42/56/1abfe18be..."
 func GetInstanceStoragePath(hash InstanceHash) string {
-	if len(hash) < 4 {
-		return string(hash)
+	h := hash.hex
+	if len(h) < 4 {
+		return h
 	}
-	return fmt.Sprintf("%s/%s/%s", hash[0:2], hash[2:4], hash[4:])
+	return h[0:2] + "/" + h[2:4] + "/" + h[4:]
 }
 
 // MetaKey returns the BadgerDB key for metadata
 func MetaKey(instanceHash InstanceHash) []byte {
-	return []byte(PrefixMeta + string(instanceHash))
+	return []byte(PrefixMeta + instanceHash.hex)
 }
 
 // StateKey returns the BadgerDB key for block state bitmap
 func StateKey(instanceHash InstanceHash) []byte {
-	return []byte(PrefixState + string(instanceHash))
+	return []byte(PrefixState + instanceHash.hex)
 }
 
 // InlineKey returns the BadgerDB key for inline data
 func InlineKey(instanceHash InstanceHash) []byte {
-	return []byte(PrefixInline + string(instanceHash))
+	return []byte(PrefixInline + instanceHash.hex)
 }
 
 // ETagKey returns the BadgerDB key for ETag lookup
 // Maps objectHash -> latest ETag for that object
 func ETagKey(objectHash ObjectHash) []byte {
-	return []byte(PrefixETag + string(objectHash))
+	return []byte(PrefixETag + objectHash.hex)
 }
 
 // NamespaceKey returns the BadgerDB key for a namespace prefix mapping
@@ -966,7 +1130,7 @@ func NamespaceKey(prefix string) []byte {
 
 // AppendIntentKey returns the BadgerDB key for an in-flight streaming append.
 func AppendIntentKey(instanceHash InstanceHash) []byte {
-	return []byte(PrefixAppendIntent + string(instanceHash))
+	return []byte(PrefixAppendIntent + instanceHash.hex)
 }
 
 // AppendIntent is the record written while an AppendWriter is building an
@@ -980,7 +1144,7 @@ type AppendIntent struct {
 // LRUKey returns the BadgerDB key for LRU tracking
 // Format: l:<storage_id>:<namespace_id>:<timestamp_ns>:<instance_hash>
 func LRUKey(storageID StorageID, namespaceID NamespaceID, timestamp time.Time, instanceHash InstanceHash) []byte {
-	return []byte(fmt.Sprintf("%s%d:%d:%019d:%s", PrefixLRU, storageID, namespaceID, timestamp.UnixNano(), string(instanceHash)))
+	return []byte(fmt.Sprintf("%s%d:%d:%019d:%s", PrefixLRU, storageID, namespaceID, timestamp.UnixNano(), instanceHash.hex))
 }
 
 // ParseLRUKey parses an LRU key and returns storageID, namespaceID, timestamp, and instanceHash
@@ -1090,19 +1254,19 @@ func ContentOffsetWithinBlock(contentOffset int64) int {
 
 // PurgeFirstKey returns the BadgerDB key for purge first tracking
 func PurgeFirstKey(instanceHash InstanceHash) []byte {
-	return []byte(PrefixPurgeFirst + string(instanceHash))
+	return []byte(PrefixPurgeFirst + instanceHash.hex)
 }
 
 // TierUploadIntentKey returns the BadgerDB key tracking an in-progress upload
 // of an object to a tiering target.
 func TierUploadIntentKey(instanceHash InstanceHash) []byte {
-	return []byte(PrefixTierUpload + string(instanceHash))
+	return []byte(PrefixTierUpload + instanceHash.hex)
 }
 
 // RedirectHoldKey returns the BadgerDB key recording the last time a pre-signed
 // URL was handed out for an object.
 func RedirectHoldKey(instanceHash InstanceHash) []byte {
-	return []byte(PrefixRedirectHold + string(instanceHash))
+	return []byte(PrefixRedirectHold + instanceHash.hex)
 }
 
 // TierTargetConfig describes one remote storage target the cache tiers

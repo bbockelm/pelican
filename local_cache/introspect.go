@@ -274,7 +274,7 @@ func (api *IntrospectAPIOpen) ListObjectInstances(objectURL string) ([]ObjectIns
 		}
 
 		instance := ObjectInstance{
-			InstanceHash:  string(instanceHash),
+			InstanceHash:  instanceHash.String(),
 			ETag:          meta.ETag,
 			SourceURL:     meta.SourceURL,
 			ContentLength: meta.ContentLength,
@@ -416,7 +416,7 @@ func (api *IntrospectAPIOpen) GetObjectDetailsByURL(objectURL, etag string) (*Ob
 	}
 
 	instanceHash := api.db.InstanceHash(etag, objectHash)
-	return api.GetObjectDetails(string(instanceHash))
+	return api.GetObjectDetails(instanceHash.String())
 }
 
 // VerifyChecksum triggers a checksum verification for the specified instance.
@@ -504,7 +504,7 @@ func (api *IntrospectAPIOpen) VerifyChecksumByURL(objectURL, etag string) (*Veri
 	}
 
 	instanceHash := api.db.InstanceHash(etag, objectHash)
-	return api.VerifyChecksum(string(instanceHash))
+	return api.VerifyChecksum(instanceHash.String())
 }
 
 // getBlockSummary computes block download status for an object.
@@ -610,7 +610,7 @@ func (api *IntrospectAPIOpen) ListAllObjects(limit int, pattern string) ([]Objec
 		}
 
 		instance := ObjectInstance{
-			InstanceHash:  string(instanceHash),
+			InstanceHash:  instanceHash.String(),
 			ETag:          meta.ETag,
 			SourceURL:     meta.SourceURL,
 			ContentLength: meta.ContentLength,

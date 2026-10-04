@@ -63,6 +63,7 @@ import (
 
 	"github.com/dgraph-io/badger/v4"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/pelicanplatform/pelican/local_cache"
 	"github.com/pelicanplatform/pelican/metrics"
@@ -89,16 +90,14 @@ import (
 // budget -- but the asymmetry is what makes it acceptable rather than the odds.
 type reachableKey [16]byte
 
-// truncateHash builds the map key. A hash that is not the expected hex
-// spelling cannot be truncated meaningfully, so it falls back to copying the
-// raw bytes: a malformed hash is fsck's business to report, not to silently
-// alias onto another entry.
+// truncateHash builds the map key.  Every non-zero InstanceHash is 64 hex
+// digits, so the leading 32 always decode; only the zero value, which no
+// reachable version has, falls through to the all-zero key.
 func truncateHash(hash local_cache.InstanceHash) reachableKey {
 	var k reachableKey
-	if n, err := hex.Decode(k[:], []byte(hash)[:min(len(hash), 2*len(k))]); err == nil && n == len(k) {
-		return k
+	if s := hash.String(); len(s) >= 2*len(k) {
+		_, _ = hex.Decode(k[:], []byte(s[:2*len(k)]))
 	}
-	copy(k[:], hash)
 	return k
 }
 
@@ -403,7 +402,7 @@ func (s *Store) FsckWith(ctx context.Context, opts FsckOptions) (*FsckReport, er
 			}
 
 			hash := instanceHashFor(s.db, d.Generation)
-			if !opts.SkipOrphanScan && strings.HasPrefix(string(hash), shard) {
+			if !opts.SkipOrphanScan && strings.HasPrefix(hash.String(), shard) {
 				reachable[truncateHash(hash)] = struct{}{}
 			}
 			if !entryChecks {
@@ -593,7 +592,7 @@ func (s *Store) collectOrphans(
 			return err
 		}
 		if inFlight {
-			report.PendingInstances = append(report.PendingInstances, string(hash))
+			report.PendingInstances = append(report.PendingInstances, hash.String())
 			continue
 		}
 
@@ -607,10 +606,10 @@ func (s *Store) collectOrphans(
 			continue
 		}
 		if meta.Completed.IsZero() || meta.Completed.After(cutoff) {
-			report.PendingInstances = append(report.PendingInstances, string(hash))
+			report.PendingInstances = append(report.PendingInstances, hash.String())
 			continue
 		}
-		report.OrphanedInstances = append(report.OrphanedInstances, string(hash))
+		report.OrphanedInstances = append(report.OrphanedInstances, hash.String())
 	}
 	return nil
 }
@@ -640,7 +639,10 @@ func (s *Store) repair(ctx context.Context, report *FsckReport, drift map[local_
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		h := local_cache.InstanceHash(hash)
+		h, err := local_cache.ParseInstanceHash(hash)
+		if err != nil {
+			return errors.Wrap(err, "fsck report lists a malformed orphan")
+		}
 		if err := s.bdb.Update(func(txn *badger.Txn) error {
 			return enqueueInstance(txn, h)
 		}); err != nil {
@@ -783,9 +785,15 @@ func (s *Store) scanMetadataHashes(ctx context.Context, shard string, fn func(lo
 			defer it.Close()
 
 			for it.Seek(seek); it.ValidForPrefix(prefix); it.Next() {
-				key := it.Item().Key()
 				lastKey = it.Item().KeyCopy(lastKey[:0])
-				batch = append(batch, local_cache.InstanceHash(key[len(local_cache.PrefixMeta):]))
+				hash, err := local_cache.InstanceHashFromKey(it.Item().Key(), local_cache.PrefixMeta)
+				if err != nil {
+					// Not a key this store wrote; nothing it names can be
+					// checked or reclaimed through a hash.
+					log.Warnf("fsck: skipping metadata record with a malformed key: %v", err)
+					continue
+				}
+				batch = append(batch, hash)
 				if len(batch) >= fsckBatchSize {
 					exhausted = false
 					return nil
@@ -821,7 +829,7 @@ func (s *Store) footprintByUsageKey(ctx context.Context) (map[local_cache.Storag
 	out := make(map[local_cache.StorageUsageKey]int64)
 	count := 0
 
-	start := local_cache.InstanceHash("")
+	var start local_cache.InstanceHash
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, 0, err

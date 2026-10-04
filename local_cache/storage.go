@@ -235,7 +235,7 @@ var writeToOutBufPool = sync.Pool{
 // are uniformly distributed; XOR-ing with the block number produces a
 // collision probability of ~1/2^64 per pair — effectively zero.
 func ptCacheKey(h InstanceHash, block uint32) uint64 {
-	return binary.LittleEndian.Uint64([]byte(h)[:8]) ^ uint64(block)
+	return binary.LittleEndian.Uint64([]byte(h.hex[:8])) ^ uint64(block)
 }
 
 // chunkFileKey identifies a specific chunk file in the FD cache.

@@ -170,7 +170,7 @@ func TestChunkedObjectWriteRead(t *testing.T) {
 		testData[i] = byte(i % 256)
 	}
 
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0x12345678))
+	instanceHash := testInstanceHash(0x12345678)
 
 	// Initialize lazy chunked storage and allocate all chunks
 	meta, err := storage.InitLazyChunkedStorage(ctx, instanceHash, objectSize, chunkSizeCode)
@@ -253,7 +253,7 @@ func TestChunkedObjectEviction(t *testing.T) {
 		testData[i] = byte(i % 256)
 	}
 
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0xABCD))
+	instanceHash := testInstanceHash(0xABCD)
 
 	// Initialize lazy chunked storage and allocate all chunks
 	meta, err := storage.InitLazyChunkedStorage(ctx, instanceHash, objectSize, chunkSizeCode)
@@ -337,7 +337,7 @@ func TestChunkedObjectEvictByLRU(t *testing.T) {
 			testData[j] = byte((i + j) % 256)
 		}
 
-		instanceHash := InstanceHash(fmt.Sprintf("%064x", i+0x100))
+		instanceHash := testInstanceHash(i + 0x100)
 
 		// Initialize lazy chunked storage and allocate all chunks
 		meta, err := storage.InitLazyChunkedStorage(ctx, instanceHash, objectSize, chunkSizeCode)
@@ -427,7 +427,7 @@ func TestChunkLocationDistribution(t *testing.T) {
 	actualChunkSize := int64(ChunkSizeCodeToBytes(chunkSizeCode))
 	objectSize := actualChunkSize * 5 // 5 full chunks
 
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0xDEADBEEF))
+	instanceHash := testInstanceHash(0xDEADBEEF)
 
 	// Initialize lazy chunked storage and allocate all chunks
 	meta, err := storage.InitLazyChunkedStorage(ctx, instanceHash, objectSize, chunkSizeCode)
@@ -481,7 +481,7 @@ func TestChunkedObjectConsistencyVerification(t *testing.T) {
 		testData[i] = byte(i % 256)
 	}
 
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0xCAFE))
+	instanceHash := testInstanceHash(0xCAFE)
 
 	// Initialize lazy chunked storage and allocate all chunks
 	meta, err := storage.InitLazyChunkedStorage(ctx, instanceHash, objectSize, chunkSizeCode)
@@ -623,7 +623,7 @@ func TestOrphanedChunkFileCleanup(t *testing.T) {
 	defer storage.Close()
 
 	// Create orphaned chunk files (no DB entry)
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0xDEAD))
+	instanceHash := testInstanceHash(0xDEAD)
 	objectsDir := filepath.Join(dir1, "objects")
 	require.NoError(t, os.MkdirAll(objectsDir, 0755))
 
@@ -685,7 +685,7 @@ func TestOrphanedChunkFilesWithoutBaseFile(t *testing.T) {
 
 	// Create orphaned chunk files WITHOUT the base file (chunk 0)
 	// This simulates a user who started downloading from the middle
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0xBEEF))
+	instanceHash := testInstanceHash(0xBEEF)
 	objectsDir := filepath.Join(dir1, "objects")
 	require.NoError(t, os.MkdirAll(objectsDir, 0755))
 
@@ -742,7 +742,7 @@ func TestOrphanedNonSequentialChunkFiles(t *testing.T) {
 	defer storage.Close()
 
 	// Create orphaned chunk files with a gap: base + chunk -3 but NO chunk -2
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0xFACE))
+	instanceHash := testInstanceHash(0xFACE)
 	objectsDir := filepath.Join(dir1, "objects")
 	require.NoError(t, os.MkdirAll(objectsDir, 0755))
 
@@ -797,7 +797,7 @@ func TestLazyChunkAllocation(t *testing.T) {
 	require.NoError(t, err)
 	defer storage.Close()
 
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0xCAFE))
+	instanceHash := testInstanceHash(0xCAFE)
 	objectSize := int64(4 * 1024 * 1024) // 4MB
 	chunkSizeCode := BytesToChunkSizeCode(2 * 1024 * 1024)
 	expectedChunks := CalculateChunkCount(objectSize, chunkSizeCode)
@@ -886,7 +886,7 @@ func TestLazyAllocationWritePath(t *testing.T) {
 	require.NoError(t, err)
 	defer storage.Close()
 
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0xBEEF))
+	instanceHash := testInstanceHash(0xBEEF)
 	objectSize := int64(4 * 1024 * 1024) // 4MB = 2 chunks with 2MB chunk size
 	chunkSizeCode := BytesToChunkSizeCode(2 * 1024 * 1024)
 	chunkSize := int64(ChunkSizeCodeToBytes(chunkSizeCode))
@@ -945,7 +945,7 @@ func TestLazyChunkedEviction(t *testing.T) {
 	require.NoError(t, err)
 	defer storage.Close()
 
-	instanceHash := InstanceHash(fmt.Sprintf("%064x", 0xAAAA))
+	instanceHash := testInstanceHash(0xAAAA)
 	chunkSizeCode := BytesToChunkSizeCode(2 * 1024 * 1024)
 	chunkSize := int64(ChunkSizeCodeToBytes(chunkSizeCode))
 	objectSize := chunkSize * 3 // 3 chunks
