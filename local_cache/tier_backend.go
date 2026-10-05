@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -150,6 +151,10 @@ type blobTierBackend struct {
 	s3Client *s3.Client
 	s3Bucket string
 	s3Prefix string
+	// reapPageSize caps each ListMultipartUploads page in
+	// ReapStaleUploads; zero takes the service's default (1000 on S3).
+	// Tests lower it to exercise paging.
+	reapPageSize int32
 }
 
 var (
@@ -410,6 +415,9 @@ func (b *blobTierBackend) ReapStaleUploads(ctx context.Context, maxAge time.Dura
 
 	bucketName := b.s3Bucket
 	input := &s3.ListMultipartUploadsInput{Bucket: &bucketName}
+	if b.reapPageSize > 0 {
+		input.MaxUploads = &b.reapPageSize
+	}
 	if b.s3Prefix != "" {
 		prefix := b.s3Prefix
 		input.Prefix = &prefix
@@ -442,7 +450,20 @@ func (b *blobTierBackend) ReapStaleUploads(ctx context.Context, maxAge time.Dura
 		if out.IsTruncated == nil || !*out.IsTruncated {
 			return aborted, nil
 		}
-		input.KeyMarker = out.NextKeyMarker
-		input.UploadIdMarker = out.NextUploadIdMarker
+		// Resume after the last key listed, by key marker alone.  S3 would
+		// also take NextUploadIdMarker, to resume among that key's other
+		// uploads, but not every S3 service accepts the pair it hands out
+		// (versitygw rejects it as an invalid upload-ID marker).  Without it
+		// a key whose uploads straddle a page boundary keeps the rest of
+		// them until the next sweep, which is harmless: a key rarely has more
+		// than one abandoned upload, let alone a page's worth.  The marker
+		// must advance, or a service that repeats a page would keep us here
+		// forever.
+		next := aws.ToString(out.NextKeyMarker)
+		if next == "" || next <= aws.ToString(input.KeyMarker) {
+			return aborted, errors.Errorf("listing multipart uploads on cache tier target %s did not advance past key %q",
+				b.display, aws.ToString(input.KeyMarker))
+		}
+		input.KeyMarker = &next
 	}
 }

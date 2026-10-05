@@ -331,37 +331,24 @@ func TestS3v2MemOriginOverwrite(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Minio-backed federation tests
+// Federation tests against a real S3 server
 // ---------------------------------------------------------------------------
 
-// TestS3v2MinioOriginUploadDownload runs a full Pelican federation backed by
-// a real MinIO server. It exercises the complete S3v2 data path: director
-// redirect → origin HTTP handler → gocloud.dev/blob/s3blob → MinIO. Skipped
-// if minio is not installed.
-func TestS3v2MinioOriginUploadDownload(t *testing.T) {
-	test_utils.SkipIfNoMinio(t)
-	t.Cleanup(test_utils.SetupTestLogging(t))
-	server_utils.ResetTestState()
-	defer server_utils.ResetTestState()
-
-	minioEndpoint, accessKey, secretKey := test_utils.StartMinio(t, "test-bucket")
-
-	// Write credential files for the origin to read.
-	credDir := t.TempDir()
-	akFile := filepath.Join(credDir, "access-key")
-	skFile := filepath.Join(credDir, "secret-key")
-	require.NoError(t, os.WriteFile(akFile, []byte(accessKey), 0600))
-	require.NoError(t, os.WriteFile(skFile, []byte(secretKey), 0600))
-
-	// S3 params must be in the YAML config so they survive NewFedTest's
-	// config.InitServer → viper.MergeConfig flow and are available when
-	// GetOriginExports() runs.
-	originConfig := fmt.Sprintf(`
+// s3v2OriginConfig returns the origin YAML for an s3v2 origin exporting
+// srv's bucket at /test.
+//
+// The S3 params must be in the YAML config so they survive NewFedTest's
+// config.InitServer → viper.MergeConfig flow and are available when
+// GetOriginExports() runs.
+func s3v2OriginConfig(t *testing.T, srv *test_utils.S3Server) string {
+	t.Helper()
+	akFile, skFile := srv.WriteCredentialFiles(t)
+	return fmt.Sprintf(`
 Origin:
   StorageType: s3v2
   S3ServiceUrl: %s
-  S3Region: us-east-1
-  S3Bucket: test-bucket
+  S3Region: %s
+  S3Bucket: %s
   S3AccessKeyfile: %s
   S3SecretKeyfile: %s
   Exports:
@@ -370,7 +357,20 @@ Origin:
 Director:
   MinStatResponse: 1
   MaxStatResponse: 1
-`, minioEndpoint, akFile, skFile)
+`, srv.Endpoint, srv.Region, srv.Bucket, akFile, skFile)
+}
+
+// TestS3v2OriginUploadDownload runs a full Pelican federation backed by a
+// real S3 server. It exercises the complete S3v2 data path: director
+// redirect → origin HTTP handler → gocloud.dev/blob/s3blob → S3 server.
+// Skipped if no S3 server is installed (see test_utils.StartS3Server).
+func TestS3v2OriginUploadDownload(t *testing.T) {
+	test_utils.SkipIfNoS3Server(t)
+	t.Cleanup(test_utils.SetupTestLogging(t))
+	server_utils.ResetTestState()
+	defer server_utils.ResetTestState()
+
+	originConfig := s3v2OriginConfig(t, test_utils.StartS3Server(t, "test-bucket"))
 
 	ft := fed_test_utils.NewFedTest(t, originConfig)
 	require.NotNil(t, ft)
@@ -380,7 +380,7 @@ Director:
 	localTmpDir := t.TempDir()
 
 	t.Run("UploadAndDownload", func(t *testing.T) {
-		testContent := "Hello from the MinIO-backed federation test!"
+		testContent := "Hello from the S3-backed federation test!"
 		localFile := filepath.Join(localTmpDir, "test_file.txt")
 		require.NoError(t, os.WriteFile(localFile, []byte(testContent), 0644))
 
@@ -404,7 +404,7 @@ Director:
 	})
 
 	t.Run("Stat", func(t *testing.T) {
-		content := []byte("Stat me via the MinIO federation")
+		content := []byte("Stat me via the S3-backed federation")
 		localFile := filepath.Join(localTmpDir, "stat_test.txt")
 		require.NoError(t, os.WriteFile(localFile, content, 0644))
 
@@ -484,7 +484,7 @@ Director:
 			require.NoError(t, param.Set(param.Client_EnableOverwrites, false))
 		}()
 
-		uploadURL := fmt.Sprintf("pelican://%s:%d/test/overwrite_minio.txt",
+		uploadURL := fmt.Sprintf("pelican://%s:%d/test/overwrite_s3.txt",
 			param.Server_Hostname.GetString(), param.Server_WebPort.GetInt())
 
 		v1 := filepath.Join(localTmpDir, "v1.txt")

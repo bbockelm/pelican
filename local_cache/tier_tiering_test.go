@@ -287,12 +287,11 @@ func TestTierKeyLayout(t *testing.T) {
 	}
 }
 
-// setupTierTestEnv starts minio, registers one S3 target alongside one local
+// setupTierTestEnv starts an S3 server, registers one S3 target alongside one local
 // directory, and wires an eviction manager + uploader (no background
 // goroutines are started; tests drive the pieces synchronously).
 func setupTierTestEnv(t *testing.T, ctx context.Context) *tierTestEnv {
-	test_utils.SkipIfNoMinio(t)
-	endpoint, accessKey, secretKey := test_utils.StartMinio(t, "pelican-cache-test")
+	srv := test_utils.StartS3Server(t, "pelican-cache-test")
 
 	InitIssuerKeyForTests(t)
 	tmpDir := t.TempDir()
@@ -300,8 +299,10 @@ func setupTierTestEnv(t *testing.T, ctx context.Context) *tierTestEnv {
 	keyDir := t.TempDir()
 	accessKeyfile := filepath.Join(keyDir, "access")
 	secretKeyfile := filepath.Join(keyDir, "secret")
-	require.NoError(t, os.WriteFile(accessKeyfile, []byte(accessKey+"\n"), 0600))
-	require.NoError(t, os.WriteFile(secretKeyfile, []byte(secretKey+"\n"), 0600))
+	// Written by hand, with trailing newlines, to exercise the trimming of
+	// key files (srv.WriteCredentialFiles writes them bare).
+	require.NoError(t, os.WriteFile(accessKeyfile, []byte(srv.AccessKey+"\n"), 0600))
+	require.NoError(t, os.WriteFile(secretKeyfile, []byte(srv.SecretKey+"\n"), 0600))
 
 	db, err := NewCacheDB(ctx, tmpDir)
 	require.NoError(t, err)
@@ -313,9 +314,9 @@ func setupTierTestEnv(t *testing.T, ctx context.Context) *tierTestEnv {
 	t.Cleanup(func() { storage.Close() })
 
 	targetCfg := TierTargetConfig{
-		ServiceUrl:    endpoint,
-		Region:        "us-east-1",
-		Bucket:        "pelican-cache-test",
+		ServiceUrl:    srv.Endpoint,
+		Region:        srv.Region,
+		Bucket:        srv.Bucket,
 		Prefix:        "cache",
 		UrlStyle:      "path",
 		AccessKeyfile: accessKeyfile,
@@ -440,19 +441,14 @@ func TestTierLifecycle(t *testing.T) {
 // are exactly the ones chunking splits up, so this is the primary tiering
 // case once chunking is enabled.
 func TestTierChunkedObject(t *testing.T) {
-	test_utils.SkipIfNoMinio(t)
-	endpoint, accessKey, secretKey := test_utils.StartMinio(t, "pelican-cache-chunked")
+	srv := test_utils.StartS3Server(t, "pelican-cache-chunked")
 	InitIssuerKeyForTests(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	dir1, dir2, dbDir := t.TempDir(), t.TempDir(), t.TempDir()
-	keyDir := t.TempDir()
-	accessKeyfile := filepath.Join(keyDir, "access")
-	secretKeyfile := filepath.Join(keyDir, "secret")
-	require.NoError(t, os.WriteFile(accessKeyfile, []byte(accessKey), 0600))
-	require.NoError(t, os.WriteFile(secretKeyfile, []byte(secretKey), 0600))
+	accessKeyfile, secretKeyfile := srv.WriteCredentialFiles(t)
 
 	db, err := NewCacheDB(ctx, dbDir)
 	require.NoError(t, err)
@@ -464,9 +460,9 @@ func TestTierChunkedObject(t *testing.T) {
 	t.Cleanup(func() { storage.Close() })
 
 	registered, err := storage.RegisterTierTargets(ctx, []TierTargetConfig{{
-		ServiceUrl:    endpoint,
-		Region:        "us-east-1",
-		Bucket:        "pelican-cache-chunked",
+		ServiceUrl:    srv.Endpoint,
+		Region:        srv.Region,
+		Bucket:        srv.Bucket,
 		Prefix:        "cache",
 		UrlStyle:      "path",
 		AccessKeyfile: accessKeyfile,
@@ -806,9 +802,9 @@ func TestTierPinsReadsToTheUploadedVersion(t *testing.T) {
 			Status: s3types.BucketVersioningStatusEnabled,
 		},
 	})
-	if err != nil {
-		t.Skipf("this MinIO cannot enable bucket versioning: %v", err)
-	}
+	// The test S3 server supports versioning; a server that does not
+	// should fail here rather than quietly skip the test.
+	require.NoError(t, err, "enabling bucket versioning")
 
 	hash := InstanceHash(fmt.Sprintf("%064d", 44))
 	data, meta := tierObjectForIntegrity(t, ctx, env, hash)
@@ -1468,13 +1464,12 @@ func TestRedirectRetainsAuthorization(t *testing.T) {
 }
 
 // TestTierRedirectServing is a handler-level end-to-end test: it stands up a
-// real persistent cache with an S3 target (minio), lets the tiering
+// real persistent cache with an S3 target (an S3 server), lets the tiering
 // pipeline move a completed object into the bucket, and asserts that a GET
 // through serveObject is answered with a 307 to a working pre-signed URL —
 // and with the proxied bytes when redirect is disabled.
 func TestTierRedirectServing(t *testing.T) {
-	test_utils.SkipIfNoMinio(t)
-	endpoint, accessKey, secretKey := test_utils.StartMinio(t, "pelican-redirect-test")
+	s3srv := test_utils.StartS3Server(t, "pelican-redirect-test")
 
 	server_utils.ResetTestState()
 	t.Cleanup(server_utils.ResetTestState)
@@ -1493,16 +1488,12 @@ func TestTierRedirectServing(t *testing.T) {
 		DirectorEndpoint:  "https://cache.example:8443",
 	})
 
-	keyDir := t.TempDir()
-	accessKeyfile := filepath.Join(keyDir, "access")
-	secretKeyfile := filepath.Join(keyDir, "secret")
-	require.NoError(t, os.WriteFile(accessKeyfile, []byte(accessKey), 0600))
-	require.NoError(t, os.WriteFile(secretKeyfile, []byte(secretKey), 0600))
+	accessKeyfile, secretKeyfile := s3srv.WriteCredentialFiles(t)
 
 	setTierTargets(t, []interface{}{
 		map[string]interface{}{
-			"ServiceUrl":    endpoint,
-			"Bucket":        "pelican-redirect-test",
+			"ServiceUrl":    s3srv.Endpoint,
+			"Bucket":        s3srv.Bucket,
 			"Prefix":        "cache",
 			"MaxSize":       "1GB",
 			"AccessKeyfile": accessKeyfile,

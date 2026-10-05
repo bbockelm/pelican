@@ -159,6 +159,17 @@ go test -tags client ./cmd/
 go test -tags server ./cmd/
 ```
 
+**S3-backed tests:**
+
+The tests of the origin's S3 backend and of cache tiering run against a local S3 server, the Versity S3 Gateway (`versitygw`), and skip themselves when it is not on `PATH`. The `pelican-dev` and `pelican-test` images have it in `/usr/local/bin`. Elsewhere, install the pinned release with `github_scripts/install_versitygw.sh <dir>` (for example `~/.local/bin`) and put that directory on `PATH`; `github_scripts/install_versitygw.sh --check` reports whether the `versitygw` on `PATH` is already the pinned version. Set `TEST_REQUIRE_S3_SERVER=1` to make a missing server fail those tests instead of skipping them, as CI does:
+
+```bash
+github_scripts/install_versitygw.sh ~/.local/bin
+TEST_REQUIRE_S3_SERVER=1 go test -tags server ./local_cache/ ./origin_serve/ ./test_utils/
+```
+
+New CI jobs that run `go test` on Linux or macOS should use the `.github/actions/setup-s3-test-server` action, which installs the pinned server unless it is already on `PATH` and always sets `TEST_REQUIRE_S3_SERVER`. To change the version, edit only the install script: the images, the action and developers all install through it.
+
 **Frontend tests:**
 
 ```bash

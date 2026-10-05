@@ -1,0 +1,59 @@
+---
+name: Set up the S3 test server
+description: >-
+  Makes versitygw, the local S3 server that the S3-backed Go tests run
+  against (see test_utils/s3server.go), available on PATH at the version
+  pinned in github_scripts/install_versitygw.sh, and sets
+  TEST_REQUIRE_S3_SERVER so that those tests fail rather than skip when it is
+  missing.  Every job that runs "go test" on Linux or macOS should use this
+  action; without it the S3-backed tests skip silently.
+
+runs:
+  using: composite
+  steps:
+    # The pelican-test and pelican-dev images install the pinned versitygw.
+    # When it is already on PATH at that version, there is nothing to fetch;
+    # otherwise (macOS runners, an image built before the pin changed) the
+    # pinned one is installed and put ahead of it on PATH.
+    - name: Check for versitygw
+      id: check
+      shell: bash
+      run: |
+        if "$GITHUB_WORKSPACE/github_scripts/install_versitygw.sh" --check; then
+          echo "present=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "present=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    # The install script pins the release and its checksum, so keying the
+    # cache on the script refetches whenever either changes.  Restore and save
+    # are separate so that a run whose tests fail still saves the binary.
+    - name: Restore versitygw
+      id: restore
+      if: steps.check.outputs.present != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/versitygw-bin
+        key: ${{ runner.os }}-${{ runner.arch }}-versitygw-${{ hashFiles('github_scripts/install_versitygw.sh') }}
+
+    - name: Install versitygw
+      if: steps.check.outputs.present != 'true' && steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: '"$GITHUB_WORKSPACE/github_scripts/install_versitygw.sh" "$HOME/versitygw-bin"'
+
+    - name: Save versitygw
+      if: steps.check.outputs.present != 'true' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/versitygw-bin
+        key: ${{ steps.restore.outputs.cache-primary-key }}
+
+    - name: Put versitygw on PATH
+      if: steps.check.outputs.present != 'true'
+      shell: bash
+      run: echo "$HOME/versitygw-bin" >> "$GITHUB_PATH"
+
+    # In every case, so that a missing server fails the tests.
+    - name: Require the S3 test server
+      shell: bash
+      run: echo "TEST_REQUIRE_S3_SERVER=1" >> "$GITHUB_ENV"
