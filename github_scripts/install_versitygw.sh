@@ -23,14 +23,33 @@
 # the release's own checksums.txt, which would come from the same place as
 # the tarball.  To upgrade, change VERSITYGW_VERSION and copy the tarball
 # lines for the platforms below from that release's checksums.txt.
+#
+# With --check instead of a directory, it installs nothing: it exits 0 if the
+# versitygw on PATH is already the pinned version, and 1 otherwise (absent,
+# or another version), so callers can skip the download.
 
 set -euo pipefail
 
 VERSITYGW_VERSION=1.8.0
 
 if [ $# -ne 1 ]; then
-  echo "usage: $0 <install-dir>" >&2
+  echo "usage: $0 <install-dir> | --check" >&2
   exit 2
+fi
+
+if [ "$1" = "--check" ]; then
+  if ! command -v versitygw >/dev/null; then
+    echo "versitygw is not on PATH"
+    exit 1
+  fi
+  # `versitygw --version` prints "Version  : 1.8.0" among other lines.
+  found=$(versitygw --version 2>/dev/null | awk '$1 == "Version" { print $3 }')
+  if [ "$found" != "$VERSITYGW_VERSION" ]; then
+    echo "versitygw on PATH ($(command -v versitygw)) is version '${found}', not ${VERSITYGW_VERSION}"
+    exit 1
+  fi
+  echo "versitygw ${VERSITYGW_VERSION} is already on PATH at $(command -v versitygw)"
+  exit 0
 fi
 dest=$1
 

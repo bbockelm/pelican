@@ -691,6 +691,13 @@ RUN --mount=type=cache,id=dnf-${TARGETPLATFORM},target=/var/cache/dnf,sharing=lo
   usermod -aG pelican_shared alice
 ENDRUN
 
+# Install versitygw, the S3 server the S3-backed Go tests run against (see
+# test_utils/s3server.go), into /usr/local/bin.  The script pins the release
+# and its checksum for each architecture, so the version lives in one place
+# for this image, CI and developers alike.
+RUN --mount=type=bind,source=github_scripts/install_versitygw.sh,target=/context/install_versitygw.sh \
+    /context/install_versitygw.sh /usr/local/bin
+
 #################################################################
 # Development Environment
 #
