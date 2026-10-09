@@ -454,6 +454,39 @@ func (obs *ObjectBlockState) beginFill(block, last uint32, overDownload bool) *b
 	return f
 }
 
+// fillOver returns the done channel of a fill in progress that covers the
+// block, or nil if none does.
+func (obs *ObjectBlockState) fillOver(block uint32) <-chan struct{} {
+	obs.mu.RLock()
+	defer obs.mu.RUnlock()
+	for f := range obs.fills {
+		if f.start <= block && block <= f.end {
+			return f.done
+		}
+	}
+	return nil
+}
+
+// firstMissing returns the first block in [start, last] that is not present,
+// and false if every one is.
+func (obs *ObjectBlockState) firstMissing(start, last uint32) (uint32, bool) {
+	if start > last {
+		return 0, false
+	}
+	obs.mu.RLock()
+	defer obs.mu.RUnlock()
+	it := obs.bitmap.Iterator()
+	it.AdvanceIfNeeded(start)
+	block := start
+	for it.HasNext() && it.Next() == block {
+		if block == last {
+			return 0, false
+		}
+		block++
+	}
+	return block, true
+}
+
 // endFill unregisters a fill begun with beginFill and wakes any goroutine
 // waiting in WaitForBlock, which then finds its block written or falls back
 // to fetching it itself.

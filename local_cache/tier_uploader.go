@@ -62,11 +62,20 @@ const (
 // storage targets.  Objects become candidates when they complete (via the
 // StorageManager's onObjectComplete hook), at startup (backfill scan), and
 // during the periodic tiering consistency sweep.
+//
+// With cold targets (see TierTargetConfig.Cold) none of that applies: local
+// storage is the hot tier, and an object is uploaded only when watermark
+// eviction offers it (offerDemotion), so that it moves to the cold target
+// instead of being deleted.  The upload itself -- intent, relocation,
+// deferred local release, crash recovery -- is the same.
 type tierUploader struct {
 	db        *CacheDB
 	storage   *StorageManager
 	eviction  *EvictionManager
 	threshold int64
+	// cold is true when the targets are cold: objects are uploaded only
+	// when eviction demotes them.
+	cold bool
 
 	queue chan InstanceHash
 	ctx   context.Context
@@ -86,6 +95,22 @@ type tierUploader struct {
 	pendingMu      sync.Mutex
 	pendingRelease map[InstanceHash]struct{}
 	releaseKick    chan struct{}
+
+	// demoting holds the objects eviction handed over for demotion, with
+	// the bytes each will free per local directory, until their upload is
+	// settled; demotingBytes totals them per directory for eviction's
+	// accounting.  Both guarded by inflightMu.
+	demoting      map[InstanceHash]demotion
+	demotingBytes map[StorageID]int64
+}
+
+// demotion is an object eviction handed over for demotion.
+type demotion struct {
+	// local is the bytes the upload will free, per local directory.
+	local map[StorageID]int64
+	// accessed is the object's LRU access time when it was offered.  An
+	// object read since is hot again, and is not uploaded after all.
+	accessed time.Time
 }
 
 // newTierUploader creates the uploader.  threshold is the minimum object
@@ -101,9 +126,95 @@ func newTierUploader(db *CacheDB, storage *StorageManager, eviction *EvictionMan
 		failures:       make(map[InstanceHash]int),
 		pendingRelease: make(map[InstanceHash]struct{}),
 		releaseKick:    make(chan struct{}, 1),
+		demoting:       make(map[InstanceHash]demotion),
+		demotingBytes:  make(map[StorageID]int64),
+		cold:           storage.coldTiering(),
 	}
 	storage.SetUnpinObserver(u.onUnpin)
 	return u
+}
+
+// offerDemotion is the eviction hook for cold tiering (EvictOptions.Demote):
+// eviction offers it each object it would otherwise delete from local storage,
+// and the object is queued for upload to a cold target if it qualifies and
+// one has room.  It runs inside the eviction transaction, so it only checks
+// in-memory state and never blocks.
+//
+// An object that does not qualify -- too small, given up on, no healthy cold
+// target with room, or the queue is full -- is deleted as before: eviction
+// must free local space whether or not the cold tier can take the object.
+func (u *tierUploader) offerDemotion(hash InstanceHash, meta *CacheMetadata) demoteVerdict {
+	if !u.cold {
+		return demoteNo
+	}
+	u.inflightMu.Lock()
+	if _, queued := u.demoting[hash]; queued {
+		u.inflightMu.Unlock()
+		return demotePending
+	}
+	givenUp := u.failures[hash] >= tierMaxUploadAttempts
+	u.inflightMu.Unlock()
+	if givenUp || !u.eligible(meta) || u.chooseTarget(CalculateFileSize(meta.ContentLength)) == nil {
+		return demoteNo
+	}
+
+	// Record before queueing: a worker could otherwise finish the upload
+	// and settle it before the record exists, leaking the pending bytes.
+	local := meta.ResidentBytes()
+	u.inflightMu.Lock()
+	u.demoting[hash] = demotion{local: local, accessed: meta.LastAccessTime}
+	for sid, b := range local {
+		u.demotingBytes[sid] += b
+	}
+	u.inflightMu.Unlock()
+
+	select {
+	case u.queue <- hash:
+		tierQueueDepth.Set(float64(len(u.queue)))
+		return demoteQueued
+	default:
+		tierQueueDropsTotal.Inc()
+		u.settleDemotion(hash)
+		return demoteNo
+	}
+}
+
+// settleDemotion drops an object's demotion record once its upload has been
+// attempted.  Whatever happened, its bytes are no longer pending: a
+// successful upload released them, and a failed one left them local, where
+// the next eviction pass may offer the object again.
+func (u *tierUploader) settleDemotion(hash InstanceHash) {
+	u.inflightMu.Lock()
+	defer u.inflightMu.Unlock()
+	d, ok := u.demoting[hash]
+	if !ok {
+		return
+	}
+	delete(u.demoting, hash)
+	for sid, b := range d.local {
+		if u.demotingBytes[sid] -= b; u.demotingBytes[sid] <= 0 {
+			delete(u.demotingBytes, sid)
+		}
+	}
+}
+
+// readSinceOffered reports whether an object queued for demotion has been
+// read since eviction offered it.  (Access times are debounced, so a read
+// shortly after an earlier one may not show; that only means the object is
+// demoted as eviction asked.)
+func (u *tierUploader) readSinceOffered(hash InstanceHash, meta *CacheMetadata) bool {
+	u.inflightMu.Lock()
+	defer u.inflightMu.Unlock()
+	d, ok := u.demoting[hash]
+	return ok && meta.LastAccessTime.After(d.accessed)
+}
+
+// pendingDemotionBytes reports the bytes of a local directory queued for
+// demotion and not yet released; see evictionDemoter.
+func (u *tierUploader) pendingDemotionBytes(sid StorageID) int64 {
+	u.inflightMu.Lock()
+	defer u.inflightMu.Unlock()
+	return u.demotingBytes[sid]
 }
 
 // markPendingRelease records that an object's local copy still needs
@@ -182,7 +293,9 @@ func (u *tierUploader) Start(ctx context.Context, egrp *errgroup.Group) error {
 			})
 		}
 		egrp.Go(func() error {
-			u.backfillScan(ctx)
+			if !u.cold {
+				u.backfillScan(ctx)
+			}
 			return nil
 		})
 		egrp.Go(func() error {
@@ -240,7 +353,12 @@ func (u *tierUploader) rescanLoop(ctx context.Context) {
 		case <-time.After(sleep):
 		}
 
-		_, deferred := u.backfillScan(ctx)
+		// Cold targets receive only what eviction demotes, so there is no
+		// backlog of completed objects to find.
+		deferred := false
+		if !u.cold {
+			_, deferred = u.backfillScan(ctx)
+		}
 
 		// Finish local cleanup for objects that were still under a reader when
 		// their relocation committed.
@@ -292,6 +410,7 @@ func (u *tierUploader) workerLoop(ctx context.Context) {
 			if err := u.processObject(ctx, hash); err != nil {
 				log.Warnf("Failed to tier object %s: %v", hash, err)
 			}
+			u.settleDemotion(hash)
 		}
 	}
 }
@@ -300,11 +419,16 @@ func (u *tierUploader) workerLoop(ctx context.Context) {
 // objects are eligible: large objects (the prime tiering candidates) are
 // exactly the ones chunking splits across directories, and relocation
 // flattens them into a single remote object.
+//
+// An object promoted from a cold target that kept its copy there is never
+// uploaded: eviction demotes it by pointing it back at that copy, and a
+// partly promoted one could not be read back in full anyway.
 func (u *tierUploader) eligible(meta *CacheMetadata) bool {
 	return meta != nil &&
 		!meta.Completed.IsZero() &&
 		meta.StorageID != StorageIDInline &&
 		!u.storage.IsTiered(meta.StorageID) &&
+		meta.ColdCopy == nil &&
 		meta.ContentLength >= u.threshold
 }
 
@@ -399,6 +523,12 @@ func (u *tierUploader) processObject(ctx context.Context, instanceHash InstanceH
 		return errors.Wrap(err, "failed to load metadata")
 	}
 	if !u.eligible(meta) {
+		return nil
+	}
+	if u.readSinceOffered(instanceHash, meta) {
+		// Eviction offered it while it was cold; it has been read since,
+		// and uploading it now would only bring it back on the next read.
+		log.Debugf("Not demoting %s: it was read after eviction offered it", instanceHash)
 		return nil
 	}
 	localID := meta.StorageID
@@ -516,6 +646,9 @@ func (u *tierUploader) processObject(ctx context.Context, instanceHash InstanceH
 	}
 
 	recordTierUpload(target, tierUploadSucceeded, meta.ContentLength, uploadTime)
+	if u.cold {
+		recordTierDemotion(target, tierDemotedByUpload, meta.ContentLength)
+	}
 	u.inflightMu.Lock()
 	delete(u.failures, instanceHash)
 	u.inflightMu.Unlock()
@@ -805,7 +938,11 @@ func (u *tierUploader) recoverIntent(ctx context.Context, hash InstanceHash, int
 			return // keep the intent so a later pass retries
 		}
 		refund()
-		u.MaybeEnqueue(hash)
+		// A cold target is offered objects by eviction, which will offer
+		// this one again if local storage still needs the room.
+		if !u.cold {
+			u.MaybeEnqueue(hash)
+		}
 	}
 	if err := u.db.DeleteTierUploadIntent(hash); err != nil {
 		log.Warnf("Failed to delete upload intent for %s during recovery: %v", hash, err)

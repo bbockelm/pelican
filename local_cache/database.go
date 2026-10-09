@@ -2227,6 +2227,176 @@ func (cdb *CacheDB) RelocateObject(instanceHash InstanceHash, newStorageID Stora
 	return &prev, nil
 }
 
+// tierPromoteRetries bounds retries of the promotion transactions on BadgerDB
+// write conflicts (they read before writing, so they can race an LRU update).
+const tierPromoteRetries = 5
+
+// updateWithRetry runs fn in a read-write transaction, retrying a bounded
+// number of times on write conflicts.
+func (cdb *CacheDB) updateWithRetry(retries int, fn func(txn *badger.Txn) error) error {
+	for attempt := 0; ; attempt++ {
+		err := cdb.db.Update(fn)
+		if err == nil || !errors.Is(err, badger.ErrConflict) || attempt >= retries {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * time.Millisecond)
+	}
+}
+
+// PromoteObject moves an object resident on the cold tiering target coldID
+// back to the local directory localID, keeping the cold copy (see ColdCopy).
+// It is the inverse of RelocateObject, done in one transaction so that the
+// metadata always names exactly one place the object lives:
+//
+//   - StorageID becomes localID, with dataKey (a fresh, wrapped DEK) as the
+//     key for the local blocks;
+//   - the copy on the cold target is recorded in ColdCopy, and Remote cleared;
+//   - the LRU entry moves to localID, keeping its timestamp; and
+//   - an empty block bitmap is stored.  The object stays Completed -- its
+//     content and freshness are unchanged -- so without an explicit bitmap
+//     GetBlockState would report every block present.
+//
+// The caller has already created the local file and charged localID for it.
+// The local blocks are filled from the cold copy as they are read.
+func (cdb *CacheDB) PromoteObject(instanceHash InstanceHash, coldID, localID StorageID, dataKey []byte) (*CacheMetadata, error) {
+	if err := cdb.checkWritable(); err != nil {
+		return nil, err
+	}
+	empty, err := roaring.New().ToBytes()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to serialize empty block bitmap")
+	}
+	var updated CacheMetadata
+	err = cdb.updateWithRetry(tierPromoteRetries, func(txn *badger.Txn) error {
+		meta, err := readMetadataInTxn(txn, instanceHash)
+		if err != nil {
+			return err
+		}
+		if meta == nil {
+			return errors.New("object metadata not found")
+		}
+		if meta.StorageID != coldID {
+			return errors.Errorf("object is not resident on cold target %d", coldID)
+		}
+		if meta.Completed.IsZero() || meta.ContentLength <= 0 {
+			return errors.New("only a completed, non-empty object can be promoted")
+		}
+		if !meta.LastAccessTime.IsZero() {
+			if err := txn.Delete(LRUKey(coldID, meta.NamespaceID, meta.LastAccessTime, instanceHash)); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+				return errors.Wrap(err, "failed to delete old LRU key")
+			}
+			if err := txn.Set(LRUKey(localID, meta.NamespaceID, meta.LastAccessTime, instanceHash), nil); err != nil {
+				return errors.Wrap(err, "failed to set new LRU key")
+			}
+		}
+		remote := TierObjectInfo{Size: meta.ContentLength}
+		if meta.Remote != nil {
+			remote = *meta.Remote
+		}
+		updated = *meta
+		updated.StorageID = localID
+		updated.DataKey = dataKey
+		updated.Remote = nil
+		updated.ColdCopy = &ColdCopy{StorageID: coldID, Remote: remote}
+		updated.ChunkSizeCode = ChunkingDisabled
+		updated.ChunkLocations = nil
+		data, err := msgpack.Marshal(&updated)
+		if err != nil {
+			return errors.Wrap(err, "failed to marshal promoted metadata")
+		}
+		if err := txn.Set(MetaKey(instanceHash), data); err != nil {
+			return err
+		}
+		return txn.Set(StateKey(instanceHash), empty)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// DropColdCopy forgets the cold copy a promoted object kept on target coldID,
+// because that copy is gone or no longer the one the cache uploaded.  The
+// object itself stays local.  Returns false when the metadata no longer
+// records such a copy (the object was deleted, demoted, or already dropped
+// it), in which case the caller has nothing to release.
+func (cdb *CacheDB) DropColdCopy(instanceHash InstanceHash, coldID StorageID) (*CacheMetadata, bool, error) {
+	if err := cdb.checkWritable(); err != nil {
+		return nil, false, err
+	}
+	var dropped *CacheMetadata
+	err := cdb.updateWithRetry(tierPromoteRetries, func(txn *badger.Txn) error {
+		dropped = nil
+		meta, err := readMetadataInTxn(txn, instanceHash)
+		if err != nil || meta == nil || meta.ColdCopy == nil || meta.ColdCopy.StorageID != coldID {
+			return err
+		}
+		updated := *meta
+		updated.ColdCopy = nil
+		data, err := msgpack.Marshal(&updated)
+		if err != nil {
+			return errors.Wrap(err, "failed to marshal metadata")
+		}
+		if err := txn.Set(MetaKey(instanceHash), data); err != nil {
+			return err
+		}
+		// Without its cold copy, nothing will finish the background fill.
+		_ = txn.Delete(TierPromoteKey(instanceHash))
+		dropped = meta
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return dropped, dropped != nil, nil
+}
+
+// SetTierPromoteIntent records that a promoted object's background copy has
+// started; see PrefixTierPromote.  A blind write, so it cannot conflict.
+func (cdb *CacheDB) SetTierPromoteIntent(instanceHash InstanceHash) error {
+	if err := cdb.checkWritable(); err != nil {
+		return err
+	}
+	val := make([]byte, 8)
+	binary.BigEndian.PutUint64(val, uint64(time.Now().UnixNano()))
+	return cdb.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(TierPromoteKey(instanceHash), val)
+	})
+}
+
+// DeleteTierPromoteIntent removes a promotion intent.
+func (cdb *CacheDB) DeleteTierPromoteIntent(instanceHash InstanceHash) error {
+	if err := cdb.checkWritable(); err != nil {
+		return err
+	}
+	return cdb.db.Update(func(txn *badger.Txn) error {
+		err := txn.Delete(TierPromoteKey(instanceHash))
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return nil
+		}
+		return err
+	})
+}
+
+// ListTierPromoteIntents returns the hashes of every object with a promotion
+// intent.  They exist only for background copies interrupted by a restart, so
+// the list is short.
+func (cdb *CacheDB) ListTierPromoteIntents() ([]InstanceHash, error) {
+	var hashes []InstanceHash
+	err := cdb.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = []byte(PrefixTierPromote)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			hashes = append(hashes, InstanceHash(it.Item().Key()[len(PrefixTierPromote):]))
+		}
+		return nil
+	})
+	return hashes, err
+}
+
 // --- Bulk Operations ---
 
 // deleteObjectInTxn removes all DB keys for a cached object within an
@@ -2360,6 +2530,7 @@ func deleteObjectWithMetaInTxn(txn *badger.Txn, salt []byte, instanceHash Instan
 	// clears it as soon as the reader lets go.
 	_ = txn.Delete(PurgeFirstKey(instanceHash))
 	_ = txn.Delete(RedirectHoldKey(instanceHash))
+	_ = txn.Delete(TierPromoteKey(instanceHash))
 	if !tierIntentRelocatedInTxn(txn, instanceHash) {
 		_ = txn.Delete(TierUploadIntentKey(instanceHash))
 	}
@@ -2415,6 +2586,124 @@ type evictedObject struct {
 	namespaceID    NamespaceID
 	chunkSizeCode  ChunkSizeCode   // For chunked objects
 	chunkLocations []ChunkLocation // Locations of chunks 1, 2, ...
+	// coldCopy is the retained cold copy that went with a deleted object,
+	// and so has to be removed from its target too.  Nil when there was
+	// none, and for a demoted object, whose cold copy is now the object.
+	coldCopy *ColdCopy
+	// demotedTo is the cold target a demoted object was pointed back at
+	// (see EvictOptions.ColdTarget); zero for an object that was deleted.
+	// Only the local copy described above is gone.
+	demotedTo StorageID
+}
+
+// layout reconstructs the parts of the object's metadata that say where its
+// bytes were and what they were charged, for cleanup after the transaction.
+func (e *evictedObject) layout() *CacheMetadata {
+	return &CacheMetadata{
+		StorageID:      e.storageID,
+		ContentLength:  e.contentLen,
+		NamespaceID:    e.namespaceID,
+		ChunkSizeCode:  e.chunkSizeCode,
+		ChunkLocations: e.chunkLocations,
+		ColdCopy:       e.coldCopy,
+	}
+}
+
+// demoteVerdict is a demotion hook's answer about one eviction candidate.
+type demoteVerdict int
+
+const (
+	// demoteNo: the object cannot be demoted; evict it normally.
+	demoteNo demoteVerdict = iota
+	// demoteQueued: the object was handed to the uploader, which will move
+	// it to a cold target and release the local copy.  The pass counts its
+	// bytes as freed and leaves it in place.
+	demoteQueued
+	// demotePending: an earlier pass already handed the object over.  It is
+	// left alone and counts for nothing, since its bytes were counted then.
+	demotePending
+)
+
+// EvictOptions tunes an eviction pass.  The zero value evicts by deletion
+// only, as before cold tiering.
+type EvictOptions struct {
+	// Skip, when non-nil, is consulted for every candidate; returning true
+	// leaves the object in place.  It is how a caller protects objects that
+	// must not disappear right now -- see StorageManager.EvictByLRU, which
+	// uses it to spare objects under a live reader.  A skipped object is
+	// not counted against maxObjects, because skipping frees nothing and
+	// counting it would let eviction report a full batch while returning
+	// under target.
+	Skip func(InstanceHash) bool
+
+	// ColdTarget, when non-nil, reports whether a storage ID is a cold
+	// tiering target.  The LRU walk then demotes, rather than deletes, an
+	// object that was promoted from such a target and kept its copy there:
+	// the object is pointed back at that copy within the eviction
+	// transaction, and only its local bytes are released.
+	ColdTarget func(StorageID) bool
+
+	// Demote, when non-nil, is offered every other LRU candidate before it
+	// is deleted, with its metadata, and may take it for demotion by upload
+	// instead.  It runs inside the eviction transaction, so it must not
+	// block or touch the database.
+	Demote func(InstanceHash, *CacheMetadata) demoteVerdict
+}
+
+// EvictResult reports what one eviction pass did.
+type EvictResult struct {
+	// Evicted lists the objects removed from their storage target, whether
+	// deleted or demoted to a retained cold copy.  Their records are already
+	// gone or rewritten; the caller removes the bytes.
+	Evicted []evictedObject
+	// Skipped counts candidates left in place because they are protected.
+	Skipped int
+	// Queued counts candidates handed to EvictOptions.Demote, and
+	// QueuedBytes their size; their space is freed once the upload finishes.
+	Queued      int
+	QueuedBytes int64
+}
+
+// demoteToColdCopyInTxn points a promoted object back at the cold copy it
+// kept, the inverse of PromoteObject.  The object becomes resident on the cold
+// target again exactly as it was before it was promoted; its local bytes are
+// left for the caller to release, and the returned metadata is the local
+// layout they had.
+func demoteToColdCopyInTxn(txn *badger.Txn, instanceHash InstanceHash, meta *CacheMetadata) error {
+	cold := meta.ColdCopy
+	if cold == nil {
+		return errors.New("object has no cold copy to demote to")
+	}
+	if !meta.LastAccessTime.IsZero() {
+		if err := txn.Delete(LRUKey(meta.StorageID, meta.NamespaceID, meta.LastAccessTime, instanceHash)); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+			return errors.Wrap(err, "failed to delete old LRU key")
+		}
+		if err := txn.Set(LRUKey(cold.StorageID, meta.NamespaceID, meta.LastAccessTime, instanceHash), nil); err != nil {
+			return errors.Wrap(err, "failed to set new LRU key")
+		}
+	}
+	updated := *meta
+	remote := cold.Remote
+	updated.StorageID = cold.StorageID
+	updated.Remote = &remote
+	updated.ColdCopy = nil
+	updated.ChunkSizeCode = ChunkingDisabled
+	updated.ChunkLocations = nil
+	data, err := msgpack.Marshal(&updated)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal demoted metadata")
+	}
+	if err := txn.Set(MetaKey(instanceHash), data); err != nil {
+		return err
+	}
+	// The local block bitmap described the local copy, which is going; a
+	// partly promoted object has one, and a completed one has none.
+	if err := txn.Delete(StateKey(instanceHash)); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
+		return err
+	}
+	// Nothing is promoting it any more.
+	_ = txn.Delete(TierPromoteKey(instanceHash))
+	return nil
 }
 
 // evictionSkipBudget bounds how many protected objects the LRU walk (phases 2
@@ -2444,20 +2733,19 @@ const evictionSkipBudget = 1024
 // to go one object over the byte threshold so that progress is always
 // made even when only large objects remain.
 //
-// skip, when non-nil, is consulted for every candidate; returning true leaves
-// the object in place.  It is how a caller protects objects that must not
-// disappear right now -- see StorageManager.EvictByLRU, which uses it to spare
-// objects under a live reader.  A skipped object is not counted against
-// maxObjects, because skipping frees nothing and counting it would let
-// eviction report a full batch while returning under target.
-//
-// Returns the evicted objects and the number that were skipped.
-func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64, skip func(InstanceHash) bool) ([]evictedObject, int, error) {
+// opts (nil for the defaults) protects objects and enables cold-tier
+// demotion; see EvictOptions.  Demotion applies only to the LRU walk: a
+// purge-first marker is an explicit request to remove the object, and is
+// honoured by deleting every copy of it.
+func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64, opts *EvictOptions) (EvictResult, error) {
 	if err := cdb.checkWritable(); err != nil {
-		return nil, 0, err
+		return EvictResult{}, err
+	}
+	if opts == nil {
+		opts = &EvictOptions{}
 	}
 
-	var evicted []evictedObject
+	var res EvictResult
 	// lruSkipped counts skips charged against evictionSkipBudget; pfSkipped
 	// counts purge-first skips, which are reported but never end a pass.
 	var lruSkipped, pfSkipped int
@@ -2467,13 +2755,16 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 	if cdb.skipBudget > 0 {
 		skipBudget = cdb.skipBudget
 	}
+	// The LRU walk needs each candidate's metadata up front when it may
+	// demote rather than delete.
+	demoting := opts.ColdTarget != nil || opts.Demote != nil
 
 	err := cdb.db.Update(func(txn *badger.Txn) error {
 		var freedBytes int64
 
 		// --- helper: returns true when the caller's targets are met ---
 		quotaReached := func() bool {
-			if maxObjects > 0 && len(evicted) >= maxObjects {
+			if maxObjects > 0 && len(res.Evicted)+res.Queued >= maxObjects {
 				return true
 			}
 			if maxBytes > 0 && freedBytes >= maxBytes {
@@ -2487,16 +2778,17 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 			return lruSkipped >= skipBudget || quotaReached()
 		}
 
-		// --- helper: delete one object by hash, record results ---
+		// --- helper: remove one object by hash, record results ---
 		//
 		// known is the object's metadata when the caller has already read it,
 		// and nil when it has not — in which case the record is read here.
-		evictOne := func(hash InstanceHash, known *CacheMetadata, skipCounter *int) {
+		// allowDemote is false for purge-first candidates.
+		evictOne := func(hash InstanceHash, known *CacheMetadata, skipCounter *int, allowDemote bool) error {
 			// Checked before the metadata read: a protected object is not
 			// going anywhere this pass, so there is nothing to learn about it.
-			if skip != nil && skip(hash) {
+			if opts.Skip != nil && opts.Skip(hash) {
 				*skipCounter++
-				return
+				return nil
 			}
 			// Objects with a recently issued pre-signed URL are protected the
 			// same way: a client may still be downloading directly from the
@@ -2505,8 +2797,31 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 			if cdb.redirectHeldInTxn(txn, hash) {
 				log.Debugf("Skipping eviction of %s: pre-signed URL issued within hold window", hash)
 				*skipCounter++
-				return
+				return nil
 			}
+
+			if allowDemote && demoting {
+				if known == nil {
+					var err error
+					if known, err = readMetadataInTxn(txn, hash); err != nil {
+						return err
+					}
+				}
+				if known != nil {
+					demoted, err := cdb.tryDemoteInTxn(txn, hash, known, opts, &res, usageDeltas)
+					if err != nil {
+						log.Warnf("Failed to demote object %s during eviction: %v", hash, err)
+						return nil
+					}
+					if demoted > 0 {
+						freedBytes += demoted
+					}
+					if demoted != 0 {
+						return nil
+					}
+				}
+			}
+
 			var meta *CacheMetadata
 			var err error
 			if known != nil {
@@ -2516,23 +2831,22 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 			}
 			if err != nil {
 				log.Warnf("Failed to delete object %s during eviction: %v", hash, err)
-				return
+				return nil
 			}
 			if meta == nil {
-				return
+				return nil
 			}
-			evicted = append(evicted, evictedObject{
+			res.Evicted = append(res.Evicted, evictedObject{
 				instanceHash:   hash,
 				storageID:      meta.StorageID,
 				contentLen:     meta.ContentLength,
 				namespaceID:    meta.NamespaceID,
 				chunkSizeCode:  meta.ChunkSizeCode,
 				chunkLocations: meta.ChunkLocations,
+				coldCopy:       meta.ColdCopy,
 			})
-			// For chunked objects, decrement usage from each storage
-			// based on the on-disk bytes it holds.  For
-			// non-chunked objects this returns a single entry for the
-			// base StorageID with CalculateFileSize(ContentLength).
+			// Refund every copy the object was charged for: each directory
+			// holding a chunk, and a retained cold copy's target.
 			for sid, bytes := range meta.PerDirectoryBytes() {
 				key := StorageUsageKey{StorageID: sid, NamespaceID: meta.NamespaceID}
 				usageDeltas[key] -= bytes
@@ -2542,6 +2856,7 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 			} else {
 				freedBytes += CalculateFileSize(meta.ContentLength)
 			}
+			return nil
 		}
 
 		// objectUsesDir reports whether an object touches the given
@@ -2563,10 +2878,10 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 		// the requested storageID (base or chunk), evict it immediately.
 		{
 			pfPrefix := []byte(PrefixPurgeFirst)
-			opts := badger.DefaultIteratorOptions
-			opts.PrefetchValues = false
+			itOpts := badger.DefaultIteratorOptions
+			itOpts.PrefetchValues = false
 
-			it := txn.NewIterator(opts)
+			it := txn.NewIterator(itOpts)
 			defer it.Close()
 
 			for it.Seek(pfPrefix); it.ValidForPrefix(pfPrefix); it.Next() {
@@ -2599,7 +2914,9 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 					continue
 				}
 
-				evictOne(hash, meta, &pfSkipped)
+				if err := evictOne(hash, meta, &pfSkipped, false); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -2607,10 +2924,10 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 		// This finds objects whose base (chunk 0) is in storageID.
 		if !limitReached() {
 			lruPrefix := []byte(fmt.Sprintf("%s%d:%d:", PrefixLRU, storageID, namespaceID))
-			opts := badger.DefaultIteratorOptions
-			opts.PrefetchValues = false
+			itOpts := badger.DefaultIteratorOptions
+			itOpts.PrefetchValues = false
 
-			it := txn.NewIterator(opts)
+			it := txn.NewIterator(itOpts)
 			defer it.Close()
 
 			for it.Seek(lruPrefix); it.ValidForPrefix(lruPrefix); it.Next() {
@@ -2621,7 +2938,9 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 				// This phase has no reason of its own to read the record:
 				// the LRU key already says the object's base chunk is in
 				// this storage+namespace.
-				evictOne(hash, nil, &lruSkipped)
+				if err := evictOne(hash, nil, &lruSkipped, true); err != nil {
+					return err
+				}
 				if limitReached() {
 					break
 				}
@@ -2636,10 +2955,10 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 		// already evicted in Phase 2 (their metadata will be gone).
 		if !limitReached() {
 			nsLRUPrefix := fmt.Appendf(nil, "%s", PrefixLRU)
-			opts := badger.DefaultIteratorOptions
-			opts.PrefetchValues = false
+			itOpts := badger.DefaultIteratorOptions
+			itOpts.PrefetchValues = false
 
-			it := txn.NewIterator(opts)
+			it := txn.NewIterator(itOpts)
 			defer it.Close()
 
 			for it.Seek(nsLRUPrefix); it.ValidForPrefix(nsLRUPrefix); it.Next() {
@@ -2674,7 +2993,9 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 				if !objectUsesDir(meta, storageID) {
 					continue
 				}
-				evictOne(hash, meta, &lruSkipped)
+				if err := evictOne(hash, meta, &lruSkipped, true); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -2682,15 +3003,68 @@ func (cdb *CacheDB) EvictByLRU(storageID StorageID, namespaceID NamespaceID, max
 	})
 
 	// Apply accumulated usage decrements via MergeOperator (outside
-	// the eviction transaction so they cannot cause conflicts).
-	for key, delta := range usageDeltas {
-		if err := cdb.AddUsage(key.StorageID, key.NamespaceID, delta); err != nil {
-			log.Warnf("Failed to decrease usage for storage %d namespace %d: %v",
-				key.StorageID, key.NamespaceID, err)
+	// the eviction transaction so they cannot cause conflicts).  A pass
+	// that failed to commit changed nothing, so there is nothing to refund.
+	if err == nil {
+		for key, delta := range usageDeltas {
+			if aErr := cdb.AddUsage(key.StorageID, key.NamespaceID, delta); aErr != nil {
+				log.Warnf("Failed to decrease usage for storage %d namespace %d: %v",
+					key.StorageID, key.NamespaceID, aErr)
+			}
 		}
 	}
 
-	return evicted, lruSkipped + pfSkipped, err
+	res.Skipped = lruSkipped + pfSkipped
+	return res, err
+}
+
+// tryDemoteInTxn demotes an eviction candidate instead of deleting it, when
+// the options allow it: an object with a retained cold copy is pointed back at
+// that copy right here, and any other is offered to opts.Demote.  It returns
+// the bytes the demotion frees on the storage being evicted, or 0 when the
+// object was not demoted and should be deleted.  A candidate already queued
+// by an earlier pass is not demoted again and not deleted either; it reports
+// -1, which frees nothing.
+func (cdb *CacheDB) tryDemoteInTxn(txn *badger.Txn, hash InstanceHash, meta *CacheMetadata, opts *EvictOptions,
+	res *EvictResult, usageDeltas map[StorageUsageKey]int64) (int64, error) {
+	if meta.ColdCopy != nil {
+		if opts.ColdTarget == nil || !opts.ColdTarget(meta.ColdCopy.StorageID) {
+			return 0, nil // the copy's target is not a configured cold target; delete both
+		}
+		if err := demoteToColdCopyInTxn(txn, hash, meta); err != nil {
+			return 0, err
+		}
+		res.Evicted = append(res.Evicted, evictedObject{
+			instanceHash:   hash,
+			storageID:      meta.StorageID,
+			contentLen:     meta.ContentLength,
+			namespaceID:    meta.NamespaceID,
+			chunkSizeCode:  meta.ChunkSizeCode,
+			chunkLocations: meta.ChunkLocations,
+			demotedTo:      meta.ColdCopy.StorageID,
+		})
+		// Only the local copy is released; the cold target was charged for
+		// its copy all along.
+		var freed int64
+		for sid, bytes := range meta.ResidentBytes() {
+			usageDeltas[StorageUsageKey{StorageID: sid, NamespaceID: meta.NamespaceID}] -= bytes
+			freed += bytes
+		}
+		return max(freed, 1), nil
+	}
+	if opts.Demote == nil {
+		return 0, nil
+	}
+	switch opts.Demote(hash, meta) {
+	case demoteQueued:
+		size := CalculateFileSize(meta.ContentLength)
+		res.Queued++
+		res.QueuedBytes += size
+		return max(size, 1), nil
+	case demotePending:
+		return -1, nil
+	}
+	return 0, nil
 }
 
 // badgerLogger adapts Pelican's logrus to BadgerDB's logger interface

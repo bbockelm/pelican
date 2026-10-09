@@ -164,10 +164,7 @@ func NewBlockFetcherV2(
 	}
 
 	if cfg.PrefetchTimeout == 0 {
-		cfg.PrefetchTimeout = param.LocalCache_PrefetchTimeout.GetDuration()
-		if cfg.PrefetchTimeout == 0 {
-			cfg.PrefetchTimeout = DefaultPrefetchTimeout
-		}
+		cfg.PrefetchTimeout = fillIdleTimeout()
 	}
 
 	prefetchSem := cfg.PrefetchSem
@@ -244,7 +241,22 @@ func (bf *BlockFetcherV2) idleSince() time.Duration {
 // rather than up to a whole check interval later, but no more often than
 // every few milliseconds, nor less often than every two seconds.
 func (bf *BlockFetcherV2) idleCheckInterval() time.Duration {
-	return min(max(bf.prefetchTimeout/4, 10*time.Millisecond), 2*time.Second)
+	return idleCheckInterval(bf.prefetchTimeout)
+}
+
+// idleCheckInterval is how often a transfer that goes idle after timeout
+// checks for it; see BlockFetcherV2.idleCheckInterval.
+func idleCheckInterval(timeout time.Duration) time.Duration {
+	return min(max(timeout/4, 10*time.Millisecond), 2*time.Second)
+}
+
+// fillIdleTimeout is how long a background transfer for an object's readers
+// goes on once none of them is open (LocalCache.PrefetchTimeout).
+func fillIdleTimeout() time.Duration {
+	if timeout := param.LocalCache_PrefetchTimeout.GetDuration(); timeout != 0 {
+		return timeout
+	}
+	return DefaultPrefetchTimeout
 }
 
 // idle reports whether no reader of the object is open and none has been,

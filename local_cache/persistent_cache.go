@@ -238,6 +238,9 @@ type PersistentCache struct {
 	// tierUploader tiers completed objects to tiering targets.
 	// Nil when no tiering targets are configured.
 	tierUploader *tierUploader
+	// promoter brings objects on cold tiering targets back to local
+	// storage as they are read.  Nil unless the targets are cold.
+	promoter *tierPromoter
 }
 
 // persistentDownload tracks an active download operation
@@ -790,7 +793,14 @@ func NewPersistentCache(ctx context.Context, egrp *errgroup.Group, cfg Persisten
 			threshold = int64(parsed)
 		}
 		uploader := newTierUploader(db, storage, eviction, threshold)
-		storage.onObjectComplete = uploader.MaybeEnqueue
+		if uploader.cold {
+			// Cold targets take objects only when eviction pushes them
+			// off local storage, and give them back when they are read.
+			eviction.demoter = uploader
+			pc.promoter = newTierPromoter(pc, pc.downloadCtx)
+		} else {
+			storage.onObjectComplete = uploader.MaybeEnqueue
+		}
 		pc.tierUploader = uploader
 	}
 
@@ -1390,6 +1400,42 @@ func (pc *PersistentCache) whileOpen(start func()) bool {
 	return true
 }
 
+// goWhileOpen runs fn on a goroutine of its own, registered with downloadWg
+// through whileOpen, unless the cache is closing; it reports whether fn was
+// started.  Every background goroutine that uses the transfer engine, the
+// database or local storage starts through here (or registers through
+// whileOpen itself), so that Close waits for it.
+func (pc *PersistentCache) goWhileOpen(fn func()) bool {
+	return pc.whileOpen(func() {
+		pc.downloadWg.Add(1)
+		go func() {
+			defer pc.downloadWg.Done()
+			fn()
+		}()
+	})
+}
+
+// goFill runs a fill registered with ObjectBlockState.beginFill on a
+// goroutine of its own (see goWhileOpen), pinning the object while it runs:
+// a fill outlives the reader that started it, and eviction must not delete an
+// object under a writer still filling it.  run does the writing; the fill is
+// ended after it returns, so a fill that condemns the object has done so
+// before its readers are woken.  If the cache is closing, the fill is ended
+// without running anything and goFill reports false.
+func (pc *PersistentCache) goFill(instanceHash InstanceHash, state *ObjectBlockState, fill *blockFill, run func()) bool {
+	unpin := pc.storage.PinObject(instanceHash)
+	launched := pc.goWhileOpen(func() {
+		defer unpin()
+		defer state.endFill(fill)
+		run()
+	})
+	if !launched {
+		state.endFill(fill)
+		unpin()
+	}
+	return launched
+}
+
 // startFill starts a background fill of a partly cached object, for a reader
 // that needs a block that no download or fill is writing: one transfer from
 // that block to the next block present, or to last (the end of the reader's
@@ -1408,9 +1454,19 @@ func (pc *PersistentCache) whileOpen(start func()) bool {
 // early for a benign reason (see transferStopKeepsData), but drops the object
 // -- telling its readers why -- if it fails in a way that condemns what it
 // wrote (see BlockFetcherV2.dropIfCondemned).
+//
+// An object promoted from a cold tiering target is filled from the copy
+// there, by the same rules, for as long as it has one (see
+// tierPromoter.startFill); otherwise, and once that copy is gone, from the
+// origin.
 func (pc *PersistentCache) startFill(res *objectResolution, state *ObjectBlockState, block, last uint32, overDownload bool) (covered bool, started <-chan struct{}) {
 	if pc.closed.Load() || res.meta == nil || res.meta.ContentLength <= 0 {
 		return false, nil
+	}
+	if pc.promoter != nil && res.meta.ColdCopy != nil {
+		if handled, covered, started := pc.promoter.startFill(res.instanceHash, state, block, last, overDownload); handled {
+			return covered, started
+		}
 	}
 	fill := state.beginFill(block, last, overDownload)
 	if fill == nil {
@@ -1429,26 +1485,14 @@ func (pc *PersistentCache) startFill(res *objectResolution, state *ObjectBlockSt
 		return false, nil
 	}
 	log.Debugf("Filling blocks %d-%d of %s in the background", fill.start, fill.end, res.instanceHash)
-	// The fill outlives the reader that started it by up to the prefetch
-	// timeout, so it pins the object itself, as a reader does: eviction
-	// must not delete an object under a writer still filling it.
-	unpin := pc.storage.PinObject(res.instanceHash)
-	launched := pc.whileOpen(func() {
-		pc.downloadWg.Add(1)
-		go func() {
-			defer pc.downloadWg.Done()
-			defer unpin()
-			defer state.endFill(fill)
-			defer bf.Close()
-			if err := bf.Fill(pc.downloadCtx, fill.start, fill.end); err != nil {
-				log.Debugf("Background fill of blocks %d-%d of %s ended early: %v", fill.start, fill.end, res.instanceHash, err)
-			}
-		}()
+	launched := pc.goFill(res.instanceHash, state, fill, func() {
+		defer bf.Close()
+		if err := bf.Fill(pc.downloadCtx, fill.start, fill.end); err != nil {
+			log.Debugf("Background fill of blocks %d-%d of %s ended early: %v", fill.start, fill.end, res.instanceHash, err)
+		}
 	})
 	if !launched {
 		bf.Close()
-		state.endFill(fill)
-		unpin()
 		return false, nil
 	}
 	return true, fill.done
@@ -1495,10 +1539,13 @@ func (pc *PersistentCache) GetSeekableReader(ctx context.Context, objectPath, be
 		}
 
 		// Objects tiered to a tiering target are proxied through a
-		// seekable remote stream (no local blocks exist for them).
-		if target := pc.storage.getTierTarget(res.meta.StorageID); target != nil {
+		// seekable remote stream (no local blocks exist for them) -- unless
+		// the target is cold, in which case the object is promoted back to
+		// local storage and read from there as it fills.
+		if target := pc.storage.getTierTarget(res.meta.StorageID); target != nil && !pc.promoteForRead(res, !rangeOnly) {
 			return pc.newTierSeekableReader(ctx, target, res), res.meta, nil
 		}
+		pc.finishPromotionForWholeRead(res, !rangeOnly)
 
 		rr, err := pc.newFetchingRangeReader(res, 0, res.meta.ContentLength-1)
 		if err != nil {
@@ -1532,8 +1579,9 @@ func (pc *PersistentCache) GetRange(ctx context.Context, objectPath, token, rang
 		}
 
 		// Objects tiered to a tiering target stream directly from the
-		// bucket (optionally limited to the requested range).
-		if target := pc.storage.getTierTarget(res.meta.StorageID); target != nil {
+		// bucket (optionally limited to the requested range), unless the
+		// target is cold and the object is promoted instead.
+		if target := pc.storage.getTierTarget(res.meta.StorageID); target != nil && !pc.promoteForRead(res, rangeHeader == "") {
 			stream := pc.openTierStream(ctx, target, res)
 			if rangeHeader != "" {
 				ranges, err := ParseRangeHeader(rangeHeader, res.meta.ContentLength)
@@ -1551,6 +1599,7 @@ func (pc *PersistentCache) GetRange(ctx context.Context, objectPath, token, rang
 			}
 			return stream, nil
 		}
+		pc.finishPromotionForWholeRead(res, rangeHeader == "")
 
 		// Handle range request
 		if rangeHeader != "" {
@@ -1583,8 +1632,11 @@ func (pc *PersistentCache) GetRange(ctx context.Context, objectPath, token, rang
 		// that stopped early and kept its whole blocks.  The plain
 		// ObjectReader calls ReadBlocks directly and would fail with
 		// "block N not yet downloaded" at the first missing block -- for
-		// a prestage, on every attempt until the object was evicted.
-		if res.meta.ContentLength > 0 && res.meta.IsDisk() && (res.dl != nil || res.meta.Completed.IsZero()) {
+		// a prestage, on every attempt until the object was evicted.  An
+		// object being promoted from a cold tiering target keeps its
+		// completion time while it is missing blocks, so it is asked
+		// about separately.
+		if res.meta.ContentLength > 0 && res.meta.IsDisk() && (res.dl != nil || res.meta.Completed.IsZero() || pc.partlyPromoted(res)) {
 			rr, rrErr := pc.newFetchingRangeReader(res, 0, res.meta.ContentLength-1)
 			if rrErr != nil {
 				if attempt < maxAttempts-1 && isEvictedError(rrErr) {
@@ -1742,6 +1794,18 @@ func (pc *PersistentCache) IsFullyCached(ctx context.Context, objectPath, token 
 
 	if meta.ContentLength < 0 || meta.Completed.IsZero() {
 		return false
+	}
+
+	// An object on a cold tiering target, or still being promoted back from
+	// one, is cached but not where a prestage means it to be: reading it
+	// brings it to local storage.
+	if pc.storage.isColdTarget(meta.StorageID) {
+		return false
+	}
+	if meta.ColdCopy != nil {
+		if complete, err := pc.storage.IsComplete(instanceHash); err != nil || !complete {
+			return false
+		}
 	}
 
 	// Check whether the cached entry is stale.  IsStale handles both

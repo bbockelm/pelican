@@ -242,7 +242,7 @@ func TestOpenCacheDBReadOnlyRefusesWrites(t *testing.T) {
 		},
 		"ReloadSalt": func() error { return db.ReloadSalt() },
 		"EvictByLRU": func() error {
-			_, _, err := db.EvictByLRU(StorageIDInline, 1, 1, 0, nil)
+			_, err := db.EvictByLRU(StorageIDInline, 1, 1, 0, nil)
 			return err
 		},
 		"SetTierUploadIntent": func() error {
@@ -250,6 +250,20 @@ func TestOpenCacheDBReadOnlyRefusesWrites(t *testing.T) {
 		},
 		"DeleteTierUploadIntent": func() error {
 			return db.DeleteTierUploadIntent(instHash)
+		},
+		"SetTierPromoteIntent": func() error {
+			return db.SetTierPromoteIntent(instHash)
+		},
+		"DeleteTierPromoteIntent": func() error {
+			return db.DeleteTierPromoteIntent(instHash)
+		},
+		"PromoteObject": func() error {
+			_, err := db.PromoteObject(instHash, 2, 1, nil)
+			return err
+		},
+		"DropColdCopy": func() error {
+			_, _, err := db.DropColdCopy(instHash, 2)
+			return err
 		},
 		// A batch holds an open BadgerDB write transaction, so each of these
 		// cancels the one it took -- the refusal is the assertion, not a reason

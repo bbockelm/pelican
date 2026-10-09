@@ -20,6 +20,7 @@ package local_cache
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
@@ -75,16 +76,31 @@ type tierTarget struct {
 	lastProbeError atomic.Value
 }
 
+// wrapTierBackendForTest, when set, wraps every tier backend as it is opened.
+// Tests use it to inject faults before the cache's background goroutines
+// start using the backend; nothing sets it in production.
+var wrapTierBackendForTest func(TierBackend) TierBackend
+
 // newTierTarget opens the backend for cfg and probes its capabilities.  No
 // object I/O happens beyond the capability probe; identity resolution is a
 // separate, explicit step.
 func newTierTarget(ctx context.Context, cfg TierTargetConfig) (*tierTarget, error) {
-	backend, err := newBlobTierBackend(ctx, cfg)
+	blob, err := newBlobTierBackend(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
+	var backend TierBackend = blob
+	if wrap := wrapTierBackendForTest; wrap != nil {
+		backend = wrap(backend)
+	}
 	t := &tierTarget{cfg: cfg, backend: backend}
 	t.healthy.Store(true)
+	if cfg.Cold {
+		// Reads of a cold target's objects always go through the cache,
+		// which brings them back to local storage.
+		log.Infof("Cache tier target %s is cold; reads of its objects go through the cache", cfg.DisplayURL())
+		return t, nil
+	}
 	if probe, ok := probeTierRedirect(ctx, backend); ok {
 		if u, perr := url.Parse(probe); perr == nil {
 			t.canRedirect = true
@@ -265,6 +281,28 @@ func (t *tierTarget) reapStaleUploads(ctx context.Context, maxAge time.Duration)
 	return reaper.ReapStaleUploads(ctx, maxAge)
 }
 
+// tierStreamBlankRetries is how many bodies in a row a tier stream reopens
+// after they fail before producing a byte.  A body that makes progress before
+// failing is always reopened, as a mid-transfer network blip should cost one
+// re-issued request, not the whole proxied transfer.
+const tierStreamBlankRetries = 2
+
+// tierReadError is how a tier stream reports that the target did not deliver
+// the object: it could not be reached, failed every read, or no longer holds
+// the copy that was uploaded (changed).  Its message is generic, since it can
+// reach a client; the detail, which names the backing store, is logged.
+//
+// It says nothing against the bytes the stream did deliver: every request is
+// pinned to the recorded copy, so a copy found changed is found so before
+// any of its bytes are read.  A body that ends before the object's recorded
+// size is another matter, and is reported as a plain error.
+type tierReadError struct {
+	msg     string
+	changed bool
+}
+
+func (e *tierReadError) Error() string { return e.msg }
+
 // tierObjectStream adapts a lazily-opened backend read into an
 // io.ReadSeekCloser suitable for http.ServeContent.  ServeContent's access
 // pattern is a couple of Seeks (to learn the size / position) followed by a
@@ -280,6 +318,11 @@ type tierObjectStream struct {
 
 	body       io.ReadCloser
 	bodyOffset int64 // position the current body corresponds to
+	// bodyProgressed records whether the current body has produced any
+	// bytes.  blankFailures counts the bodies in a row that failed before
+	// producing anything; see tierStreamBlankRetries.
+	bodyProgressed bool
+	blankFailures  int
 
 	// onClose releases resources held for the lifetime of the stream -- for a
 	// stream serving a client, the reader pin that keeps eviction from
@@ -314,10 +357,10 @@ func (s *tierObjectStream) open() (io.ReadCloser, error) {
 			s.onChanged()
 			s.onChanged = nil
 		}
-		return nil, errors.Errorf("object %s changed on backing storage", s.hash)
+		return nil, &tierReadError{msg: fmt.Sprintf("object %s changed on backing storage", s.hash), changed: true}
 	}
 	log.Warnf("Failed to open a tier stream for %s: %v", s.hash, err)
-	return nil, errors.Errorf("failed to read object %s from backing storage", s.hash)
+	return nil, &tierReadError{msg: fmt.Sprintf("failed to read object %s from backing storage", s.hash)}
 }
 
 func (s *tierObjectStream) Read(p []byte) (int, error) {
@@ -335,18 +378,38 @@ func (s *tierObjectStream) Read(p []byte) (int, error) {
 		}
 		s.body = body
 		s.bodyOffset = s.position
+		s.bodyProgressed = false
 	}
 	n, err := s.body.Read(p)
 	s.position += int64(n)
 	s.bodyOffset = s.position
+	if n > 0 {
+		s.bodyProgressed = true
+	}
 	if err != nil && err != io.EOF {
 		// The body is no longer usable.  Drop it and leave bodyOffset where it
 		// is so the next Read reopens at the current position rather than
 		// reading on through a broken stream: a mid-transfer network blip
 		// should cost one re-issued request, not the whole proxied transfer.
-		log.Warnf("Tier stream for %s failed at offset %d; will reopen: %v", s.hash, s.position, err)
+		//
+		// Bodies that fail without producing anything are retried only a
+		// few times in a row: one can be a blip, but reopening without
+		// bound is how a target that accepts requests and fails every one
+		// would be retried forever.  Progress resets the count.
+		if s.bodyProgressed {
+			s.blankFailures = 0
+		} else {
+			s.blankFailures++
+		}
 		s.body.Close()
 		s.body = nil
+		if s.blankFailures > tierStreamBlankRetries {
+			// Generic, like open's: the detail names the backing store.
+			log.Warnf("Tier stream for %s failed at offset %d %d times in a row without reading anything; giving up: %v",
+				s.hash, s.position, s.blankFailures, err)
+			return n, &tierReadError{msg: fmt.Sprintf("failed to read object %s from backing storage", s.hash)}
+		}
+		log.Warnf("Tier stream for %s failed at offset %d; will reopen: %v", s.hash, s.position, err)
 		if n > 0 {
 			return n, nil
 		}
@@ -356,6 +419,7 @@ func (s *tierObjectStream) Read(p []byte) (int, error) {
 		}
 		s.body = body
 		s.bodyOffset = s.position
+		s.bodyProgressed = false
 		return 0, nil
 	}
 	if err == io.EOF && s.position < s.size {
