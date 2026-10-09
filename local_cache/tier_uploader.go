@@ -160,7 +160,7 @@ func (u *tierUploader) offerDemotion(hash InstanceHash, meta *CacheMetadata) dem
 
 	// Record before queueing: a worker could otherwise finish the upload
 	// and settle it before the record exists, leaking the pending bytes.
-	local := meta.PerDirectoryBytes()
+	local := meta.ResidentBytes()
 	u.inflightMu.Lock()
 	u.demoting[hash] = demotion{local: local, accessed: meta.LastAccessTime}
 	for sid, b := range local {
@@ -419,11 +419,16 @@ func (u *tierUploader) workerLoop(ctx context.Context) {
 // objects are eligible: large objects (the prime tiering candidates) are
 // exactly the ones chunking splits across directories, and relocation
 // flattens them into a single remote object.
+//
+// An object promoted from a cold target that kept its copy there is never
+// uploaded: eviction demotes it by pointing it back at that copy, and a
+// partly promoted one could not be read back in full anyway.
 func (u *tierUploader) eligible(meta *CacheMetadata) bool {
 	return meta != nil &&
 		!meta.Completed.IsZero() &&
 		meta.StorageID != StorageIDInline &&
 		!u.storage.IsTiered(meta.StorageID) &&
+		meta.ColdCopy == nil &&
 		meta.ContentLength >= u.threshold
 }
 

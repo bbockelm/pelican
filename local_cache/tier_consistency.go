@@ -62,6 +62,11 @@ func (cc *ConsistencyChecker) tierScanLoop(ctx context.Context) error {
 //     the copy that was uploaded) is removed so the object is re-fetched
 //     from the origin on the next request.
 //
+// The metadata a target's object belongs to is either an object resident
+// there or a promoted object that kept its cold copy there (see
+// CacheMetadata.TierCopyOn).  A kept copy that is missing or changed is
+// dropped from the record; the object itself is local and stays.
+//
 // Byte-level usage for tiering storage IDs is reconciled by the regular metadata
 // scan (usageDuringScan covers every metadata entry regardless of backend).
 func (cc *ConsistencyChecker) RunTierScan(ctx context.Context) error {
@@ -169,7 +174,7 @@ func (cc *ConsistencyChecker) scanTierTarget(ctx context.Context, sid StorageID,
 			return ctx.Err()
 		default:
 		}
-		if meta.StorageID != sid {
+		if _, ours := meta.TierCopyOn(sid); !ours {
 			return nil
 		}
 
@@ -242,8 +247,10 @@ func (cc *ConsistencyChecker) scanTierTarget(ctx context.Context, sid StorageID,
 			return ctx.Err()
 		}
 		meta, err := cc.db.GetMetadata(e.hash)
-		if err == nil && meta != nil && meta.StorageID == sid {
-			continue // relocated here since the scan; no longer an orphan
+		if err == nil && meta != nil {
+			if _, ours := meta.TierCopyOn(sid); ours {
+				continue // relocated here since the scan; no longer an orphan
+			}
 		}
 		if cc.tierUploadInFlight(e.hash) {
 			continue // an upload that started since the listing owns this object
@@ -265,7 +272,10 @@ func (cc *ConsistencyChecker) scanTierTarget(ctx context.Context, sid StorageID,
 			return ctx.Err()
 		}
 		meta, err := cc.db.GetMetadata(hash)
-		if err != nil || meta == nil || meta.StorageID != sid {
+		if err != nil || meta == nil {
+			continue
+		}
+		if _, ours := meta.TierCopyOn(sid); !ours {
 			continue
 		}
 		opCtx, cancel := context.WithTimeout(ctx, tierSweepOpTimeout)
@@ -275,8 +285,17 @@ func (cc *ConsistencyChecker) scanTierTarget(ctx context.Context, sid StorageID,
 			log.Warnf("Failed to verify remote object %s before cleanup: %v", hash, err)
 			continue
 		}
-		if tierCopyMismatch(meta, current, exists) == "" {
+		if tierCopyMismatch(meta, sid, current, exists) == "" {
 			continue // the listing was stale; the copy is present and unchanged
+		}
+		if meta.StorageID != sid {
+			// Only the retained cold copy of a local object is gone.
+			if _, err := cc.storage.dropColdCopy(hash, sid); err != nil {
+				log.Warnf("Failed to drop the missing cold copy of %s: %v", hash, err)
+				continue
+			}
+			deletedDB++
+			continue
 		}
 		if err := cc.storage.Delete(hash); err != nil {
 			log.Warnf("Failed to delete orphaned DB entry %s for a tiered object: %v", hash, err)

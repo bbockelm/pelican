@@ -3309,7 +3309,7 @@ description: |+
   object is fully downloaded to a local storage directory, the cache uploads it
   (unencrypted) to one of these targets when the object size meets or exceeds
   ${Cache.TieringThreshold}; the local copy is then removed and the object is served from
-  the target.
+  the target.  Targets marked **Cold** work the other way around; see "Cold targets" below.
 
   Targets are object stores, reached through the same library the origin's object backends
   use: S3 and S3-compatible services (MinIO, Ceph RGW), Google Cloud Storage, and Azure Blob
@@ -3353,6 +3353,9 @@ description: |+
     and the target is genuinely its own.  Without it, the cache refuses to start against
     such a target (see the ownership note below).  Never use it to point two caches at
     one target.
+  - **Cold** (bool, optional, default false): the target is larger but slower than local
+    storage.  See "Cold targets" below.  Either every target is cold or none is; the cache
+    refuses to start with a mix.
 
   Example YAML:
   ```yaml
@@ -3396,6 +3399,35 @@ description: |+
     bytes the cache uploaded even after an overwrite — provided the credential
     that can overwrite objects cannot also delete old versions.
 
+  **Cold targets.**  For storage that is bigger but slower than the cache's local disks,
+  local storage is the hot tier and a cold target sits behind it:
+
+  - Nothing is uploaded when an object completes.  When local storage crosses its
+    high-water mark, eviction moves the least recently used objects (those meeting
+    ${Cache.TieringThreshold}) to a cold target instead of deleting them; smaller objects,
+    and everything once local storage is past its maximum or no cold target is healthy and
+    has room, are deleted as usual.  A cold target evicts its own least recently used
+    objects when it fills, which removes them from the cache.
+  - A read of an object on a cold target is never redirected.  The cache serves it and
+    copies it back to local storage as it streams, so the client does not wait for the
+    copy.  A read of the whole object finishes the copy in the background even if the
+    client disconnects, and a restart resumes it; a range read copies only what it touches,
+    and stops once no client has been reading the object for ${LocalCache.PrefetchTimeout}.
+    Whatever a cold target cannot supply — it is down, or its copy changed or vanished —
+    comes from the origin instead.
+    An object is served from the cold target without being copied back when local storage
+    has no room for it without going past its maximum.
+    Concurrent readers share one copy.  An object larger than the room local eviction
+    keeps free (a directory's maximum size less its low-water mark) is served from the cold
+    target without being copied back.
+  - The cold copy is kept after an object is promoted, so evicting it again costs no
+    upload.  Each object therefore occupies room on both tiers while it is local; the extra
+    room used on the cold targets is at most the size of local storage.  A cold target's
+    own eviction cannot remove kept copies, so size cold targets well above local storage:
+    one that fills up with kept copies has no room left for new demotions, and from then
+    on objects evicted from local storage are deleted instead.  A kept copy that is found
+    changed or missing is dropped, and the local object is unaffected.
+
   Treat the target as part of the cache's trust boundary: give the cache a
   dedicated least-privilege credential, keep the bucket or container private (no
   anonymous or cross-account access), prefer an `https` endpoint, and consider
@@ -3415,7 +3447,9 @@ description: |+
   queue's depth and drops, uploads deferred for lack of room, reads by how they were
   served, objects found changed on a target, removals by the consistency sweep and when it
   last completed, whether each target passed its latest liveness check, and whether each
-  target can issue redirect URLs.
+  target can issue redirect URLs.  For cold targets they also count demotions and their
+  bytes by method (an upload, or a return to a kept copy), promotions by result, and the
+  bytes copied back to local storage.
 
   This setting only has effect when `${Cache.EnableV2}` is true; the cache logs a
   warning and ignores tiering targets otherwise.  It applies to the cache server only:
@@ -3428,8 +3462,9 @@ name: Cache.TieringThreshold
 description: |+
   The minimum object size for the V2 cache to tier a completed object to a storage target
   configured via ${Cache.TieringTargets}.  Objects smaller than this threshold stay on
-  local storage.  Accepts byte units (e.g. "4MB", "512MB", "1TB"); the suffixes are
-  binary multiples.
+  local storage.  With cold targets it is the minimum size for an evicted object to be
+  moved to one rather than deleted.  Accepts byte units (e.g. "4MB", "512MB", "1TB"); the
+  suffixes are binary multiples.
 type: string
 default: 4MB
 components: ["cache"]

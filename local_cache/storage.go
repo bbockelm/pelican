@@ -379,6 +379,13 @@ type StorageManager struct {
 	// init; read-only afterwards.
 	tierTargets map[StorageID]*tierTarget
 
+	// usageReleased, when non-nil, is told of bytes released from a storage
+	// target outside an eviction pass, so the eviction manager's in-memory
+	// estimate follows the database.  Set by NewEvictionManager.  (Delete
+	// does not report its refunds yet; the estimate catches up when it is
+	// next corrected from the database.)
+	usageReleased func(StorageID, int64)
+
 	// onObjectComplete, when non-nil, is invoked (on the completing
 	// goroutine) each time an object transitions to Completed.  Set during
 	// single-threaded init by the tiering uploader to observe candidates for
@@ -879,6 +886,13 @@ func (sm *StorageManager) getDiskCrypto(instanceHash InstanceHash) (*diskCryptoE
 	}
 	if !meta.IsDisk() {
 		return nil, errors.New("object is not stored on disk")
+	}
+	// A non-chunked object lives in exactly the directory its StorageID
+	// names.  One that names a tiering target, or a directory this manager
+	// does not have, has no local file to read or write -- and
+	// getObjectPathForDir would quietly substitute another directory.
+	if !meta.IsChunked() && !sm.isLocalDir(meta.StorageID) {
+		return nil, errors.Errorf("object is not on local storage (storage %d)", meta.StorageID)
 	}
 
 	encMgr := sm.db.GetEncryptionManager()
@@ -1596,9 +1610,15 @@ func (sm *StorageManager) checkAndMarkComplete(instanceHash InstanceHash, meta *
 		return
 	}
 	if uint32(downloadedCount) == totalBlocks {
-		completionMeta := &CacheMetadata{Completed: time.Now()}
-		if err := sm.db.MergeMetadata(instanceHash, completionMeta); err != nil {
-			log.Warnf("Failed to update completion time: %v", err)
+		// An object that already has a completion time -- one being
+		// repaired, or promoted back from a cold tiering target -- keeps it.
+		// It dates the content: freshness falls back to it for an object
+		// never revalidated.
+		if meta.Completed.IsZero() {
+			completionMeta := &CacheMetadata{Completed: time.Now()}
+			if err := sm.db.MergeMetadata(instanceHash, completionMeta); err != nil {
+				log.Warnf("Failed to update completion time: %v", err)
+			}
 		}
 		if sm.onObjectComplete != nil {
 			sm.onObjectComplete(instanceHash)
@@ -2064,10 +2084,41 @@ func (sm *StorageManager) Delete(instanceHash InstanceHash) error {
 	return nil
 }
 
+// dropColdCopy forgets the copy a promoted object kept on cold target sid,
+// because that copy is gone or no longer the one the cache uploaded: the
+// record is cleared, the target's charge refunded and whatever is now under
+// the object's key on the target removed, since it is not the cache's copy.
+// The object itself stays local; any blocks it is still missing come from the
+// origin.  Reports whether there was such a copy to drop.
+func (sm *StorageManager) dropColdCopy(instanceHash InstanceHash, sid StorageID) (bool, error) {
+	meta, dropped, err := sm.db.DropColdCopy(instanceHash, sid)
+	if err != nil || !dropped {
+		return false, err
+	}
+	size := CalculateFileSize(meta.ContentLength)
+	if err := sm.db.AddUsage(sid, meta.NamespaceID, -size); err != nil {
+		log.Warnf("Failed to refund the cold copy of %s on storage %d: %v", instanceHash, sid, err)
+	}
+	if sm.usageReleased != nil {
+		sm.usageReleased(sid, size)
+	}
+	if target := sm.getTierTarget(sid); target != nil {
+		delCtx, delCancel := context.WithTimeout(context.Background(), tierSweepOpTimeout)
+		err := target.deleteObject(delCtx, instanceHash)
+		delCancel()
+		if err != nil {
+			log.Warnf("Failed to delete the dropped cold copy of %s from tiering target %d (consistency sweep will retry): %v",
+				instanceHash, sid, err)
+		}
+	}
+	return true, nil
+}
+
 // deleteObjectData removes the bytes behind an object whose database records
-// are already gone: its in-memory state, and its files on local storage or its
-// object on the tiering target it lived on.  Every path that deletes an
-// object goes through here, so they cannot disagree about what that means.
+// are already gone (or, for a demotion, rewritten): its in-memory state, its
+// files on local storage or its object on the tiering target it lived on, and
+// any cold copy layout says it kept.  Every path that deletes an object goes
+// through here, so none of them can forget one of its copies.
 //
 // A remote delete that fails is logged and left for the tiering consistency
 // sweep, which removes objects it has no record of.
@@ -2091,6 +2142,9 @@ func (sm *StorageManager) deleteObjectData(instanceHash InstanceHash, layout *Ca
 		deleteRemote(layout.StorageID)
 	} else if layout.IsDisk() {
 		sm.deleteChunkFiles(instanceHash, layout.ContentLength, layout.StorageID, layout.ChunkSizeCode, layout.ChunkLocations)
+	}
+	if layout.ColdCopy != nil {
+		deleteRemote(layout.ColdCopy.StorageID)
 	}
 }
 
@@ -2153,6 +2207,10 @@ func (sm *StorageManager) deleteChunkFiles(instanceHash InstanceHash, contentLen
 // A spared object stays at the head of the index and is reconsidered on the
 // next pass, by which time its reader has usually finished.
 //
+// An object promoted from a cold tiering target that kept its copy there is
+// demoted back to that copy rather than deleted: that costs nothing but a
+// metadata write, and the cold target already has room for it.
+//
 // All DB mutations happen atomically; filesystem deletes follow afterward.
 // Returns the evicted objects, total bytes freed, and how many were spared.
 func (sm *StorageManager) EvictByLRU(storageID StorageID, namespaceID NamespaceID, maxObjects int, maxBytes int64) ([]evictedObject, uint64, int, error) {
@@ -2168,10 +2226,14 @@ func (sm *StorageManager) evictByLRU(storageID StorageID, namespaceID NamespaceI
 	// isPinned is called from inside the eviction transaction.  That is safe
 	// because pins.mu is a leaf: pinning never opens a Badger transaction, so
 	// the two locks cannot be acquired in opposing orders.
-	res, err := sm.db.EvictByLRU(storageID, namespaceID, maxObjects, maxBytes, &EvictOptions{
-		Skip:   sm.pins.isPinned,
-		Demote: demote,
-	})
+	opts := &EvictOptions{Skip: sm.pins.isPinned, Demote: demote}
+	if sm.coldTiering() {
+		// Only then can an object have a kept cold copy to be demoted to;
+		// leaving it unset otherwise spares the LRU walk a metadata read
+		// per candidate.
+		opts.ColdTarget = sm.isColdTarget
+	}
+	res, err := sm.db.EvictByLRU(storageID, namespaceID, maxObjects, maxBytes, opts)
 	if err != nil {
 		// Return the attempted (uncommitted) objects alongside the error
 		// so the caller can log which objects were involved in a conflict.
@@ -2182,16 +2244,27 @@ func (sm *StorageManager) evictByLRU(storageID StorageID, namespaceID NamespaceI
 	for i := range res.Evicted {
 		obj := &res.Evicted[i]
 		layout := obj.layout()
-		// Use PerDirectoryBytes to compute the actual on-disk size freed
-		// -- this correctly handles lazily-allocated chunked objects where
-		// not all chunks may be allocated.
-		for _, bytes := range layout.PerDirectoryBytes() {
+		// Use ResidentBytes to compute the actual on-disk size freed --
+		// this correctly handles lazily-allocated chunked objects where
+		// not all chunks may be allocated.  A deleted object's cold copy is
+		// freed too, but not on the storage being evicted.
+		for _, bytes := range layout.ResidentBytes() {
 			totalFreed += uint64(bytes)
 		}
 		sm.deleteObjectData(obj.instanceHash, layout)
+		if obj.demotedTo != 0 {
+			recordTierDemotion(sm.getTierTarget(obj.demotedTo), tierDemotedToRetainedCopy, obj.contentLen)
+		}
 	}
 
 	return res, totalFreed, nil
+}
+
+// isLocalDir reports whether a storage ID names one of this manager's local
+// directories.
+func (sm *StorageManager) isLocalDir(id StorageID) bool {
+	_, ok := sm.dirs[id]
+	return ok
 }
 
 // isColdTarget reports whether a storage ID is a configured cold tiering
@@ -2893,11 +2966,17 @@ func (bw *BlockWriter) completeIfWhole() {
 	}
 	downloadedCount, err := bw.sm.db.GetDownloadedBlockCount(bw.instanceHash)
 	if err == nil && uint32(downloadedCount) == bw.totalBlocks {
-		// Mark as completed via merge to avoid overwriting concurrent changes.
-		bw.meta.Completed = time.Now()
-		completionMeta := &CacheMetadata{Completed: bw.meta.Completed}
-		if err := bw.sm.db.MergeMetadata(bw.instanceHash, completionMeta); err != nil {
-			log.Warnf("Failed to update completion time: %v", err)
+		// Mark as completed via merge to avoid overwriting concurrent
+		// changes.  An object that already has a completion time -- one
+		// being repaired, or promoted back from a cold tiering target --
+		// keeps it.  It dates the content: freshness falls back to it for
+		// an object never revalidated.
+		if bw.meta.Completed.IsZero() {
+			bw.meta.Completed = time.Now()
+			completionMeta := &CacheMetadata{Completed: bw.meta.Completed}
+			if err := bw.sm.db.MergeMetadata(bw.instanceHash, completionMeta); err != nil {
+				log.Warnf("Failed to update completion time: %v", err)
+			}
 		}
 
 		// Remove the block-state bitmap now that the object is complete.

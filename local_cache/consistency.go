@@ -659,13 +659,13 @@ func (cc *ConsistencyChecker) RunMetadataScan(ctx context.Context, progressCh ch
 			// their actual on-disk size: CalculateFileSize(ContentLength)
 			// for disk objects (which accounts for the 16-byte MAC per
 			// 4080-byte block), or ContentLength for inline objects.
-			if meta.ContentLength > 0 {
-				uk := StorageUsageKey{StorageID: meta.StorageID, NamespaceID: meta.NamespaceID}
-				if meta.StorageID == StorageIDInline {
-					usageDuringScan[uk] += meta.ContentLength
-				} else {
-					usageDuringScan[uk] += CalculateFileSize(meta.ContentLength)
-				}
+			//
+			// PerDirectoryBytes is the one definition of what an object is
+			// charged where -- the same one every charge and refund uses --
+			// so a chunked object is counted against each directory holding
+			// a chunk, and a retained cold copy against its cold target.
+			for sid, bytes := range meta.PerDirectoryBytes() {
+				usageDuringScan[StorageUsageKey{StorageID: sid, NamespaceID: meta.NamespaceID}] += bytes
 			}
 
 			// Process all files that are less than current DB entry (orphaned files)
@@ -1426,6 +1426,13 @@ func (cc *ConsistencyChecker) verifyObjectChecksum(
 		return cc.verifyTieredObject(ctx, instanceHash, meta, checksumMismatches, inconsistentBytes, objectsVerified)
 	}
 
+	// A local object promoted from a cold target may have kept its copy
+	// there.  Check that copy the same cheap way; one that no longer matches
+	// is dropped, and the local copy is verified below as usual.
+	if meta.ColdCopy != nil {
+		cc.verifyColdCopy(ctx, instanceHash, meta, checksumMismatches)
+	}
+
 	// For disk storage, check if complete before attempting any checksumming
 	if meta.IsDisk() {
 		complete, err := cc.storage.IsComplete(instanceHash)
@@ -1538,7 +1545,7 @@ func (cc *ConsistencyChecker) verifyTieredObject(ctx context.Context, instanceHa
 	if err != nil {
 		return errors.Wrap(err, "failed to check the tiered copy")
 	}
-	reason := tierCopyMismatch(meta, current, exists)
+	reason := tierCopyMismatch(meta, meta.StorageID, current, exists)
 	if reason == "" {
 		*objectsVerified++
 		return nil
@@ -1559,18 +1566,52 @@ func (cc *ConsistencyChecker) verifyTieredObject(ctx context.Context, instanceHa
 	return nil
 }
 
-// tierCopyMismatch explains how a target's current copy of an object differs
-// from the one recorded when it was tiered, or returns "" if it does not.
+// verifyColdCopy checks the copy a promoted object kept on its cold target
+// against the record of it, dropping the copy (not the object) if it no
+// longer matches.  A target that cannot be reached is not a mismatch.
+func (cc *ConsistencyChecker) verifyColdCopy(ctx context.Context, instanceHash InstanceHash, meta *CacheMetadata, checksumMismatches *int64) {
+	sid := meta.ColdCopy.StorageID
+	target := cc.storage.getTierTarget(sid)
+	if target == nil {
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, tierSweepOpTimeout)
+	current, exists, err := target.objectInfo(probeCtx, instanceHash)
+	cancel()
+	if err != nil {
+		log.Debugf("Could not check the cold copy of %s: %v", instanceHash, err)
+		return
+	}
+	reason := tierCopyMismatch(meta, sid, current, exists)
+	if reason == "" {
+		return
+	}
+	log.Warnf("The cold copy of %s does not match the copy that was uploaded (%s); dropping it", instanceHash, reason)
+	tierChangedObjectsTotal.WithLabelValues(target.metricLabel(), tierChangeSeenByScan).Inc()
+	*checksumMismatches++
+	if _, err := cc.storage.dropColdCopy(instanceHash, sid); err != nil {
+		log.Warnf("Failed to drop the cold copy of %s: %v", instanceHash, err)
+	}
+}
+
+// tierCopyMismatch explains how the copy of an object that tiering target sid
+// currently holds differs from the one recorded when it was uploaded there,
+// or returns "" if it does not.  The record is the object's own when it lives
+// on sid, or its retained cold copy's (see CacheMetadata.TierCopyOn).
 // Objects tiered before entity tags were recorded are checked by size alone.
-func tierCopyMismatch(meta *CacheMetadata, current TierObjectInfo, exists bool) string {
+func tierCopyMismatch(meta *CacheMetadata, sid StorageID, current TierObjectInfo, exists bool) string {
+	expected, recorded := meta.TierCopyOn(sid)
+	if !recorded {
+		return "the cache has no record of a copy there"
+	}
 	if !exists {
 		return "it is missing from its tiering target"
 	}
 	if current.Size != meta.ContentLength {
 		return fmt.Sprintf("the target holds %d bytes; expected %d", current.Size, meta.ContentLength)
 	}
-	if meta.Remote != nil && meta.Remote.ETag != "" && current.ETag != meta.Remote.ETag {
-		return fmt.Sprintf("its entity tag changed from %s to %s, so it was overwritten", meta.Remote.ETag, current.ETag)
+	if expected.ETag != "" && current.ETag != expected.ETag {
+		return fmt.Sprintf("its entity tag changed from %s to %s, so it was overwritten", expected.ETag, current.ETag)
 	}
 	return ""
 }
@@ -1732,7 +1773,7 @@ func (cc *ConsistencyChecker) VerifyObject(instanceHash InstanceHash) (bool, err
 		if err != nil {
 			return false, err
 		}
-		return tierCopyMismatch(meta, current, exists) == "", nil
+		return tierCopyMismatch(meta, meta.StorageID, current, exists) == "", nil
 	}
 
 	// For disk storage, check that all ALLOCATED chunk files exist and object is complete

@@ -195,6 +195,9 @@ func NewEvictionManager(db *CacheDB, storage *StorageManager, config EvictionCon
 		evictChan:    make(chan struct{}, 1),
 	}
 	em.rebuildRRTable()
+	if storage != nil {
+		storage.usageReleased = em.NoteUsageDecrease
+	}
 	return em
 }
 
@@ -330,6 +333,42 @@ func (em *EvictionManager) DirFree(storageID StorageID) int64 {
 		free = 0
 	}
 	return free
+}
+
+// reserveForPromotion reserves room for promoting an object occupying
+// fileSize bytes into storage directory sid, adding it to the directory's
+// usage estimate, and reports whether it did.  It declines when:
+//
+//   - the object is larger than the headroom eviction keeps free there
+//     (maxSize less the low-water mark): one read would drain the directory
+//     by more than an eviction pass's worth, demoting much of what is hot
+//     to make room for something that may be read once; or
+//   - the directory would end up past its maximum, even counting bytes
+//     already queued for demotion as freed.  Past the maximum eviction
+//     stops demoting and deletes, so a burst of promotions would cost
+//     objects that could have gone to the cold tier -- while serving the
+//     read from the cold target instead costs nothing.
+//
+// Reserving is atomic with the check, so concurrent promotions cannot all
+// pass it together.  The caller charges the database itself, and calls
+// NoteUsageDecrease to give the reservation back if the promotion fails.
+func (em *EvictionManager) reserveForPromotion(sid StorageID, fileSize int64) bool {
+	limits, ok := em.dirLimits[sid]
+	counter, cok := em.dirUsage[sid]
+	if !ok || !cok || fileSize > limits.maxSize-limits.lowWater {
+		return false
+	}
+	var pending int64
+	if em.demoter != nil {
+		pending = em.demoter.pendingDemotionBytes(sid)
+	}
+	if used := counter.Add(fileSize); used-pending > limits.maxSize {
+		counter.Add(-fileSize)
+		return false
+	} else if used > limits.highWater {
+		em.TriggerEviction()
+	}
+	return true
 }
 
 // GetTotalUsage returns the current total cache usage (sum of per-dir atomics).
@@ -662,7 +701,8 @@ func (em *EvictionManager) noteEvicted(evicted []evictedObject) {
 	perDir := make(map[StorageID]int64, 2)
 	for i := range evicted {
 		// For chunked objects, attribute bytes to each directory
-		// proportional to the chunks stored there.
+		// proportional to the chunks stored there; a deleted object's
+		// cold copy is released from its target too.
 		for sid, bytes := range evicted[i].layout().PerDirectoryBytes() {
 			perDir[sid] += bytes
 		}
