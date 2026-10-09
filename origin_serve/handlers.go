@@ -20,8 +20,6 @@ package origin_serve
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"html"
@@ -50,6 +48,7 @@ import (
 	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/server_utils"
 	"github.com/pelicanplatform/pelican/ssh_posixv2"
+	"github.com/pelicanplatform/pelican/token"
 	"github.com/pelicanplatform/pelican/token_scopes"
 	"github.com/pelicanplatform/pelican/utils"
 )
@@ -271,43 +270,51 @@ func ResetHandlers() {
 	globusBackends = nil
 }
 
+// Up to this many tokens are looked at per request. XRootD's SciTokens plugin
+// uses the same limit.
+const maxTokensPerRequest = 10
+
 // extractTokens extracts bearer tokens from the request
 // Tokens can come from:
-// 1. Authorization header (may have multiple comma-separated tokens)
-// 2. Query parameter "access_token" (standard)
-// 3. Query parameter "authz" (non-standard)
+//  1. Authorization header (may have multiple comma-separated tokens)
+//  2. Query parameter "access_token" (standard)
+//  3. Query parameter "authz" (non-standard)
+//
+// Each source may hold several tokens separated by commas. In the header every
+// token must carry the "Bearer" scheme. In the query parameters the scheme is
+// optional: an XRootD cache forwards the client's Authorization header as
+// "?authz=Bearer%20<jwt>", commas included, so a comma-joined header arrives
+// as one query value (see token.CutBearerPrefix).
 func extractTokens(r *http.Request) []string {
 	tokens := make([]string, 0)
 
-	// Check Authorization header
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
+	// Check Authorization header; entries with any other scheme are ignored
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
 		// Split by comma to handle multiple tokens
 		for _, part := range strings.Split(authHeader, ",") {
-			part = strings.TrimSpace(part)
-			// Case-insensitive bearer token extraction
-			if len(part) > 7 && strings.ToLower(part[:7]) == "bearer " {
-				token := strings.TrimSpace(part[7:])
-				if token != "" {
-					tokens = append(tokens, token)
+			// Only leading space is trimmed here: the scheme check needs the space after "Bearer"
+			if tok, found := token.CutBearerPrefix(strings.TrimLeft(part, " \t")); found && tok != "" {
+				tokens = append(tokens, tok)
+			}
+		}
+	}
+
+	// Check query parameters; each may repeat, and each value may be comma-joined
+	query := r.URL.Query()
+	for _, key := range []string{"access_token", "authz"} {
+		for _, val := range query[key] {
+			for _, part := range strings.Split(val, ",") {
+				tok := strings.TrimSpace(token.StripBearerPrefix(strings.TrimLeft(part, " \t")))
+				if tok != "" {
+					tokens = append(tokens, tok)
 				}
 			}
 		}
 	}
 
-	// Check query parameters (may be multi-valued)
-	query := r.URL.Query()
-	// Handle multi-valued access_token parameters
-	for _, accessToken := range query["access_token"] {
-		if accessToken != "" {
-			tokens = append(tokens, accessToken)
-		}
-	}
-	// Handle multi-valued authz parameters
-	for _, authzToken := range query["authz"] {
-		if authzToken != "" {
-			tokens = append(tokens, authzToken)
-		}
+	if len(tokens) > maxTokensPerRequest {
+		log.Warningf("Request for %s carried %d tokens, more than the %d allowed; treating it as having none", r.URL.Path, len(tokens), maxTokensPerRequest)
+		return []string{}
 	}
 
 	return tokens
@@ -1586,45 +1593,6 @@ func handleHeadWithChecksum(c *gin.Context, handler *webdav.Handler, req *http.R
 
 	// Now let the WebDAV handler process the HEAD request
 	handler.ServeHTTP(c.Writer, req)
-}
-
-// computeETag generates an opaque, quoted ETag string that uniquely identifies
-// a specific instance of a file on disk.
-//
-// The ETag is the first 8 bytes of SHA-256 over (dev, inode, size, mtime),
-// rendered as 16 hex characters. The (dev, inode) pair is a VFS-level file
-// identifier: inodes alone are only unique within a single filesystem, so
-// including the device id keeps the ETag distinct when an origin exports
-// multiple volumes (separate disks, bind mounts, etc.) that happen to reuse
-// the same inode number. mtime ensures the ETag changes when a file is
-// rewritten in place. Size is folded in for cheap collision insurance.
-//
-// On platforms that don't expose a stable VFS id (Windows, or synthesized
-// FileInfo values such as afero's in-memory FS), the dev/inode portion is
-// omitted and only (size, mtime) feed the hash. The output width and shape
-// are unchanged in that case.
-//
-// The previous format -- size and mtime concatenated as a single hex blob --
-// matched the golang.org/x/net/webdav default but caused two different files
-// with the same size and mtime (common for empty/freshly-created files on
-// filesystems with second-precision mtime, or batches of fixed-size records)
-// to receive identical ETags. Mixing in the VFS id and running the tuple
-// through a hash fixes that.
-func computeETag(info os.FileInfo) string {
-	h := sha256.New()
-	var buf [8]byte
-	if dev, ino, ok := utils.FileVFSID(info); ok {
-		binary.BigEndian.PutUint64(buf[:], dev)
-		h.Write(buf[:])
-		binary.BigEndian.PutUint64(buf[:], ino)
-		h.Write(buf[:])
-	}
-	binary.BigEndian.PutUint64(buf[:], uint64(info.Size()))
-	h.Write(buf[:])
-	binary.BigEndian.PutUint64(buf[:], uint64(info.ModTime().UnixNano()))
-	h.Write(buf[:])
-	sum := h.Sum(nil)
-	return fmt.Sprintf(`"%x"`, sum[:8])
 }
 
 // checkBackendCapacity refuses a PUT the backend has already said will not

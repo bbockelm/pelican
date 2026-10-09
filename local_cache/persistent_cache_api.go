@@ -359,6 +359,23 @@ func (pc *PersistentCache) handleError(w http.ResponseWriter, getErr error, obje
 	}
 }
 
+// ifRangeHolds reports whether a request's If-Range precondition, if any,
+// holds for the cached object, as http.ServeContent judges it: a strong
+// entity tag equal to the object's, or a date equal to its modification time
+// (to the second).  When it does not, ServeContent ignores the Range header
+// and sends the whole object.
+func ifRangeHolds(r *http.Request, meta *CacheMetadata) bool {
+	ir := r.Header.Get("If-Range")
+	if ir == "" {
+		return true
+	}
+	if strings.HasPrefix(ir, `"`) || strings.HasPrefix(ir, "W/") {
+		return !strings.HasPrefix(ir, "W/") && !strings.HasPrefix(meta.ETag, "W/") && ir == meta.ETag
+	}
+	t, err := http.ParseTime(ir)
+	return err == nil && !meta.LastModified.IsZero() && meta.LastModified.Truncate(time.Second).Equal(t)
+}
+
 // requestOnlyIfCached returns true when the client indicates it only wants a
 // stored (cached) response.  This is signalled by the standard
 // Cache-Control: only-if-cached directive (RFC 7234 §5.2.1.7) or by the
@@ -624,6 +641,19 @@ func (pc *PersistentCache) serveObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer reader.Close()
+
+	// The reader covers the whole object, and http.ServeContent seeks it to
+	// each range requested; tell it the ranges, so that reading a few bytes
+	// of a partly cached object does not start a fill of all the rest.  When
+	// an If-Range precondition fails, ServeContent sends the whole object,
+	// so the whole object is what may be filled.
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" && meta != nil && reader.RangeReader != nil && ifRangeHolds(r, meta) {
+		ranges, err := ParseRangeHeader(rangeHeader, meta.ContentLength)
+		if err != nil {
+			ranges = nil // a malformed range starts no fills
+		}
+		reader.LimitFill(ranges)
+	}
 
 	// Set cache-related headers from metadata
 	if meta != nil {
@@ -952,7 +982,21 @@ func (pc *PersistentCache) proxyPropfind(w http.ResponseWriter, r *http.Request,
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	proxyReq, err := http.NewRequestWithContext(ctx, "PROPFIND", originURL.String(), r.Body)
+	// Buffer the (small, XML) request body so it can be sent again: to the
+	// origin after the director's redirect, and on a retry if the pooled
+	// connection the request went out on turns out to have been closed.
+	const maxPropfindBody = 1 << 20
+	reqBody, err := io.ReadAll(io.LimitReader(r.Body, maxPropfindBody+1))
+	if err != nil {
+		reqLog.Errorln("Failed to read PROPFIND request body:", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	if len(reqBody) > maxPropfindBody {
+		w.WriteHeader(http.StatusRequestEntityTooLarge)
+		return
+	}
+	proxyReq, err := http.NewRequestWithContext(ctx, "PROPFIND", originURL.String(), bytes.NewReader(reqBody))
 	if err != nil {
 		reqLog.Errorln("Failed to create PROPFIND request:", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -981,7 +1025,9 @@ func (pc *PersistentCache) proxyPropfind(w http.ResponseWriter, r *http.Request,
 	// Authorization header.  Use a custom CheckRedirect that preserves it
 	// and adds the federation token as access_token on the origin URL.
 	httpClient := &http.Client{
-		Transport: config.GetTransport(),
+		// PROPFIND is safe to resend on a stale pooled connection; see
+		// utils.MarkRetryableIfSafe.
+		Transport: utils.RetrySafeMethods(config.GetTransport()),
 		Timeout:   30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
