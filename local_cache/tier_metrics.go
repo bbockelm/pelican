@@ -54,8 +54,29 @@ const (
 // Values of the "method" label on the demotion metrics: how an object left
 // local storage for a cold target.
 const (
+	// tierDemotedToRetainedCopy: the object had been promoted from the
+	// target and kept its copy there, so it was simply pointed back at it.
+	tierDemotedToRetainedCopy = "retained_copy"
 	// tierDemotedByUpload: the object was uploaded to the target.
 	tierDemotedByUpload = "upload"
+)
+
+// Values of the "result" label on tierPromotionsTotal.
+const (
+	// tierPromotionStarted: a read moved the object's metadata back to local
+	// storage; its bytes follow as they are read (or copied in the background).
+	tierPromotionStarted = "started"
+	// tierPromotionCompleted: every byte of a promoted object is local.
+	tierPromotionCompleted = "completed"
+	// tierPromotionFailed: the background copy of a promoted object stopped
+	// short; the rest is fetched when it is read.
+	tierPromotionFailed = "failed"
+	// tierPromotionDeclined: the object was served from the cold target
+	// without being promoted, e.g. because it is too large for local storage.
+	tierPromotionDeclined = "declined"
+	// tierPromotionError: promoting the object failed (an I/O or database
+	// error), and it was served from the cold target instead.
+	tierPromotionError = "error"
 )
 
 // Values of the "kind" label on tierSweepRemovedTotal.
@@ -136,12 +157,24 @@ var (
 	tierDemotionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "pelican_cache_tiering_demotions_total",
 		Help: "Objects evicted from local storage to a cold tiering target instead of being deleted, by target and " +
-			"method: upload (the object was uploaded)",
+			"method: retained_copy (the object kept its copy there when it was promoted, and was pointed back at it) " +
+			"or upload (the object was uploaded)",
 	}, []string{"target", "method"})
 	tierDemotedBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "pelican_cache_tiering_demoted_bytes_total",
 		Help: "Size of the objects demoted from local storage to a cold tiering target, by target and method",
 	}, []string{"target", "method"})
+	tierPromotionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pelican_cache_tiering_promotions_total",
+		Help: "Promotions of objects from a cold tiering target back to local storage, by target and result: " +
+			"started (a read moved the object back), completed (all of its bytes are local), failed (the " +
+			"background copy stopped short), declined (the object was served from the target instead, e.g. " +
+			"for lack of room), or error (promoting it failed, and it was served from the target instead)",
+	}, []string{"target", "result"})
+	tierPromotedBytesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "pelican_cache_tiering_promoted_bytes_total",
+		Help: "Bytes read from a cold tiering target to fill promoted objects on local storage",
+	}, []string{"target"})
 	tierSweepLastSuccess = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "pelican_cache_tiering_sweep_last_success_timestamp_seconds",
 		Help: "Unix timestamp when the tiering consistency sweep last completed for a target",
@@ -169,4 +202,12 @@ func recordTierDemotion(target *tierTarget, method string, size int64) {
 	label := target.metricLabel()
 	tierDemotionsTotal.WithLabelValues(label, method).Inc()
 	tierDemotedBytesTotal.WithLabelValues(label, method).Add(float64(size))
+}
+
+// recordTierPromotion records a promotion event against a cold target.
+func recordTierPromotion(target *tierTarget, result string) {
+	if target == nil {
+		return
+	}
+	tierPromotionsTotal.WithLabelValues(target.metricLabel(), result).Inc()
 }
