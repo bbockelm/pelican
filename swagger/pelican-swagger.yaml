@@ -3217,6 +3217,16 @@ paths:
           schema:
             type: object
             $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: The caller's current effective scopes do not cover a requested user-grantable scope
+          schema:
+            type: object
+            $ref: "#/definitions/ErrorModelV2"
+        "500":
+          description: Failed to create the token
+          schema:
+            type: object
+            $ref: "#/definitions/ErrorModelV2"
     get:
       tags:
         - common
@@ -3866,7 +3876,10 @@ paths:
         For user with admin privilege, they can update any valid namespace.
 
 
-        Non-admin users can update only namespaces they own and only if the approval status is `admin_metadata.status == approved`, otherwise the endpoint returns 404.
+        Non-admin users can update only namespaces they own. For a namespace with `admin_metadata.status == approved`,
+        only `admin_metadata.description`, `admin_metadata.institution`, and
+        `admin_metadata.security_contact_user_id` are updated; `prefix`, `pubkey`, `admin_metadata.site_name`,
+        `custom_fields`, and `admin_metadata.user_id` keep their stored values.
         "
       operationId: updateNamespaceById
       parameters:
@@ -7827,8 +7840,8 @@ paths:
         - me
       summary: Update the calling user's own record
       description: >-
-        `Authentication Required`. Only `displayName` is self-editable
-        per the design contract. Username changes go through the
+        `Authentication Required`. Only `displayName` is self-editable.
+        Username changes go through the
         admin endpoint PATCH `/users/{id}`; identity (sub/issuer)
         changes go through `/identities`.
       consumes:
@@ -7869,7 +7882,7 @@ paths:
         the rightful owner out).
 
 
-        Per the user/group design contract this endpoint MUST NOT
+        This endpoint does not
         create a password where none was set: an OIDC-only user who
         could quietly add a local password would keep accessing the
         system after the IdP relationship was severed. So we require

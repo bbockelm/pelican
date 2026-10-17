@@ -2841,9 +2841,10 @@ components: ["localcache"]
 ---
 name: LocalCache.PrefetchTimeout
 description: |+
-  The maximum time to wait for a prefetch operation to complete before giving up.
-  If a prefetch takes longer than this timeout, the operation is abandoned and the
-  client is expected to retry later.
+  How long a background fill of an object from the origin goes on once no client is reading the object.
+  A cache miss is filled from the origin in the background while the client is served from the cache's own disk, and a partly cached object is filled the same way.
+  The fill continues for as long as any client is reading the object, however slowly, and is cancelled once none has been for this long.
+  The whole blocks already written are kept, and a later read fetches only the rest.
 type: duration
 default: 10s
 hidden: true
@@ -4630,8 +4631,12 @@ description: |+
   While any of this server's registrations at the federation registry is incomplete, the
   "complete server registration" request link (carrying a fresh short-lived access token)
   is re-written to this file on every registration completeness poll cycle and echoed to
-  the server's logs. The file is removed once no incomplete registration remains.
-  Set to an empty string to disable writing the file; the link is then only logged.
+  the server's logs. The file is removed once no incomplete registration remains or
+  when the server shuts down.
+
+  Set to an empty string to disable the reminder entirely: the server then neither polls
+  the registry for registration completeness nor logs or writes the link. The registration
+  status shown in the server's web UI is not affected.
 type: filename
 default: ${ConfigBase}/server-registration-completion-link
 components: ["cache", "origin"]
