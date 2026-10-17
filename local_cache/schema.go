@@ -114,6 +114,14 @@ const (
 	// an object: ps:<instance_hash> -> 8-byte big-endian UnixNano.
 	// Eviction skips objects with a recent redirect timestamp.
 	PrefixRedirectHold = "ps:"
+	// PrefixTierPromote marks an object whose promotion from a cold tiering
+	// target is being completed in the background:
+	// tp:<instance_hash> -> 8-byte big-endian UnixNano of when it started.
+	// Written when a whole-object read starts the background copy and
+	// removed when the copy finishes, so a restart can resume a copy it
+	// interrupted.  Everything else about the promotion is in the object's
+	// metadata (ColdCopy and the block bitmap); see tier_promote.go.
+	PrefixTierPromote = "tp:"
 	// The keys below describe the database as a whole rather than any one
 	// object.  They are single, underscore-prefixed keys, they are written at
 	// open before any consumer touches a record, and none of them is ever
@@ -516,6 +524,44 @@ type CacheMetadata struct {
 	// object that is not tiered.  Reads are pinned to it and the integrity
 	// scan checks the target against it; see TierObjectInfo.
 	Remote *TierObjectInfo `msgpack:"rmt,omitempty"`
+
+	// ColdCopy, when set, records that a cold tiering target still holds a
+	// copy of an object that has been promoted back to local storage.  The
+	// object itself is local (StorageID names a directory) and may still be
+	// filling from this copy; see tier_promote.go.  The copy is kept after the
+	// promotion finishes, so evicting the object again only has to point it
+	// back here.  Only CacheDB's promotion, demotion and drop transactions
+	// set or clear it.
+	ColdCopy *ColdCopy `msgpack:"cold,omitempty"`
+}
+
+// ColdCopy is the copy of a promoted object that a cold tiering target holds.
+type ColdCopy struct {
+	// StorageID is the cold target holding the copy.
+	StorageID StorageID `msgpack:"sid"`
+	// Remote is the copy as the target reported it at upload; every read of
+	// it is pinned to this record, exactly as for an object resident there.
+	Remote TierObjectInfo `msgpack:"rmt"`
+}
+
+// TierCopyOn returns the record of the copy that the tiering target sid holds
+// of this object, if this metadata says it holds one: either the object lives
+// there, or the object was promoted from there and kept its cold copy.  The
+// bool is false when the target holds nothing of this object's.
+//
+// An object tiered before copies were recorded has no Remote; its record is
+// then just its size.
+func (m *CacheMetadata) TierCopyOn(sid StorageID) (TierObjectInfo, bool) {
+	switch {
+	case m.StorageID == sid:
+		if m.Remote != nil {
+			return *m.Remote, true
+		}
+		return TierObjectInfo{Size: m.ContentLength}, true
+	case m.ColdCopy != nil && m.ColdCopy.StorageID == sid:
+		return m.ColdCopy.Remote, true
+	}
+	return TierObjectInfo{}, false
 }
 
 // IsInline returns true when the object data is stored directly in BadgerDB.
@@ -619,12 +665,25 @@ func (m *CacheMetadata) AllStorageIDs() []StorageID {
 	return result
 }
 
-// PerDirectoryBytes returns a map from StorageID to the number of content
-// bytes that live in each storage directory.  For non-chunked objects the
-// entire ContentLength is attributed to the base StorageID.  For chunked
-// objects the byte count is split according to each chunk's assigned
-// directory.  Unallocated chunks (StorageID 0) are skipped.
+// PerDirectoryBytes returns a map from StorageID to the number of bytes the
+// object is charged on each storage target -- the single definition of an
+// object's usage, which every charge, refund and usage recount goes through.
+// For non-chunked objects the entire object is attributed to the base
+// StorageID.  For chunked objects the byte count is split according to each
+// chunk's assigned directory.  Unallocated chunks (StorageID 0) are skipped.
+// A retained cold copy (see ColdCopy) is charged to its cold target as well,
+// since it occupies room there.
 func (m *CacheMetadata) PerDirectoryBytes() map[StorageID]int64 {
+	result := m.ResidentBytes()
+	if m.ColdCopy != nil && m.ContentLength > 0 {
+		result[m.ColdCopy.StorageID] += CalculateFileSize(m.ContentLength)
+	}
+	return result
+}
+
+// ResidentBytes is PerDirectoryBytes without any retained cold copy: what the
+// object is charged where its StorageID (and chunk layout) say it lives.
+func (m *CacheMetadata) ResidentBytes() map[StorageID]int64 {
 	result := make(map[StorageID]int64)
 	if !m.IsChunked() {
 		if m.ContentLength > 0 {
@@ -1105,6 +1164,12 @@ func RedirectHoldKey(instanceHash InstanceHash) []byte {
 	return []byte(PrefixRedirectHold + string(instanceHash))
 }
 
+// TierPromoteKey returns the BadgerDB key marking an object whose promotion
+// from a cold tiering target is being completed in the background.
+func TierPromoteKey(instanceHash InstanceHash) []byte {
+	return []byte(PrefixTierPromote + string(instanceHash))
+}
+
 // TierTargetConfig describes one remote storage target the cache tiers
 // completed objects to.
 //
@@ -1146,6 +1211,12 @@ type TierTargetConfig struct {
 	// target another cache is still using would have each delete the
 	// other's objects.
 	AdoptExisting bool
+	// Cold marks a target that is larger but slower than local storage.
+	// Objects reach it only when eviction pushes them off local disk, and a
+	// read of one is never redirected: it is served through the cache and
+	// the object is promoted back to local storage as it streams.  See
+	// tier_promote.go.
+	Cold bool
 }
 
 // UsesVirtualHostStyle reports whether S3 virtual-host addressing was asked
@@ -1211,6 +1282,18 @@ func ParseTierTargetsConfig() ([]TierTargetConfig, error) {
 	for i := range configs {
 		if err := configs[i].validate(); err != nil {
 			return nil, fmt.Errorf("%s[%d]: %w", param.Cache_TieringTargets.GetName(), i, err)
+		}
+	}
+	// Cold and ordinary targets give local storage opposite roles: an
+	// ordinary target receives every object as soon as it completes, which
+	// leaves local disk a staging area, while a cold target receives only
+	// what eviction pushes off local disk, which makes local disk the hot
+	// tier.  Run together, a promoted object would be shipped straight back
+	// out to the ordinary target, so a configuration has to pick one.
+	for i := 1; i < len(configs); i++ {
+		if configs[i].Cold != configs[0].Cold {
+			return nil, fmt.Errorf("%s: either every target is Cold or none is; %s and %s disagree",
+				param.Cache_TieringTargets.GetName(), configs[0].DisplayURL(), configs[i].DisplayURL())
 		}
 	}
 	return configs, nil
