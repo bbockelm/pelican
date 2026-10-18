@@ -61,15 +61,20 @@ type fakeDCache struct {
 	// macaroonStatus, when non-zero, is how macaroon requests are answered
 	// instead of issuing one (405: not dCache; 503: an outage).
 	macaroonStatus int
-	// sessionLifetime, when non-zero, is how long the bearer token stays
-	// valid; dCache refuses a macaroon that would outlive it.
+	// sessionLifetime, when non-zero, is how long the login session stays
+	// valid; dCache refuses a macaroon that would outlive it.  (dCache
+	// 11.2 sets no session expiry for a bearer token, but does for an
+	// X.509 proxy.)
 	sessionLifetime time.Duration
-	// prefixRestriction emulates a token scoped to a path: dCache then puts
-	// the token's prefix in the path caveat rather than the request path.
+	// prefixRestriction emulates a login restricted to a path prefix (by
+	// gPlazma's omnisession prefix:, say -- not by a token's scopes, for
+	// which dCache issues no macaroon at all): dCache then puts the prefix
+	// in the path caveat rather than the request path.
 	prefixRestriction string
 	// refuseRestriction emulates a token whose authorization dCache cannot
 	// serialise as caveats (the scope-based restriction of WLCG and
-	// SciTokens profiles): every macaroon request is a bare 400.
+	// SciTokens profiles, whatever paths the scopes name): every macaroon
+	// request is a 400.
 	refuseRestriction bool
 	// xrootd makes the door issue and check macaroons the way XRootD's
 	// XrdMacaroons does: every path: caveat is an absolute prefix of the

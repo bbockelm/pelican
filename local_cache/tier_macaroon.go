@@ -223,19 +223,23 @@ func (d *dcacheMacaroons) refresh(ctx context.Context) {
 }
 
 // fetch requests a root macaroon.  The validity asked for can be refused --
-// dCache will not issue a macaroon that outlives the token used to request it
-// -- so a 400 is retried once without one, taking whatever lifetime the door
-// grants; mint then decides whether it is long enough to use.
+// dCache will not issue a macaroon that outlives a login session that has an
+// expiry of its own (an X.509 proxy's, say; 11.2 gives a bearer token's login
+// none, and grants the validity even past the token's exp) -- so a 400 is
+// retried once without one, taking whatever lifetime the door grants; mint
+// then decides whether it is long enough to use.
 func (d *dcacheMacaroons) fetch(ctx context.Context) (*rootMacaroon, error) {
 	root, status, err := d.request(ctx, true)
 	if status == http.StatusBadRequest {
 		root, status, err = d.request(ctx, false)
 	}
 	if status == http.StatusBadRequest {
-		// dCache does not say why (Jetty drops the reason), but the
-		// likely one is worth naming: it can only express some kinds of
-		// restriction as caveats, and the scope-based authorization that
-		// WLCG and SciTokens profiles produce is not among them.
+		// dCache says why only in the status line's reason phrase
+		// ("400 Cannot serialise restriction MultiTargetedRestriction"),
+		// which is in err but cryptic, so the likely cause is named: it
+		// can only express some kinds of restriction as caveats, and the
+		// scope-based authorization that WLCG and SciTokens profiles
+		// produce is not among them -- whatever the scopes' paths.
 		err = errors.Wrap(err, "the door refused to issue a macaroon for this token; if it is dCache, the likely "+
 			"cause is a scope-restricted token (WLCG or SciTokens storage.* scopes), whose restrictions dCache "+
 			"cannot express as macaroon caveats")

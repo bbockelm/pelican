@@ -55,8 +55,9 @@ func (f *fakeDCache) issueMacaroon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if refuse {
-		// "Cannot serialise restriction MultiTargetedRestriction", which
-		// Jetty does not send.
+		// As dCache answers a token with storage.* scopes, but for the
+		// reason phrase ("Cannot serialise restriction
+		// MultiTargetedRestriction"), which net/http cannot send.
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -454,10 +455,11 @@ func TestWebDAVMacaroonOutage(t *testing.T) {
 	}, 10*time.Second, 10*time.Millisecond)
 }
 
-// TestWebDAVMacaroonShortSession covers a token that expires sooner than the
-// root macaroon the cache asks for.  dCache refuses to issue a macaroon that
-// outlives the token; the cache then takes what the door will give, and uses
-// it only while it outlasts the URLs minted from it.
+// TestWebDAVMacaroonShortSession covers a login session that ends sooner than
+// the root macaroon the cache asks for.  dCache refuses to issue a macaroon
+// that outlives a session with an expiry (an X.509 proxy's; dCache 11.2 gives
+// a bearer token's session none); the cache then takes what the door will
+// give, and uses it only while it outlasts the URLs minted from it.
 func TestWebDAVMacaroonShortSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
