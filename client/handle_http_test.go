@@ -643,6 +643,10 @@ func TestTrailerError(t *testing.T) {
 	assert.Equal(t, "Transfer", pe.ErrorType(), "Should be Transfer error type")
 	// Check the underlying error message
 	assert.Contains(t, pe.Unwrap().Error(), "download error after server response started: Unable to read test.txt; input/output error")
+	// The trailer's failure is typed, so a caller can tell it from others.
+	var statusErr *TransferStatusError
+	require.True(t, errors.As(err, &statusErr), "a trailer failure must be a TransferStatusError")
+	assert.Equal(t, 500, statusErr.Code)
 }
 
 func TestUploadZeroLengthFile(t *testing.T) {

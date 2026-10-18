@@ -162,6 +162,16 @@ type (
 		Err error
 	}
 
+	// TransferStatusError is a failure the server reported in the
+	// X-Transfer-Status trailer, after it had begun sending the body: Code
+	// is the status the trailer gave and Err its text.  A cache sends one
+	// when the transfer it was relaying failed, or when its own
+	// verification of the object did.
+	TransferStatusError struct {
+		Code int
+		Err  error
+	}
+
 	allocateMemoryError struct {
 		Err error
 	}
@@ -5091,7 +5101,8 @@ Loop:
 					if strings.Contains(statusText, "unexpected EOF") {
 						baseErr = &UnexpectedEOFError{Err: baseErr}
 					}
-					err = error_codes.NewTransferError(fmt.Errorf("download error after server response started: %w", baseErr))
+					statusErr := &TransferStatusError{Code: statusCode, Err: baseErr}
+					err = error_codes.NewTransferError(fmt.Errorf("download error after server response started: %w", statusErr))
 					return
 				}
 				return

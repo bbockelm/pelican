@@ -470,6 +470,16 @@ func (e *UnexpectedEOFError) Is(target error) bool {
 	return ok
 }
 
+// TransferStatusError methods
+
+func (e *TransferStatusError) Error() string {
+	return e.Err.Error()
+}
+
+func (e *TransferStatusError) Unwrap() error {
+	return e.Err
+}
+
 // HttpErrResp type and methods
 
 type HttpErrResp struct {

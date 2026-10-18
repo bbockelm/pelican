@@ -822,6 +822,14 @@ func (sm *StorageManager) getTierTarget(id StorageID) *tierTarget {
 	return sm.tierTargets[id]
 }
 
+// SuppressCacheMetrics stops the storage manager from updating the
+// pelican_cache_* metrics it would otherwise count (the write fence's
+// refusals), for a store that is not a cache's, such as pstore.  Call it
+// before the storage manager is used.
+func (sm *StorageManager) SuppressCacheMetrics() {
+	sm.fences.uncounted.Store(true)
+}
+
 // Close stops TTL cache eviction goroutines and releases cached resources.
 //
 // Only the caches that were actually started are stopped.  ttlcache's Stop is
@@ -1565,7 +1573,7 @@ func (sm *StorageManager) writeBlocksThrough(fence *writeFence, instanceHash Ins
 	}
 
 	completed := false
-	if !fence.write(func() {
+	if !fence.write(fencedBlocks, func() {
 		if err = sm.writeBlocks(instanceHash, meta, encryptor, startOffset, data); err == nil {
 			completed = sm.checkAndMarkComplete(instanceHash, meta)
 		}
@@ -2927,7 +2935,7 @@ func (sm *StorageManager) newBlockWriterIn(fence *writeFence, instanceHash Insta
 		return nil, errors.Errorf("invalid instance hash %q", instanceHash)
 	}
 	var file *os.File
-	if !fence.write(func() {
+	if !fence.write(fencedFile, func() {
 		file, err = os.OpenFile(objectPath, os.O_RDWR|os.O_CREATE, 0600)
 		if errors.Is(err, os.ErrNotExist) {
 			if mkdirErr := os.MkdirAll(filepath.Dir(objectPath), 0750); mkdirErr != nil {
@@ -3106,7 +3114,7 @@ func (bw *BlockWriter) flushWriteBatch() error {
 	// reports no error; the instance it was writing is gone.
 	endBlock := bw.batchStart + bw.batchCount - 1
 	var err error
-	written := bw.fence.write(func() {
+	written := bw.fence.write(fencedBlocks, func() {
 		if _, err = bw.file.File().WriteAt(bw.writeBatch, BlockOffset(bw.batchStart)); err != nil {
 			err = errors.Wrapf(err, "failed to write blocks %d–%d", bw.batchStart, endBlock)
 			return
@@ -3202,7 +3210,7 @@ func (bw *BlockWriter) Close() error {
 	// write fence: once the instance has been deleted, the descriptor is of
 	// a deleted file, and cached it would be found by a new instance under
 	// the same hash, every read of which would then fail.
-	bw.fence.write(func() {
+	bw.fence.write(fencedFile, func() {
 		if bw.totalBlocks > 0 {
 			actualSize := CalculateFileSize(bw.meta.ContentLength)
 			if err := bw.file.File().Truncate(actualSize); err != nil {
@@ -3228,7 +3236,7 @@ func (bw *BlockWriter) mergeMetadata(meta *CacheMetadata) error {
 	fence := bw.fence.clone()
 	defer fence.leave()
 	var err error
-	fence.write(func() { err = bw.sm.db.MergeMetadata(bw.instanceHash, meta) })
+	fence.write(fencedMetadata, func() { err = bw.sm.db.MergeMetadata(bw.instanceHash, meta) })
 	return err
 }
 
@@ -3243,7 +3251,7 @@ func (bw *BlockWriter) completeIfWhole() {
 		return // see flushWriteBatch
 	}
 	completed := false
-	bw.fence.write(func() {
+	bw.fence.write(fencedCompletion, func() {
 		downloadedCount, err := bw.sm.db.GetDownloadedBlockCount(bw.instanceHash)
 		if err != nil || uint32(downloadedCount) != bw.totalBlocks {
 			return

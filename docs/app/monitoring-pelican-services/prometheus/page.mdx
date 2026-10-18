@@ -503,6 +503,28 @@ The following metrics are available from the XRootD cache eviction process.
 | `xrootd_cache_eviction_dir_n_directories_count` | Number of directories per directory. | `dir_name` |
 
 
+### Persistent Cache Transfer Metrics
+
+The following metrics are available from the persistent (V2) cache, which the cache server and the local cache module run.
+They count the background transfers that fill the cache from upstream and the verdicts that drop cached data, which are otherwise visible only in the logs.
+
+> **Note**: All of these metrics are counters. Use `rate()` or `increase()` with a time range to query them. Every label takes only the values listed here; no metric is labelled by object.
+
+| Metric Name | Description | Labels |
+| --- | --- | --- |
+| `pelican_cache_fills_started_total` | Background fills started. A fill fetches one gap of a partly cached object, from the first block a reader needs to the next block already cached. | |
+| `pelican_cache_fills_ended_total` | Background fills ended, by outcome. | `outcome`: `completed`, `stopped_early` (a benign stop, such as no reader for `LocalCache.PrefetchTimeout`, that kept the whole blocks written), `condemned` (a failure that dropped the object), `failed` (a failure with nothing written to condemn) |
+| `pelican_cache_fill_bytes_total` | Bytes background fills received from upstream, counted when each fill ends. | |
+| `pelican_cache_download_stops_total` | Whole-object downloads of a cache miss stored on disk that ended without completing. | `cause`: `idle` (no reader for `LocalCache.PrefetchTimeout`), `shutdown`, `cancelled`, `transport` (a connection reset, a timeout, a stalled or cut-short body), `unreported` (the transfer ended without reporting a result), `error` (a failure that condemns the data); `outcome`: `kept` (the whole blocks written were kept and the object stays partly cached), `condemned` (the object was dropped) |
+| `pelican_cache_objects_condemned_total` | Cached objects condemned as bad and dropped by the transfer writing them; the next request fetches them again. | `source`: `download`, `fill`, `range` (a reader's own range fetch); `reason`: `version_changed` (the origin now serves another version), `checksum_mismatch`, `server_reported` (an error status, or a failure in the `X-Transfer-Status` trailer), `unknown_size` (a download of unknown size that stopped early), `other` |
+| `pelican_cache_reads_past_download_total` | Reads that fetched blocks a whole-object download in progress had yet to write, instead of waiting for it. | `reason`: `distant` (the download was not expected to reach them within 5 seconds), `wait_timeout` (the reader waited and the download was late) |
+| `pelican_cache_write_fence_refusals_total` | Writers refused because the object they were writing had been deleted (evicted, purged, or dropped as bad) while they ran, counted once per writer. | `kind`: the first refused write, one of `blocks`, `completion`, `file`, `metadata` |
+| `pelican_cache_download_handoff_failures_total` | Whole-object downloads of a cache miss that chose disk storage but failed before their transfer was handed to a block fetcher. Readers already waiting for them are released. | |
+
+A steady rate of `pelican_cache_download_stops_total{cause="idle"}` means clients abandon downloads before they finish; the blocks are kept and a later read fills the rest, which shows in `pelican_cache_fills_started_total`.
+A rising `pelican_cache_objects_condemned_total{reason="version_changed"}` means objects are replaced in place at their origin.
+Any `checksum_mismatch` or `server_reported` condemnation is worth investigating at the origin or the upstream cache.
+
 ## Director
 
 ### `up`

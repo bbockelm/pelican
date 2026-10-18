@@ -130,7 +130,7 @@ func (sm *StorageManager) NewAppendWriter(
 		return nil, errors.Wrap(err, "failed to initialize chunked storage")
 	}
 	meta.NamespaceID = namespaceID
-	if !fence.write(func() { err = sm.db.SetMetadata(instanceHash, meta) }) {
+	if !fence.write(fencedMetadata, func() { err = sm.db.SetMetadata(instanceHash, meta) }) {
 		err = errInstanceDeleted
 	}
 	if err != nil {
@@ -251,7 +251,7 @@ func (w *AppendWriter) growTo(endOffset int64) error {
 	// The record is read and rewritten through the fence: SetMetadata would
 	// otherwise make the record of a deleted object again.
 	var err error
-	if !w.fence.write(func() { err = w.growRecord(newLength, chunksNeeded) }) {
+	if !w.fence.write(fencedMetadata, func() { err = w.growRecord(newLength, chunksNeeded) }) {
 		return errInstanceDeleted
 	}
 	if err != nil {
@@ -312,7 +312,7 @@ func (w *AppendWriter) Finalize() (*CacheMetadata, error) {
 	// meanwhile is not made again.
 	var meta *CacheMetadata
 	var err error
-	if !w.fence.write(func() { meta, err = w.finalizeRecord() }) {
+	if !w.fence.write(fencedCompletion, func() { meta, err = w.finalizeRecord() }) {
 		return nil, errInstanceDeleted
 	}
 	return meta, err

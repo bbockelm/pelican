@@ -2280,6 +2280,7 @@ func (pc *PersistentCache) performDownload(ctx context.Context, dl *persistentDo
 	defer func() {
 		if downloadingState != nil && !tcHandedOff {
 			downloadingState.ClearDownloading()
+			cacheDownloadHandOffFailuresTotal.Inc()
 		}
 	}()
 
@@ -2655,7 +2656,17 @@ func (pc *PersistentCache) performDownload(ctx context.Context, dl *persistentDo
 func (pc *PersistentCache) endAdoptedDownload(dl *persistentDownload, fence *writeFence, sharedState *ObjectBlockState, err error) {
 	defer close(dl.completionDone)
 	bad := err != nil && pc.adoptedTransferDataIsBad(dl.instanceHash, err)
+	if err != nil {
+		recordDownloadStop(err, pc.closed.Load(), bad)
+	}
 	if bad {
+		reason := condemnReasonOf(err)
+		if transferStopKeepsData(err) {
+			// Stopped early, which keeps the blocks of an object of
+			// known size; see adoptedTransferDataIsBad.
+			reason = condemnUnknownSize
+		}
+		recordCondemned(condemnedByDownload, reason)
 		// Mark the object bad before waking anyone: a reader waiting for a
 		// block the download never wrote wakes on ClearDownloading, and
 		// must find the reason rather than start a fetch of its own into
@@ -2963,7 +2974,7 @@ func (w *decisionWriter) writeFenced(fn func()) bool {
 		fn()
 		return true
 	}
-	return fence.write(fn)
+	return fence.write(fencedMetadata, fn)
 }
 
 // diskFence returns the download's membership of the write fence, or nil

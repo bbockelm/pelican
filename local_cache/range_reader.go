@@ -466,13 +466,23 @@ func (rr *RangeReader) ensureBlocks(ctx context.Context, startBlock, endBlock ui
 			continue
 		}
 		overDownload := writer == distantDownload
+		// Why this read goes past the download, if it does; counted once
+		// the read is known to go on.
+		var past pastDownloadReason
+		if overDownload {
+			past = pastDistantDownload
+		}
 		if writer == fillWriter || writer == downloadWriter {
-			if rr.waitForBlock(ctx, block, bound) {
+			found, late := rr.waitForBlock(ctx, block, bound)
+			if found {
 				continue
 			}
 			// The download did not write the block within its estimate and
 			// the slack: it is slower than it looked, so fill past it.
 			overDownload = writer == downloadWriter
+			if late {
+				past = pastLateDownload
+			}
 		}
 
 		// If the context is done, bail out.
@@ -481,6 +491,9 @@ func (rr *RangeReader) ensureBlocks(ctx context.Context, startBlock, endBlock ui
 		}
 		if err := rr.blockState.Condemned(); err != nil {
 			return errors.Wrap(err, "the cached copy was dropped")
+		}
+		if past != "" {
+			recordReadPastDownload(past)
 		}
 
 		// Nothing is writing the block.  Rather than fetch only the blocks
@@ -530,14 +543,16 @@ func (rr *RangeReader) ensureBlocks(ctx context.Context, startBlock, endBlock ui
 }
 
 // waitForBlock waits for a block as WaitForBlock does, for at most bound
-// when bound is positive.
-func (rr *RangeReader) waitForBlock(ctx context.Context, block uint32, bound time.Duration) bool {
-	if bound > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, bound)
-		defer cancel()
+// when bound is positive.  It reports whether the block is present, and
+// whether the wait gave up because bound ran out.
+func (rr *RangeReader) waitForBlock(ctx context.Context, block uint32, bound time.Duration) (found, late bool) {
+	if bound <= 0 {
+		return rr.blockState.WaitForBlock(ctx, block), false
 	}
-	return rr.blockState.WaitForBlock(ctx, block)
+	boundCtx, cancel := context.WithTimeout(ctx, bound)
+	defer cancel()
+	found = rr.blockState.WaitForBlock(boundCtx, block)
+	return found, !found && ctx.Err() == nil && errors.Is(boundCtx.Err(), context.DeadlineExceeded)
 }
 
 // LimitFill bounds the background fills this reader may start (see

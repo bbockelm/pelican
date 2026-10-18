@@ -87,6 +87,11 @@ type instanceFences struct {
 	// beforeCreate, set only by tests, runs at the start of every
 	// creation (see create), before the fence's lock is taken.
 	beforeCreate func(InstanceHash)
+
+	// uncounted stops refusals from being counted in
+	// pelican_cache_write_fence_refusals_total, for a storage manager that
+	// is not a cache's (see StorageManager.SuppressCacheMetrics).
+	uncounted atomic.Bool
 }
 
 // instanceFence is one instance's fence.
@@ -113,6 +118,9 @@ type writeFence struct {
 	leave  func()
 	// dead marks a clone made too late to be fenced (see clone).
 	dead bool
+	// refused records that a write through this membership has been
+	// refused, so that the writer is counted once, not once per write.
+	refused atomic.Bool
 }
 
 func newInstanceFences() *instanceFences {
@@ -161,23 +169,36 @@ func (fs *instanceFences) join(hash InstanceHash) *writeFence {
 	}
 }
 
-// write runs fn, which makes the writer's database writes, unless the
-// instance has been deleted since the writer joined; it reports whether fn
-// ran.  fn must not delete the instance, nor make a fenced write of its own.
-func (w *writeFence) write(fn func()) bool {
+// write runs fn, which makes the writer's database writes, of the given
+// kind, unless the instance has been deleted since the writer joined; it
+// reports whether fn ran.  fn must not delete the instance, nor make a
+// fenced write of its own.
+func (w *writeFence) write(kind fencedWriteKind, fn func()) bool {
 	if w.fences.beforeWrite != nil {
 		w.fences.beforeWrite(w.hash)
 	}
 	if w.dead {
+		w.countRefusal(kind)
 		return false
 	}
 	w.f.mu.RLock()
-	defer w.f.mu.RUnlock()
 	if w.f.gen != w.gen {
+		w.f.mu.RUnlock()
+		w.countRefusal(kind)
 		return false
 	}
+	defer w.f.mu.RUnlock()
 	fn()
 	return true
+}
+
+// countRefusal counts the writer as refused by the fence, the first time
+// one of its writes is: a writer goes on writing a deleted instance -- every
+// batch of blocks of a download still under way -- until it ends.
+func (w *writeFence) countRefusal(kind fencedWriteKind) {
+	if !w.fences.uncounted.Load() && w.refused.CompareAndSwap(false, true) {
+		cacheWriteFenceRefusalsTotal.WithLabelValues(string(kind)).Inc()
+	}
 }
 
 // stale reports whether the instance has been deleted since the writer

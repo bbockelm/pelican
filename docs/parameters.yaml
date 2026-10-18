@@ -2845,6 +2845,7 @@ description: |+
   A cache miss is filled from the origin in the background while the client is served from the cache's own disk, and a partly cached object is filled the same way.
   The fill continues for as long as any client is reading the object, however slowly, and is cancelled once none has been for this long.
   The whole blocks already written are kept, and a later read fetches only the rest.
+  These stops are counted in the `pelican_cache_download_stops_total` (cause `idle`) and `pelican_cache_fills_ended_total` (outcome `stopped_early`) Prometheus metrics.
 type: duration
 default: 10s
 hidden: true

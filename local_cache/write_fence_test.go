@@ -186,24 +186,24 @@ func TestWriteFenceOrdersAWriteAgainstADeletion(t *testing.T) {
 	release := fs.exclude(h)
 	release(true)
 	after := fs.join(h)
-	assert.False(t, before.write(func() { t.Error("a write after the deletion ran") }))
-	assert.True(t, after.write(func() {}))
+	assert.False(t, before.write(fencedBlocks, func() { t.Error("a write after the deletion ran") }))
+	assert.True(t, after.write(fencedBlocks, func() {}))
 
 	// A deletion that did not happen fences nothing.
 	release = fs.exclude(h)
 	release(false)
-	assert.True(t, after.write(func() {}))
+	assert.True(t, after.write(fencedBlocks, func() {}))
 
 	// A clone writes at its writer's generation, and is dead once the
 	// writer's fence is gone.
 	clone := before.clone()
-	assert.False(t, clone.write(func() { t.Error("a clone's write after the deletion ran") }))
+	assert.False(t, clone.write(fencedBlocks, func() { t.Error("a clone's write after the deletion ran") }))
 	clone.leave()
 	before.leave()
 	after.leave()
 	assert.Zero(t, fs.size())
 	late := after.clone()
-	assert.False(t, late.write(func() { t.Error("a clone of a forgotten fence wrote") }))
+	assert.False(t, late.write(fencedBlocks, func() { t.Error("a clone of a forgotten fence wrote") }))
 	late.leave()
 	assert.Zero(t, fs.size())
 }
@@ -221,7 +221,7 @@ func TestExcludeAsShutsOutOnlyTheWritersInstance(t *testing.T) {
 	release(true)
 	assert.Nil(t, fs.excludeAs(w), "a writer whose instance was deleted must not delete its successor")
 	successor := fs.join(h)
-	assert.True(t, successor.write(func() {}), "a refused deletion must fence nothing off")
+	assert.True(t, successor.write(fencedBlocks, func() {}), "a refused deletion must fence nothing off")
 	w.leave()
 	successor.leave()
 	late := successor.clone()

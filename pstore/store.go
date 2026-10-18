@@ -170,6 +170,10 @@ func Open(ctx context.Context, egrp *errgroup.Group, cfg Config) (*Store, error)
 		db.Close()
 		return nil, errors.Wrap(err, "failed to open pstore block storage")
 	}
+	// The storage layer's own metrics are named for the cache; an origin's
+	// store must not report under them (as with the data scan's; see
+	// newPStoreScanConfig).
+	storage.SuppressCacheMetrics()
 
 	capacity, err := newCapacityTracker(db, storage, dirs)
 	if err != nil {
