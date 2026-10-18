@@ -60,10 +60,11 @@ A data-plane scope (`storage.*`, `collection.*`, `share.access`) can never be ha
 | Scope | What it permits | Notes |
 |---|---|---|
 | `web_ui.access` | Sign in to the web interface and the cookie-authenticated APIs. | Granted to new accounts by default. Granting it explicitly also lets API tokens carry web-interface access. |
-| `server.admin` | Every user, group, collection, and server setting. | Implies `server.user_admin` and `server.collection_admin`. |
+| `server.admin` | Every user, group, collection, and server setting. | Implies `server.user_admin` and `server.collection_admin`. An API key keeps every user-grantable scope while its creator holds `server.admin`, whether or not each scope is granted to the account. |
 | `server.user_admin` | Create and manage non-administrator users, mint password-set and onboarding invites, and see every group. | Does not include scope grants, identity linking, or any action targeting a system administrator. |
 | `server.collection_admin` | Create collections, and see and manage every collection and its ACLs. | Does not include the user or group surfaces. |
 | `pelican.log_read` | Read the server's recent log buffer, through the log viewer or the `/api/v1.0/logs` endpoints. | Separable from `server.admin` rather than implied by it, because it exposes everything the server logs. |
+| `monitoring.scrape` | Scrape the server's Prometheus exporter at `/metrics`. | Minted by the server's own Prometheus instance and by the director. |
 | `monitoring.query` | Read the server's metrics through its Prometheus-compatible query endpoint. | Login cookies carry this only for system administrators; other holders reach the endpoint with a bearer or API token. |
 | `pelican.transfer` | Submit, view, and cancel transfer jobs through the transfer API. | Not granted by default. |
 
@@ -197,8 +198,11 @@ A role on a collection maps to capabilities as follows.
 
 <Callout type="info">
 The bearer-token exception to the `server.collection_admin` requirement is narrower than it looks.
-The handler matches the scope string exactly, so only a token whose scope claim reads `collection.create` qualifies.
-The origin's issuer mints `collection.create:/` (with a path) for every signed-in user, which does not match, and it grants nothing at all when a client asks for the bare form; API tokens can carry the bare form but only a system administrator can mint them.
+The scope can appear in two shapes: the bare form `collection.create`, and the path form `collection.create:/`.
+The handler matches the scope string exactly, so only a token whose scope claim carries the bare form qualifies.
+The origin's issuer mints only the path form, and only to collection administrators (a system administrator holds `server.admin`, which implies `server.collection_admin`, so system administrators count); it grants nothing at all when a client asks for the bare form.
+An authorization template can also grant the path form.
+API keys can carry any scope string, but the collections API sits behind the web-UI authentication middleware, which accepts only a login cookie or a JWT signed by this server, so an API key is refused with `401` whichever scopes it carries.
 So in practice creation stays with collection administrators, on the command line as well as in the web interface.
 </Callout>
 

@@ -400,13 +400,14 @@ func simulateUserApproval(t *testing.T, serverURL, namespace, userCode, password
 // The test monitors the subprocess's stderr for the verification URL,
 // extracts the user_code, and simulates user approval via HTTP.
 func TestClientAcquireTokenE2E(t *testing.T) {
+	test_utils.SkipIfShort(t, "device-code flow with long waits on a full federation")
 	_, testUserPassword, _ := setupFedAndUsers(t)
 
 	serverURL := param.Server_ExternalWebUrl.GetString()
 	discoveryURL := param.Federation_DiscoveryUrl.GetString()
 
-	// Get the once-built pelican CLI binary
-	cliPath := getPelicanBinary(t)
+	// Get the pelican CLI binary
+	cliPath := test_utils.GetPelicanBinary(t)
 
 	// Prepare a local file to upload
 	localTmpDir := t.TempDir()

@@ -150,6 +150,10 @@ func cacheServeWithPersistentCache(ctx context.Context, engine *gin.Engine, egrp
 	// Cache.HighWaterMark, etc. instead of LocalCache.* params.
 	cfg := local_cache.PersistentCacheConfig{
 		Mode: local_cache.CacheModeServer,
+		// The federation token manager started below delivers tokens to
+		// the cache; site-local caches have no manager and must not wait
+		// for one.
+		ExpectFedToken: !param.Cache_EnableSiteLocalMode.GetBool(),
 	}
 
 	// Populate storage directories from config if set.
@@ -233,6 +237,7 @@ func cacheServeWithPersistentCache(ctx context.Context, engine *gin.Engine, egrp
 
 // cacheServeWithXRootD launches the traditional XRootD-based cache
 func cacheServeWithXRootD(ctx context.Context, engine *gin.Engine, egrp *errgroup.Group, modules server_structs.ServerType) (server_structs.XRootDServer, error) {
+	metrics.SetComponentHealthStatus(metrics.OriginCache_XRootD, metrics.StatusCritical, "xrootd has not been started")
 	err := xrootd.SetUpMonitoring(ctx, egrp)
 	if err != nil {
 		return nil, err

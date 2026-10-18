@@ -51,6 +51,7 @@ import (
 // file transfer plugin, starts a data federation, and verifies that jobs can
 // successfully transfer files using the plugin.
 func TestHTCondorPlugin(t *testing.T) {
+	test_utils.SkipIfShort(t, "needs HTCondor")
 	// Setup test logging
 	t.Cleanup(test_utils.SetupTestLogging(t))
 
@@ -155,10 +156,8 @@ Origin:
 
 	t.Logf("Federation URL: %s", federationURL)
 
-	// Build the pelican binary to use as the plugin
-	t.Log("Building pelican binary for plugin...")
-	// Get the pelican binary (built once via sync.Once)
-	pelicanBinary := getPelicanBinary(t)
+	// Get the pelican binary to use as the plugin
+	pelicanBinary := test_utils.GetPelicanBinary(t)
 
 	// Create temporary plugin directory in /tmp
 	pluginDir, err := os.MkdirTemp("/tmp", "pelican-libexec-*")

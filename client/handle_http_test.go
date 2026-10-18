@@ -2,7 +2,7 @@
 
 /***************************************************************
  *
- * Copyright (C) 2025, Pelican Project, Morgridge Institute for Research
+ * Copyright (C) 2026, Pelican Project, Morgridge Institute for Research
  *
  * Licensed under the Apache License, Version 2.0 (the "License"); you
  * may not use this file except in compliance with the License.  You may
@@ -139,7 +139,7 @@ func TestNewTransferDetailsEnv(t *testing.T) {
 
 	testCache := "http://cache.edu:8000"
 
-	os.Setenv("OSG_DISABLE_PROXY_FALLBACK", "")
+	os.Setenv("PELICAN_DISABLE_PROXY_FALLBACK", "")
 	test_utils.InitClient(t, map[param.Param]any{})
 
 	transfers := generateTransferDetails(testCache, transferDetailsOptions{})
@@ -152,7 +152,7 @@ func TestNewTransferDetailsEnv(t *testing.T) {
 	assert.Equal(t, 1, len(transfers))
 	assert.Equal(t, "https", transfers[0].Url.Scheme)
 	assert.Equal(t, false, transfers[0].Proxy)
-	os.Unsetenv("OSG_DISABLE_PROXY_FALLBACK")
+	os.Unsetenv("PELICAN_DISABLE_PROXY_FALLBACK")
 	server_utils.ResetTestState()
 	err := config.InitClient()
 	assert.Nil(t, err)
@@ -2902,6 +2902,9 @@ func TestNewTransferEngine(t *testing.T) {
 
 func TestListHttp(t *testing.T) {
 	t.Cleanup(test_utils.SetupTestLogging(t))
+	// The collections server's name fails to resolve, without a real resolver
+	// whose speed the test would depend on.
+	test_utils.FailLookupsOf(t, test_utils.UnresolvableHost)
 	type test struct {
 		name          string
 		pUrl          *pelican_url.PelicanURL
@@ -2922,7 +2925,7 @@ func TestListHttp(t *testing.T) {
 					Namespace:    "/foo/bar",
 					CollectionsUrl: &url.URL{
 						Scheme: "https",
-						Host:   "collections.example.com",
+						Host:   test_utils.UnresolvableHost,
 					},
 				},
 			},
