@@ -21,6 +21,7 @@ package origin
 import (
 	"github.com/gin-gonic/gin"
 
+	"github.com/pelicanplatform/pelican/oauth2/backendcred"
 	"github.com/pelicanplatform/pelican/origin_serve"
 	"github.com/pelicanplatform/pelican/web_ui"
 )
@@ -44,6 +45,12 @@ func RegisterOriginWebAPI(routerGroup *gin.RouterGroup) error {
 	if err := RegisterGlobusAPI(globusAPIGroup); err != nil {
 		return err
 	}
+
+	// Device-flow credentials for storage backends (lists nothing unless
+	// Origin.HttpAuthOAuth2DeviceFlow is set).  Path is
+	// /api/v1.0/origin_ui/backend_credentials.
+	backendcred.RegisterAPI(routerGroup.Group("/backend_credentials"), backendcred.Default(), backendCredentialOwner,
+		web_ui.AuthHandler, web_ui.AdminAuthHandler)
 
 	// V2-origin metadata-publish queue admin (no-op when disabled).
 	origin_serve.RegisterMetadataAdminAPI(routerGroup, web_ui.AuthHandler, web_ui.AdminAuthHandler)

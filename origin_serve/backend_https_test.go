@@ -27,12 +27,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pelicanplatform/pelican/oauth2/backendcred"
+	"github.com/pelicanplatform/pelican/server_utils"
 )
 
 // ---------------------------------------------------------------------------
@@ -69,7 +74,7 @@ func TestWithClientToken(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSimpleBearerAuth(t *testing.T) {
-	auth := &simpleBearerAuth{tokenFunc: func() string { return "tok123" }}
+	auth := &simpleBearerAuth{tokenFunc: func() (string, error) { return "tok123", nil }}
 	authenticator, body := auth.NewAuthenticator(nil)
 	assert.Nil(t, body)
 	assert.NotNil(t, authenticator)
@@ -96,7 +101,7 @@ func TestSimpleBearerAuth(t *testing.T) {
 }
 
 func TestSimpleBearerAuth_EmptyToken(t *testing.T) {
-	auth := &simpleBearerAuth{tokenFunc: func() string { return "" }}
+	auth := &simpleBearerAuth{tokenFunc: func() (string, error) { return "", nil }}
 	authenticator, _ := auth.NewAuthenticator(nil)
 	sba := authenticator.(*simpleBearerAuthenticator)
 
@@ -111,9 +116,9 @@ func TestSimpleBearerAuth_TokenRefresh(t *testing.T) {
 	// Verify that the tokenFunc is called on each Authorize, so
 	// a refreshed token is used for subsequent requests.
 	callCount := 0
-	auth := &simpleBearerAuth{tokenFunc: func() string {
+	auth := &simpleBearerAuth{tokenFunc: func() (string, error) {
 		callCount++
-		return fmt.Sprintf("tok-%d", callCount)
+		return fmt.Sprintf("tok-%d", callCount), nil
 	}}
 	authenticator, _ := auth.NewAuthenticator(nil)
 	sba := authenticator.(*simpleBearerAuthenticator)
@@ -466,17 +471,24 @@ func TestHTTPSFileSystem_ReadStaticToken(t *testing.T) {
 		require.NoError(t, os.WriteFile(tokFile, []byte("  mytoken  \n"), 0600))
 
 		fs := &httpsFileSystem{staticTokenFile: tokFile, tokenMode: HTTPSTokenStatic}
-		assert.Equal(t, "mytoken", fs.readStaticToken())
+		tok, err := fs.getToken(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, "mytoken", tok)
 	})
 
+	// An unreadable token file fails the request instead of sending it
+	// upstream without credentials.
 	t.Run("MissingFile", func(t *testing.T) {
-		fs := &httpsFileSystem{staticTokenFile: "/nonexistent", tokenMode: HTTPSTokenStatic}
-		assert.Empty(t, fs.readStaticToken())
+		fs := &httpsFileSystem{staticTokenFile: filepath.Join(t.TempDir(), "nonexistent"), tokenMode: HTTPSTokenStatic}
+		_, err := fs.getToken(context.Background())
+		assert.Error(t, err)
 	})
 
 	t.Run("EmptyPath", func(t *testing.T) {
 		fs := &httpsFileSystem{tokenMode: HTTPSTokenStatic}
-		assert.Empty(t, fs.readStaticToken())
+		tok, err := fs.getToken(context.Background())
+		require.NoError(t, err)
+		assert.Empty(t, tok)
 	})
 }
 
@@ -748,23 +760,31 @@ func TestHTTPSFileSystem_UpstreamURL(t *testing.T) {
 func TestHTTPSFileSystem_GetToken(t *testing.T) {
 	t.Run("None", func(t *testing.T) {
 		fs := &httpsFileSystem{tokenMode: HTTPSTokenNone}
-		assert.Empty(t, fs.getToken(context.Background()))
+		tok, err := fs.getToken(context.Background())
+		require.NoError(t, err)
+		assert.Empty(t, tok)
 	})
 
 	t.Run("Passthrough", func(t *testing.T) {
 		fs := &httpsFileSystem{tokenMode: HTTPSTokenPassthrough}
 		ctx := WithClientToken(context.Background(), "pass-tok")
-		assert.Equal(t, "pass-tok", fs.getToken(ctx))
+		tok, err := fs.getToken(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, "pass-tok", tok)
 	})
 
 	t.Run("PassthroughEmpty", func(t *testing.T) {
 		fs := &httpsFileSystem{tokenMode: HTTPSTokenPassthrough}
-		assert.Empty(t, fs.getToken(context.Background()))
+		tok, err := fs.getToken(context.Background())
+		require.NoError(t, err)
+		assert.Empty(t, tok)
 	})
 
 	t.Run("OAuthNoConfig", func(t *testing.T) {
 		fs := &httpsFileSystem{tokenMode: HTTPSTokenOAuth2}
-		assert.Empty(t, fs.getToken(context.Background()))
+		tok, err := fs.getToken(context.Background())
+		require.NoError(t, err)
+		assert.Empty(t, tok)
 	})
 }
 
@@ -1050,4 +1070,86 @@ func TestEnsureParentDirs_RequiresWebDAV(t *testing.T) {
 	err := fs.ensureParentDirs(ctx, "/a/b/file.txt")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "auto-mkdir requires WebDAV")
+}
+
+// fakeManagedSource stands in for a backendcred.Manager.
+type fakeManagedSource struct {
+	mu        sync.Mutex
+	token     string
+	err       error
+	available error
+}
+
+func (f *fakeManagedSource) Token(_ context.Context) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.token, f.err
+}
+
+func (f *fakeManagedSource) Available() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.available
+}
+
+func (f *fakeManagedSource) set(token string, err, available error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.token, f.err, f.available = token, err, available
+}
+
+func TestHTTPSBackend_ManagedToken(t *testing.T) {
+	var mu sync.Mutex
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.Header.Get("Authorization"))
+		mu.Unlock()
+		switch r.Method {
+		case http.MethodOptions:
+			w.Header().Set("Allow", "GET, PUT, HEAD, OPTIONS")
+		case http.MethodHead:
+			w.Header().Set("Content-Length", "2")
+		default:
+			_, _ = w.Write([]byte("ok"))
+		}
+	}))
+	defer server.Close()
+
+	src := &fakeManagedSource{}
+	backend := newHTTPSBackend(HTTPSBackendOptions{
+		ServiceURL:  server.URL,
+		TokenMode:   HTTPSTokenManaged,
+		TokenSource: src,
+	})
+
+	// Not activated: the backend is unavailable with the credential's own
+	// status code, and nothing goes upstream.
+	src.set("", &backendcred.NotActivatedError{ID: HTTPSBackendCredentialID}, &backendcred.NotActivatedError{ID: HTTPSBackendCredentialID})
+	err := backend.CheckAvailability()
+	require.Error(t, err)
+	var coder server_utils.HTTPStatusCoder
+	require.ErrorAs(t, err, &coder)
+	assert.Equal(t, http.StatusServiceUnavailable, coder.HTTPStatusCode())
+	mu.Lock()
+	assert.Empty(t, requests)
+	mu.Unlock()
+
+	// Activated: the managed token is sent.
+	src.set("managed-token", nil, nil)
+	require.NoError(t, backend.CheckAvailability())
+	_, err = backend.FileSystem().Stat(context.Background(), "/file")
+	require.NoError(t, err)
+	mu.Lock()
+	assert.Contains(t, requests, "HEAD Bearer managed-token")
+	requests = nil
+	mu.Unlock()
+
+	// A token failure stops the request rather than sending it anonymously.
+	src.set("", errors.New("issuer unreachable"), nil)
+	_, err = backend.FileSystem().Stat(context.Background(), "/file")
+	require.ErrorContains(t, err, "issuer unreachable")
+	mu.Lock()
+	assert.Empty(t, requests)
+	mu.Unlock()
 }
