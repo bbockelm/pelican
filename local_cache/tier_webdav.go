@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/xml"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -340,7 +341,7 @@ func (b *webdavTierBackend) Put(ctx context.Context, key, contentType string, si
 		return TierObjectInfo{}, err
 	}
 	header := http.Header{}
-	if contentType != "" {
+	if contentType = uploadContentType(contentType); contentType != "" {
 		header.Set("Content-Type", contentType)
 	}
 	var reqBody io.Reader = http.NoBody
@@ -381,6 +382,31 @@ func (b *webdavTierBackend) Put(ctx context.Context, key, contentType string, si
 			key, b.display, info.Size, size)
 	}
 	return info, nil
+}
+
+// uploadContentType is the Content-Type an upload of an object of type
+// contentType is sent with: the object's own, unless the server could take it
+// as an instruction to parse the body.  A servlet container reads a body
+// labelled as a form as form parameters as soon as anything asks for one --
+// Jetty does so for PUT as well as POST, and dCache's door asks (for authz) --
+// after which the upload finds the body already consumed: dCache stores
+// nothing and answers 500 "insufficient data written".  The bytes are opaque
+// to the target, so such an object goes up as application/octet-stream; the
+// cache keeps its real type in its own metadata.
+func uploadContentType(contentType string) string {
+	if contentType == "" {
+		return ""
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		// Not a type a server could act on, but no use to it either.
+		return "application/octet-stream"
+	}
+	switch mediaType {
+	case "application/x-www-form-urlencoded", "multipart/form-data":
+		return "application/octet-stream"
+	}
+	return contentType
 }
 
 // removePartial deletes what a failed upload may have left at key.  It runs

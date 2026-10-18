@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -419,6 +420,47 @@ func refusingIfMatch(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// parsingFormBodies consumes the body of a PUT labelled as a form, as dCache's
+// door does: Jetty parses it as form parameters when the door looks for its
+// authz parameter, and the upload that follows finds nothing left to write.
+func parsingFormBodies(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			if mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaType == "application/x-www-form-urlencoded" {
+				_, _ = io.Copy(io.Discard, r.Body)
+				http.Error(w, "Internal problem: Problem with transferred data: insufficient data written",
+					http.StatusInternalServerError)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// TestWebDAVUploadOfFormTypedObject: an object whose recorded type is a form
+// type still uploads.  Sent with its own type, dCache consumes the body as a
+// form and stores nothing (seen against dCache 11.2.8), so the object could
+// never be tiered.
+func TestWebDAVUploadOfFormTypedObject(t *testing.T) {
+	f := newFakeDCacheWrapping(t, parsingFormBodies)
+	b := newFakeDCacheBackend(t, f, "cache", true)
+	for _, contentType := range []string{
+		"application/x-www-form-urlencoded",
+		"Application/X-WWW-Form-Urlencoded; charset=utf-8",
+		"multipart/form-data; boundary=x",
+	} {
+		data := "a=1&b=2 is just bytes to the cache"
+		info, err := b.Put(context.Background(), "aa/bb/form", contentType, int64(len(data)), strings.NewReader(data))
+		require.NoError(t, err, contentType)
+		assert.Equal(t, int64(len(data)), info.Size)
+		rc, err := b.OpenRange(context.Background(), "aa/bb/form", 0, &info)
+		require.NoError(t, err)
+		assert.Equal(t, data, readAll(t, rc))
+	}
+	assert.Equal(t, "text/plain; charset=utf-8", uploadContentType("text/plain; charset=utf-8"))
+	assert.Equal(t, "", uploadContentType(""))
 }
 
 // TestWebDAVListToleratesSizelessMembers: dCache lists a file that is still
