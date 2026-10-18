@@ -480,6 +480,8 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Monitoring_DataRetentionSize.GetName(), "0B")
 	// Monitoring.EnablePrometheus
 	v.SetDefault(param.Monitoring_EnablePrometheus.GetName(), true)
+	// Monitoring.EnableTransferRecords
+	v.SetDefault(param.Monitoring_EnableTransferRecords.GetName(), false)
 	// Monitoring.LabelLimit
 	v.SetDefault(param.Monitoring_LabelLimit.GetName(), 64)
 	// Monitoring.LabelNameLengthLimit
@@ -506,6 +508,18 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Monitoring_TokenExpiresIn.GetName(), "1h")
 	// Monitoring.TokenRefreshInterval
 	v.SetDefault(param.Monitoring_TokenRefreshInterval.GetName(), "5m")
+	// Monitoring.TransferRecordsLocation
+	if isRoot {
+		v.SetDefault(param.Monitoring_TransferRecordsLocation.GetName(), "/var/lib/pelican/monitoring/transfer_records")
+	} else {
+		{
+			val := "${ConfigBase}/monitoring/transfer_records"
+			val = strings.ReplaceAll(val, "${ConfigBase}", v.GetString(param.ConfigBase.GetName()))
+			v.SetDefault(param.Monitoring_TransferRecordsLocation.GetName(), val)
+		}
+	}
+	// Monitoring.TransferRecordsMaxSize
+	v.SetDefault(param.Monitoring_TransferRecordsMaxSize.GetName(), 1073741824)
 	// OIDC.ClientIDFile
 	{
 		val := "${ConfigBase}/oidc-client-id"
@@ -1170,6 +1184,18 @@ func ApplyDerivedDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 				val := "${ConfigBase}/monitoring/data"
 				val = strings.ReplaceAll(val, "${ConfigBase}", v.GetString(param.ConfigBase.GetName()))
 				v.SetDefault(param.Monitoring_DataLocation.GetName(), val)
+			}
+		}
+	}
+	// Monitoring.TransferRecordsLocation
+	if isDefaultSource(param.Monitoring_TransferRecordsLocation.GetName()) {
+		if isRoot {
+			v.SetDefault(param.Monitoring_TransferRecordsLocation.GetName(), "/var/lib/pelican/monitoring/transfer_records")
+		} else {
+			{
+				val := "${ConfigBase}/monitoring/transfer_records"
+				val = strings.ReplaceAll(val, "${ConfigBase}", v.GetString(param.ConfigBase.GetName()))
+				v.SetDefault(param.Monitoring_TransferRecordsLocation.GetName(), val)
 			}
 		}
 	}

@@ -323,6 +323,7 @@ var runtimeConfigurableMap = map[string]bool{
 	"Monitoring.DataRetention": false,
 	"Monitoring.DataRetentionSize": false,
 	"Monitoring.EnablePrometheus": false,
+	"Monitoring.EnableTransferRecords": false,
 	"Monitoring.LabelLimit": false,
 	"Monitoring.LabelNameLengthLimit": false,
 	"Monitoring.LabelValueLengthLimit": false,
@@ -336,6 +337,8 @@ var runtimeConfigurableMap = map[string]bool{
 	"Monitoring.StorageWarningThreshold": false,
 	"Monitoring.TokenExpiresIn": false,
 	"Monitoring.TokenRefreshInterval": false,
+	"Monitoring.TransferRecordsLocation": false,
+	"Monitoring.TransferRecordsMaxSize": false,
 	"OIDC.AuthorizationEndpoint": false,
 	"OIDC.ClientID": false,
 	"OIDC.ClientIDFile": false,
@@ -748,6 +751,7 @@ var stringAccessors = map[string]func(*Config) string{
 	"Lotman.LotHome": func(c *Config) string { return c.Lotman.LotHome },
 	"Monitoring.DataLocation": func(c *Config) string { return c.Monitoring.DataLocation },
 	"Monitoring.DataRetentionSize": func(c *Config) string { return c.Monitoring.DataRetentionSize },
+	"Monitoring.TransferRecordsLocation": func(c *Config) string { return c.Monitoring.TransferRecordsLocation },
 	"OIDC.AuthorizationEndpoint": func(c *Config) string { return c.OIDC.AuthorizationEndpoint },
 	"OIDC.ClientID": func(c *Config) string { return c.OIDC.ClientID },
 	"OIDC.ClientIDFile": func(c *Config) string { return c.OIDC.ClientIDFile },
@@ -1004,6 +1008,7 @@ var intAccessors = map[string]func(*Config) int{
 	"Monitoring.SampleLimit": func(c *Config) int { return c.Monitoring.SampleLimit },
 	"Monitoring.StorageCriticalThreshold": func(c *Config) int { return c.Monitoring.StorageCriticalThreshold },
 	"Monitoring.StorageWarningThreshold": func(c *Config) int { return c.Monitoring.StorageWarningThreshold },
+	"Monitoring.TransferRecordsMaxSize": func(c *Config) int { return c.Monitoring.TransferRecordsMaxSize },
 	"Origin.Concurrency": func(c *Config) int { return c.Origin.Concurrency },
 	"Origin.ConcurrencyDegradedThreshold": func(c *Config) int { return c.Origin.ConcurrencyDegradedThreshold },
 	"Origin.DiskUsageCalculationRateLimit": func(c *Config) int { return c.Origin.DiskUsageCalculationRateLimit },
@@ -1150,6 +1155,7 @@ var boolAccessors = map[string]func(*Config) bool{
 	"Logging.Rotation.DisableCompress": func(c *Config) bool { return c.Logging.Rotation.DisableCompress },
 	"Lotman.EnableAPI": func(c *Config) bool { return c.Lotman.EnableAPI },
 	"Monitoring.EnablePrometheus": func(c *Config) bool { return c.Monitoring.EnablePrometheus },
+	"Monitoring.EnableTransferRecords": func(c *Config) bool { return c.Monitoring.EnableTransferRecords },
 	"Monitoring.MetricAuthorization": func(c *Config) bool { return c.Monitoring.MetricAuthorization },
 	"Monitoring.PromQLAuthorization": func(c *Config) bool { return c.Monitoring.PromQLAuthorization },
 	"Origin.DirectorTest": func(c *Config) bool { return c.Origin.DirectorTest },
@@ -1658,6 +1664,7 @@ var allParameterNames = []string{
 	"Monitoring.DataRetention",
 	"Monitoring.DataRetentionSize",
 	"Monitoring.EnablePrometheus",
+	"Monitoring.EnableTransferRecords",
 	"Monitoring.LabelLimit",
 	"Monitoring.LabelNameLengthLimit",
 	"Monitoring.LabelValueLengthLimit",
@@ -1671,6 +1678,8 @@ var allParameterNames = []string{
 	"Monitoring.StorageWarningThreshold",
 	"Monitoring.TokenExpiresIn",
 	"Monitoring.TokenRefreshInterval",
+	"Monitoring.TransferRecordsLocation",
+	"Monitoring.TransferRecordsMaxSize",
 	"OIDC.AuthorizationEndpoint",
 	"OIDC.ClientID",
 	"OIDC.ClientIDFile",
@@ -2056,6 +2065,7 @@ var (
 	Lotman_LotHome = StringParam{"Lotman.LotHome"}
 	Monitoring_DataLocation = StringParam{"Monitoring.DataLocation"}
 	Monitoring_DataRetentionSize = StringParam{"Monitoring.DataRetentionSize"}
+	Monitoring_TransferRecordsLocation = StringParam{"Monitoring.TransferRecordsLocation"}
 	OIDC_AuthorizationEndpoint = StringParam{"OIDC.AuthorizationEndpoint"}
 	OIDC_ClientID = StringParam{"OIDC.ClientID"}
 	OIDC_ClientIDFile = StringParam{"OIDC.ClientIDFile"}
@@ -2256,6 +2266,7 @@ var (
 	Monitoring_SampleLimit = IntParam{"Monitoring.SampleLimit"}
 	Monitoring_StorageCriticalThreshold = IntParam{"Monitoring.StorageCriticalThreshold"}
 	Monitoring_StorageWarningThreshold = IntParam{"Monitoring.StorageWarningThreshold"}
+	Monitoring_TransferRecordsMaxSize = IntParam{"Monitoring.TransferRecordsMaxSize"}
 	Origin_Concurrency = IntParam{"Origin.Concurrency"}
 	Origin_ConcurrencyDegradedThreshold = IntParam{"Origin.ConcurrencyDegradedThreshold"}
 	Origin_DiskUsageCalculationRateLimit = IntParam{"Origin.DiskUsageCalculationRateLimit"}
@@ -2337,6 +2348,7 @@ var (
 	Logging_Rotation_DisableCompress = BoolParam{"Logging.Rotation.DisableCompress"}
 	Lotman_EnableAPI = BoolParam{"Lotman.EnableAPI"}
 	Monitoring_EnablePrometheus = BoolParam{"Monitoring.EnablePrometheus"}
+	Monitoring_EnableTransferRecords = BoolParam{"Monitoring.EnableTransferRecords"}
 	Monitoring_MetricAuthorization = BoolParam{"Monitoring.MetricAuthorization"}
 	Monitoring_PromQLAuthorization = BoolParam{"Monitoring.PromQLAuthorization"}
 	Origin_DirectorTest = BoolParam{"Origin.DirectorTest"}
@@ -2623,6 +2635,7 @@ func init() {
 		"Lotman.LotHome": Lotman_LotHome,
 		"Monitoring.DataLocation": Monitoring_DataLocation,
 		"Monitoring.DataRetentionSize": Monitoring_DataRetentionSize,
+		"Monitoring.TransferRecordsLocation": Monitoring_TransferRecordsLocation,
 		"OIDC.AuthorizationEndpoint": OIDC_AuthorizationEndpoint,
 		"OIDC.ClientID": OIDC_ClientID,
 		"OIDC.ClientIDFile": OIDC_ClientIDFile,
@@ -2817,6 +2830,7 @@ func init() {
 		"Monitoring.SampleLimit": Monitoring_SampleLimit,
 		"Monitoring.StorageCriticalThreshold": Monitoring_StorageCriticalThreshold,
 		"Monitoring.StorageWarningThreshold": Monitoring_StorageWarningThreshold,
+		"Monitoring.TransferRecordsMaxSize": Monitoring_TransferRecordsMaxSize,
 		"Origin.Concurrency": Origin_Concurrency,
 		"Origin.ConcurrencyDegradedThreshold": Origin_ConcurrencyDegradedThreshold,
 		"Origin.DiskUsageCalculationRateLimit": Origin_DiskUsageCalculationRateLimit,
@@ -2892,6 +2906,7 @@ func init() {
 		"Logging.Rotation.DisableCompress": Logging_Rotation_DisableCompress,
 		"Lotman.EnableAPI": Lotman_EnableAPI,
 		"Monitoring.EnablePrometheus": Monitoring_EnablePrometheus,
+		"Monitoring.EnableTransferRecords": Monitoring_EnableTransferRecords,
 		"Monitoring.MetricAuthorization": Monitoring_MetricAuthorization,
 		"Monitoring.PromQLAuthorization": Monitoring_PromQLAuthorization,
 		"Origin.DirectorTest": Origin_DirectorTest,
