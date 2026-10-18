@@ -16,7 +16,112 @@
 #
 # Starts a single-node dCache and runs Pelican's dCache tiering checks
 # against it.  Usage: run.sh <work directory>
+#
+# Environment:
+#   DCACHE_E2E_KEEP=1     leave dCache and the issuer running afterwards
+#   DCACHE_E2E_VERSION    dcache/dcache image tag (default in compose.yaml)
+#   DCACHE_E2E_GO_TEST    go test selection (default -run=TestDCache)
+#   DCACHE_E2E_SKIP_GO=1  stop after the curl probe
 set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+repo=$(cd "$here/../.." && pwd)
 work=${1:?usage: run.sh <work directory>}
-mkdir -p "$work/logs"
-docker version | tee "$work/logs/docker-version.txt"
+mkdir -p "$work"
+work=$(cd "$work" && pwd)
+logs=$work/logs
+rm -rf "${logs:?}" "${work:?}/etc" "${work:?}/certs"
+mkdir -p "$logs" "$work/etc"
+
+project=pelican-dcache-e2e
+issuer_port=${DCACHE_E2E_ISSUER_PORT:-8765}
+# The containers reach the issuer, which runs on the host, by this name;
+# compose.yaml maps it to the host gateway.  A token's iss must equal it.
+issuer_url=http://host.docker.internal:$issuer_port
+door=https://localhost:2880
+
+compose() {
+    DCACHE_E2E_ETC=$work/etc DCACHE_E2E_GRID_SECURITY=$work/certs/grid-security \
+        docker compose -p "$project" -f "$here/compose.yaml" "$@"
+}
+
+issuer_pid=
+collect_logs() {
+    status=$?
+    set +e
+    echo "== Collecting logs (exit status $status)"
+    compose ps -a >"$logs/compose-ps.txt" 2>&1
+    compose logs --no-color --timestamps >"$logs/compose.log" 2>&1
+    if [ -n "$(compose ps -q dcache 2>/dev/null)" ]; then
+        compose cp dcache:/opt/dcache/var/log "$logs/dcache-var-log" >/dev/null 2>&1
+    fi
+    if [ -z "${DCACHE_E2E_KEEP:-}" ]; then
+        [ -n "$issuer_pid" ] && kill "$issuer_pid" 2>/dev/null
+        compose down -v --remove-orphans >/dev/null 2>&1
+    fi
+    exit "$status"
+}
+trap collect_logs EXIT
+
+docker version >"$logs/docker-version.txt"
+# A previous run left running with DCACHE_E2E_KEEP=1.
+compose down -v --remove-orphans >/dev/null 2>&1 || true
+
+echo "== Generating the CA, host certificate and issuer key"
+bash "$here/certs.sh" "$work/certs"
+
+echo "== Rendering the dCache configuration (issuer $issuer_url)"
+for f in "$here"/dcache/*; do
+    sed "s|@ISSUER_URL@|$issuer_url|g" "$f" >"$work/etc/$(basename "$f")"
+done
+
+echo "== Starting the token issuer on port $issuer_port"
+python3 "$here/issuer.py" serve "$work/certs/issuer/key.pem" "$issuer_url" "$issuer_port" \
+    >"$logs/issuer.log" 2>&1 &
+issuer_pid=$!
+
+echo "== Starting dCache"
+start=$(date +%s)
+compose up -d --quiet-pull 2>&1 | tee "$logs/compose-up.txt"
+
+# The door answers once the domain is up; an unauthenticated request gets
+# 401.  Under emulation (an arm64 workstation) startup takes minutes.
+echo "== Waiting for the WebDAV door at $door"
+deadline=$((start + ${DCACHE_E2E_START_TIMEOUT:-600}))
+while :; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/certs/ca.pem" "$door/data/" || true)
+    case $code in 401 | 200 | 207) break ;; esac
+    if [ "$(date +%s)" -gt "$deadline" ]; then
+        echo "The door did not come up (last status ${code:-none})" >&2
+        exit 1
+    fi
+    if [ -z "$(compose ps --status running -q dcache)" ]; then
+        echo "The dCache container exited" >&2
+        exit 1
+    fi
+    sleep 5
+done
+echo "Door up after $(($(date +%s) - start))s (status $code)"
+
+export DCACHE_E2E_WEBDAV_URL=$door
+export DCACHE_E2E_CA_FILE=$work/certs/ca.pem
+export DCACHE_E2E_ISSUER_URL=$issuer_url
+export DCACHE_E2E_ISSUER_KEY=$work/certs/issuer/key.pem
+
+echo "== Protocol probe with curl"
+bash "$here/spike.sh" "$work" 2>&1 | tee "$logs/spike.txt"
+
+if [ -n "${DCACHE_E2E_SKIP_GO:-}" ]; then
+    exit 0
+fi
+
+echo "== Go tests against dCache"
+cd "$repo"
+set +e
+# shellcheck disable=SC2086
+go test -tags client,server -count=1 -v -timeout 20m ${DCACHE_E2E_GO_TEST:--run=TestDCache} ./local_cache/ \
+    2>&1 | tee "$logs/go-test.txt"
+status=${PIPESTATUS[0]}
+set -e
+echo "Total time $(($(date +%s) - start))s"
+exit "$status"
