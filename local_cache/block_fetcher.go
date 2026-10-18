@@ -140,6 +140,13 @@ type fetchOperation struct {
 	startTime       time.Time
 	rate            ewma.MovingAverage // bytes per second
 	etaUnixNano     atomic.Int64       // Estimated completion time as UnixNano (for atomic access)
+
+	// fill marks a background fill (see Fill), as opposed to a reader's own
+	// fetch or a prefetch; set before the fetch starts.
+	fill bool
+	// condemned records that the fetch's failure condemned the object (see
+	// dropIfCondemned); set by the fetch's own goroutine as it ends.
+	condemned bool
 }
 
 // BlockFetcherV2Config holds configuration for the block fetcher
@@ -559,6 +566,7 @@ func (bf *BlockFetcherV2) doFetch(ctx context.Context, op *fetchOperation, key f
 func (bf *BlockFetcherV2) Fill(ctx context.Context, startBlock, endBlock uint32) error {
 	key := fetchKey{startBlock, endBlock}
 	op := bf.newFetchOp(ctx, key)
+	op.fill = true
 	bf.mu.Lock()
 	bf.activeFetches[key] = op
 	bf.mu.Unlock()
@@ -568,7 +576,9 @@ func (bf *BlockFetcherV2) Fill(ctx context.Context, startBlock, endBlock uint32)
 		bf.mu.Unlock()
 		close(op.doneCh)
 	}()
+	cacheFillsStartedTotal.Inc()
 	bf.runFetch(op.ctx, op, key, true, false)
+	recordFillEnd(op.err, op.condemned, op.bytesDownloaded.Load())
 	return op.err
 }
 
@@ -694,7 +704,11 @@ func (bf *BlockFetcherV2) runFetch(ctx context.Context, op *fetchOperation, key 
 	}
 
 	bf.awaitTransfer(ctx, op, bf.tc.Results(), tj.ID(), writer, idleCancel, nil)
-	bf.dropIfCondemned(fence, op.err, op.bytesDownloaded.Load() > 0)
+	source := condemnedByRange
+	if op.fill {
+		source = condemnedByFill
+	}
+	op.condemned = bf.dropIfCondemned(fence, op.err, op.bytesDownloaded.Load() > 0, source)
 }
 
 // dropIfCondemned removes the cached instance after a fetch (a background
@@ -714,7 +728,9 @@ func (bf *BlockFetcherV2) runFetch(ctx context.Context, op *fetchOperation, key 
 //
 // A fetch that wrote nothing condemns nothing, and one that stopped for a
 // benign reason keeps its blocks.  Readers still holding the instance's block
-// state are told why it was dropped (see ObjectBlockState.condemn).
+// state are told why it was dropped (see ObjectBlockState.condemn).  It
+// reports whether it condemned the instance, which it counts as condemned by
+// source.
 //
 // fence is the fetch's membership of the instance's write fence, and the
 // instance is dropped through it: if it has been deleted since the fetch
@@ -722,9 +738,9 @@ func (bf *BlockFetcherV2) runFetch(ctx context.Context, op *fetchOperation, key 
 // again -- which owes nothing to this fetch and is left alone.  The
 // fetcher's own block state, which belongs to the instance the fetch wrote,
 // is condemned either way, so that the readers holding it learn the verdict.
-func (bf *BlockFetcherV2) dropIfCondemned(fence *writeFence, err error, wrote bool) {
+func (bf *BlockFetcherV2) dropIfCondemned(fence *writeFence, err error, wrote bool, source condemnSource) (condemned bool) {
 	if err == nil || transferStopKeepsData(err) {
-		return
+		return false
 	}
 	if errors.Is(err, client.ErrObjectVersionChanged) {
 		log.Warnf("The origin no longer serves the version of %s being cached (%v); dropping the cached copy so it is fetched again",
@@ -733,8 +749,9 @@ func (bf *BlockFetcherV2) dropIfCondemned(fence *writeFence, err error, wrote bo
 		log.Warnf("A fetch of %s failed after writing part of its body (%v); dropping the cached copy so it is fetched again",
 			bf.originURL, err)
 	} else {
-		return
+		return false
 	}
+	recordCondemned(source, condemnReasonOf(err))
 	if bf.beforeDrop != nil {
 		bf.beforeDrop()
 	}
@@ -746,6 +763,7 @@ func (bf *BlockFetcherV2) dropIfCondemned(fence *writeFence, err error, wrote bo
 	} else if !dropped {
 		log.Debugf("Not dropping %s: it was deleted while it was being fetched", bf.instanceHash)
 	}
+	return true
 }
 
 // awaitTransfer drives an in-flight transfer to completion.
