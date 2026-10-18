@@ -1,0 +1,39 @@
+# Runs Pelican's dCache tiering target against a real dCache instance: a
+# single-node dCache (official dcache/dcache image) with a WebDAV door that
+# accepts WLCG tokens and issues macaroons.  The workflow only starts the
+# script; everything about the dCache instance and the tests lives in
+# github_scripts/dcache-e2e/, so it can change without touching this file.
+name: dCache end-to-end
+
+on:
+  push:
+    branches:
+      - dcache-e2e-spike
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dcache-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run the dCache end-to-end checks
+        run: bash github_scripts/dcache-e2e/run.sh "$RUNNER_TEMP/dcache-e2e"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dcache-e2e-logs
+          path: ${{ runner.temp }}/dcache-e2e/logs
+          if-no-files-found: ignore
