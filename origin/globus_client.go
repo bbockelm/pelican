@@ -41,7 +41,7 @@ import (
 	pelican_oauth2 "github.com/pelicanplatform/pelican/oauth2"
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/server_structs"
-	"github.com/pelicanplatform/pelican/utils"
+	"github.com/pelicanplatform/pelican/server_utils"
 	"github.com/pelicanplatform/pelican/web_ui"
 )
 
@@ -602,17 +602,8 @@ func handleGlobusAuth(ctx *gin.Context) {
 	ctx.Redirect(http.StatusTemporaryRedirect, redirectUrl)
 }
 
-// Persist a Globus access token on the disk
+// Persist a Globus access token on the disk for the XRootD daemon to read.
 func persistToken(collectionID string, token *oauth2.Token, tokenType GlobusTokenType) (string, error) {
-	uid, err := config.GetDaemonUID()
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to persist Globus %s access token on disk: failed to get uid", tokenType)
-	}
-
-	gid, err := config.GetDaemonGID()
-	if err != nil {
-		return "", errors.Wrapf(err, "failed to persist Globus %s access token on disk: failed to get gid", tokenType)
-	}
 	globusFdr := param.Origin_GlobusConfigLocation.GetString()
 	tokBase := filepath.Join(globusFdr, "tokens")
 	if filepath.Clean(tokBase) == "" {
@@ -641,7 +632,7 @@ func persistToken(collectionID string, token *oauth2.Token, tokenType GlobusToke
 
 	tokFileName := filepath.Join(tokBase, filename)
 	// The token must be owned by the XRootD user/group so that XRootD can read it
-	if err = utils.WriteFileAtomic(tokFileName, []byte(token.AccessToken+"\n"), 0600, utils.WithOwner(uid, gid)); err != nil {
+	if err := server_utils.WriteDaemonTokenFile(tokFileName, token.AccessToken); err != nil {
 		return "", errors.Wrapf(err, "failed to update Globus %s token file %s", tokenType, tokFileName)
 	}
 	return tokFileName, nil
