@@ -62,11 +62,20 @@ const (
 // storage targets.  Objects become candidates when they complete (via the
 // StorageManager's onObjectComplete hook), at startup (backfill scan), and
 // during the periodic tiering consistency sweep.
+//
+// With cold targets (see TierTargetConfig.Cold) none of that applies: local
+// storage is the hot tier, and an object is uploaded only when watermark
+// eviction offers it (offerDemotion), so that it moves to the cold target
+// instead of being deleted.  The upload itself -- intent, relocation,
+// deferred local release, crash recovery -- is the same.
 type tierUploader struct {
 	db        *CacheDB
 	storage   *StorageManager
 	eviction  *EvictionManager
 	threshold int64
+	// cold is true when the targets are cold: objects are uploaded only
+	// when eviction demotes them.
+	cold bool
 
 	queue chan InstanceHash
 	ctx   context.Context
@@ -86,6 +95,29 @@ type tierUploader struct {
 	pendingMu      sync.Mutex
 	pendingRelease map[InstanceHash]struct{}
 	releaseKick    chan struct{}
+
+	// demoting holds the objects eviction handed over for demotion, with
+	// the bytes each will free per local directory, until their upload is
+	// settled; demotingBytes totals them per directory for eviction's
+	// accounting.  Both guarded by inflightMu.
+	demoting      map[InstanceHash]demotion
+	demotingBytes map[StorageID]int64
+
+	// beforeRelocate, set only by tests, runs once an upload has finished,
+	// as its object is about to be relocated.
+	beforeRelocate func(InstanceHash)
+	// beforeReleaseLocal, set only by tests, runs as releaseLocalCopy is
+	// about to shut the object's writers and creators out.
+	beforeReleaseLocal func(InstanceHash)
+}
+
+// demotion is an object eviction handed over for demotion.
+type demotion struct {
+	// local is the bytes the upload will free, per local directory.
+	local map[StorageID]int64
+	// accessed is the object's LRU access time when it was offered.  An
+	// object read since is hot again, and is not uploaded after all.
+	accessed time.Time
 }
 
 // newTierUploader creates the uploader.  threshold is the minimum object
@@ -101,9 +133,95 @@ func newTierUploader(db *CacheDB, storage *StorageManager, eviction *EvictionMan
 		failures:       make(map[InstanceHash]int),
 		pendingRelease: make(map[InstanceHash]struct{}),
 		releaseKick:    make(chan struct{}, 1),
+		demoting:       make(map[InstanceHash]demotion),
+		demotingBytes:  make(map[StorageID]int64),
+		cold:           storage.coldTiering(),
 	}
 	storage.SetUnpinObserver(u.onUnpin)
 	return u
+}
+
+// offerDemotion is the eviction hook for cold tiering (EvictOptions.Demote):
+// eviction offers it each object it would otherwise delete from local storage,
+// and the object is queued for upload to a cold target if it qualifies and
+// one has room.  It runs inside the eviction transaction, so it only checks
+// in-memory state and never blocks.
+//
+// An object that does not qualify -- too small, given up on, no healthy cold
+// target with room, or the queue is full -- is deleted as before: eviction
+// must free local space whether or not the cold tier can take the object.
+func (u *tierUploader) offerDemotion(hash InstanceHash, meta *CacheMetadata) demoteVerdict {
+	if !u.cold {
+		return demoteNo
+	}
+	u.inflightMu.Lock()
+	if _, queued := u.demoting[hash]; queued {
+		u.inflightMu.Unlock()
+		return demotePending
+	}
+	givenUp := u.failures[hash] >= tierMaxUploadAttempts
+	u.inflightMu.Unlock()
+	if givenUp || !u.eligible(meta) || u.chooseTarget(CalculateFileSize(meta.ContentLength)) == nil {
+		return demoteNo
+	}
+
+	// Record before queueing: a worker could otherwise finish the upload
+	// and settle it before the record exists, leaking the pending bytes.
+	local := meta.ResidentBytes()
+	u.inflightMu.Lock()
+	u.demoting[hash] = demotion{local: local, accessed: meta.LastAccessTime}
+	for sid, b := range local {
+		u.demotingBytes[sid] += b
+	}
+	u.inflightMu.Unlock()
+
+	select {
+	case u.queue <- hash:
+		tierQueueDepth.Set(float64(len(u.queue)))
+		return demoteQueued
+	default:
+		tierQueueDropsTotal.Inc()
+		u.settleDemotion(hash)
+		return demoteNo
+	}
+}
+
+// settleDemotion drops an object's demotion record once its upload has been
+// attempted.  Whatever happened, its bytes are no longer pending: a
+// successful upload released them, and a failed one left them local, where
+// the next eviction pass may offer the object again.
+func (u *tierUploader) settleDemotion(hash InstanceHash) {
+	u.inflightMu.Lock()
+	defer u.inflightMu.Unlock()
+	d, ok := u.demoting[hash]
+	if !ok {
+		return
+	}
+	delete(u.demoting, hash)
+	for sid, b := range d.local {
+		if u.demotingBytes[sid] -= b; u.demotingBytes[sid] <= 0 {
+			delete(u.demotingBytes, sid)
+		}
+	}
+}
+
+// readSinceOffered reports whether an object queued for demotion has been
+// read since eviction offered it.  (Access times are debounced, so a read
+// shortly after an earlier one may not show; that only means the object is
+// demoted as eviction asked.)
+func (u *tierUploader) readSinceOffered(hash InstanceHash, meta *CacheMetadata) bool {
+	u.inflightMu.Lock()
+	defer u.inflightMu.Unlock()
+	d, ok := u.demoting[hash]
+	return ok && meta.LastAccessTime.After(d.accessed)
+}
+
+// pendingDemotionBytes reports the bytes of a local directory queued for
+// demotion and not yet released; see evictionDemoter.
+func (u *tierUploader) pendingDemotionBytes(sid StorageID) int64 {
+	u.inflightMu.Lock()
+	defer u.inflightMu.Unlock()
+	return u.demotingBytes[sid]
 }
 
 // markPendingRelease records that an object's local copy still needs
@@ -182,7 +300,9 @@ func (u *tierUploader) Start(ctx context.Context, egrp *errgroup.Group) error {
 			})
 		}
 		egrp.Go(func() error {
-			u.backfillScan(ctx)
+			if !u.cold {
+				u.backfillScan(ctx)
+			}
 			return nil
 		})
 		egrp.Go(func() error {
@@ -240,7 +360,12 @@ func (u *tierUploader) rescanLoop(ctx context.Context) {
 		case <-time.After(sleep):
 		}
 
-		_, deferred := u.backfillScan(ctx)
+		// Cold targets receive only what eviction demotes, so there is no
+		// backlog of completed objects to find.
+		deferred := false
+		if !u.cold {
+			_, deferred = u.backfillScan(ctx)
+		}
 
 		// Finish local cleanup for objects that were still under a reader when
 		// their relocation committed.
@@ -292,6 +417,7 @@ func (u *tierUploader) workerLoop(ctx context.Context) {
 			if err := u.processObject(ctx, hash); err != nil {
 				log.Warnf("Failed to tier object %s: %v", hash, err)
 			}
+			u.settleDemotion(hash)
 		}
 	}
 }
@@ -300,11 +426,16 @@ func (u *tierUploader) workerLoop(ctx context.Context) {
 // objects are eligible: large objects (the prime tiering candidates) are
 // exactly the ones chunking splits across directories, and relocation
 // flattens them into a single remote object.
+//
+// An object promoted from a cold target that kept its copy there is never
+// uploaded: eviction demotes it by pointing it back at that copy, and a
+// partly promoted one could not be read back in full anyway.
 func (u *tierUploader) eligible(meta *CacheMetadata) bool {
 	return meta != nil &&
 		!meta.Completed.IsZero() &&
 		meta.StorageID != StorageIDInline &&
 		!u.storage.IsTiered(meta.StorageID) &&
+		meta.ColdCopy == nil &&
 		meta.ContentLength >= u.threshold
 }
 
@@ -401,6 +532,12 @@ func (u *tierUploader) processObject(ctx context.Context, instanceHash InstanceH
 	if !u.eligible(meta) {
 		return nil
 	}
+	if u.readSinceOffered(instanceHash, meta) {
+		// Eviction offered it while it was cold; it has been read since,
+		// and uploading it now would only bring it back on the next read.
+		log.Debugf("Not demoting %s: it was read after eviction offered it", instanceHash)
+		return nil
+	}
 	localID := meta.StorageID
 	fileSize := CalculateFileSize(meta.ContentLength)
 
@@ -489,7 +626,7 @@ func (u *tierUploader) processObject(ctx context.Context, instanceHash InstanceH
 	// writers (LRU updates, checksum merges).
 	var prev *CacheMetadata
 	for attempt := 0; ; attempt++ {
-		prev, err = u.db.RelocateObject(instanceHash, target.id, &remote)
+		prev, err = u.relocate(instanceHash, target.id, &remote)
 		if err == nil {
 			break
 		}
@@ -516,6 +653,9 @@ func (u *tierUploader) processObject(ctx context.Context, instanceHash InstanceH
 	}
 
 	recordTierUpload(target, tierUploadSucceeded, meta.ContentLength, uploadTime)
+	if u.cold {
+		recordTierDemotion(target, tierDemotedByUpload, meta.ContentLength)
+	}
 	u.inflightMu.Lock()
 	delete(u.failures, instanceHash)
 	u.inflightMu.Unlock()
@@ -534,7 +674,7 @@ func (u *tierUploader) processObject(ctx context.Context, instanceHash InstanceH
 	// Release the local copy, unless a reader is still working from it.
 	// Mark first: see markPendingRelease.
 	u.markPendingRelease(instanceHash)
-	if !u.releaseLocalCopy(instanceHash, prev) {
+	if !u.releaseLocalCopy(instanceHash, prev, target.id) {
 		// A reader holds this version.  Its RangeReader captured the
 		// pre-relocation metadata, so it is still reading the local chunk
 		// files; deleting them now would break the transfer.  Leave the
@@ -579,14 +719,62 @@ func (u *tierUploader) givenUp(hash InstanceHash) bool {
 	return u.failures[hash] >= tierMaxUploadAttempts
 }
 
-// releaseLocalCopy removes a tiered object's local files and returns their
-// capacity to the directories that held them.  prev must be the object's
-// pre-relocation metadata, which still carries the chunk layout, so that a
-// chunked object's bytes are refunded to every directory that held a chunk.
+// relocate moves the object's record onto the tiering target (see
+// CacheDB.RelocateObject), which ends its local life: from then on the
+// record names the target, and the local copy only waits to be released.
+// So the move is made with the instance's writers shut out, and fences off
+// every one of them (see instanceFences): a writer still running on the
+// local copy -- an auto-repair, say -- writes nothing of it afterwards,
+// where its block rows would otherwise outlive the move, as a bitmap of the
+// tiered object.  Readers are unaffected: one still working from the local
+// copy keeps it until it lets go (see releaseLocalCopy).
+func (u *tierUploader) relocate(instanceHash InstanceHash, targetID StorageID, remote *TierObjectInfo) (*CacheMetadata, error) {
+	if u.beforeRelocate != nil {
+		u.beforeRelocate(instanceHash)
+	}
+	release := u.storage.fences.exclude(instanceHash)
+	prev, err := u.db.RelocateObject(instanceHash, targetID, remote)
+	release(err == nil)
+	return prev, err
+}
+
+// releaseLocalCopy removes the local files of an object tiered to targetID
+// and returns their capacity to the directories that held them.  prev must
+// be the object's pre-relocation metadata, which still carries the chunk
+// layout, so that a chunked object's bytes are refunded to every directory
+// that held a chunk.
 //
 // Returns false without touching anything when a reader is pinned on the
-// version, leaving the caller to retry later.
-func (u *tierUploader) releaseLocalCopy(instanceHash InstanceHash, prev *CacheMetadata) bool {
+// version, leaving the caller to retry later.  Returns true, also without
+// touching anything, when the object was deleted and fetched again under
+// the same instance hash since it was tiered -- reborn, its record names
+// local storage again: the files at the recorded layout belong to the new
+// copy then, and the old copy's local charge, if any remains, is reconciled
+// by the next usage scan.
+//
+// The check and the release are made with the instance's writers and
+// creators shut out (see instanceFences), so a fetch of the same version
+// creates its files wholly before the check, which then sees it, or wholly
+// after the old files are gone; it can never lose its new files to this
+// release.
+func (u *tierUploader) releaseLocalCopy(instanceHash InstanceHash, prev *CacheMetadata, targetID StorageID) bool {
+	if u.beforeReleaseLocal != nil {
+		u.beforeReleaseLocal(instanceHash)
+	}
+	// Nothing of the record is deleted here -- the relocation already
+	// fenced the local life's writers off -- so the release does not
+	// advance the fence.
+	release := u.storage.fences.exclude(instanceHash)
+	defer release(false)
+	meta, err := u.storage.GetMetadata(instanceHash)
+	if err != nil {
+		log.Warnf("Failed to load the metadata of tiered object %s; leaving its local copy for a later pass: %v", instanceHash, err)
+		return false
+	}
+	if meta != nil && meta.StorageID != targetID {
+		log.Debugf("Tiered object %s was fetched again before its deferred local release; leaving the new copy alone", instanceHash)
+		return true
+	}
 	if u.storage.IsObjectPinned(instanceHash) {
 		return false
 	}
@@ -600,14 +788,8 @@ func (u *tierUploader) releaseLocalCopy(instanceHash InstanceHash, prev *CacheMe
 		}
 		u.eviction.NoteUsageDecrease(sid, bytes)
 	}
-	// Remove the local files under the instance's fence, as a deletion
-	// does, so that a fetch of the same version made after a deletion of the
-	// relocated object cannot have its new files removed here.  Nothing of
-	// the record is deleted, so writers are not fenced off.
-	release := u.storage.fences.exclude(instanceHash)
 	u.storage.invalidateObjectCaches(instanceHash, prev.ChunkCount())
 	u.storage.deleteChunkFiles(instanceHash, prev.ContentLength, prev.StorageID, prev.ChunkSizeCode, prev.ChunkLocations)
-	release(false)
 	return true
 }
 
@@ -636,15 +818,11 @@ func localCopyFromIntent(intent *TierUploadIntent) *CacheMetadata {
 //     named only the target -- it never saw the local copy.  Release that.
 //   - Reborn (metadata names local storage): the object was deleted and
 //     fetched again under the same instance hash, so the files at the
-//     recorded layout now belong to the new copy.  Touch nothing; the old
-//     copy's local charge, if any remains, is reconciled by the next usage
-//     scan.
-func (u *tierUploader) settleRelocatedIntent(hash InstanceHash, intent *TierUploadIntent, meta *CacheMetadata) bool {
-	if meta != nil && meta.StorageID != intent.TargetStorageID {
-		log.Debugf("Tiered object %s was fetched again before its deferred local release; leaving the new copy alone", hash)
-		return true
-	}
-	return u.releaseLocalCopy(hash, localCopyFromIntent(intent))
+//     recorded layout now belong to the new copy.  Touch nothing.
+//
+// releaseLocalCopy tells the three apart, under the instance's fence.
+func (u *tierUploader) settleRelocatedIntent(hash InstanceHash, intent *TierUploadIntent) bool {
+	return u.releaseLocalCopy(hash, localCopyFromIntent(intent), intent.TargetStorageID)
 }
 
 // finishDeferredReleases completes the local cleanup for objects whose
@@ -696,12 +874,8 @@ func (u *tierUploader) finishDeferredRelease(hash InstanceHash, intent *TierUplo
 	if intent.RelocatedAt.IsZero() {
 		return
 	}
-	meta, err := u.storage.GetMetadata(hash)
-	if err != nil {
-		return
-	}
 	u.markPendingRelease(hash)
-	if !u.settleRelocatedIntent(hash, intent, meta) {
+	if !u.settleRelocatedIntent(hash, intent) {
 		return // still pinned; the reader's release will wake us
 	}
 	u.clearPendingRelease(hash)
@@ -776,7 +950,7 @@ func (u *tierUploader) recoverIntent(ctx context.Context, hash InstanceHash, int
 		// since, the target's charge is accounted for -- by the live
 		// metadata, or refunded by the deletion -- so only the local
 		// side can be left over.  See settleRelocatedIntent.
-		if !u.settleRelocatedIntent(hash, intent, meta) {
+		if !u.settleRelocatedIntent(hash, intent) {
 			u.markPendingRelease(hash)
 			return // pinned; the reader's release will wake the loop
 		}
@@ -799,7 +973,7 @@ func (u *tierUploader) recoverIntent(ctx context.Context, hash InstanceHash, int
 		// The metadata already names the target but the intent was never
 		// marked relocated (that write is best-effort), so this is the
 		// same leftover-local-copy case as above.
-		if !u.releaseLocalCopy(hash, localCopyFromIntent(intent)) {
+		if !u.releaseLocalCopy(hash, localCopyFromIntent(intent), intent.TargetStorageID) {
 			u.markPendingRelease(hash)
 			return // pinned; the reader's release will wake the loop
 		}
@@ -811,7 +985,11 @@ func (u *tierUploader) recoverIntent(ctx context.Context, hash InstanceHash, int
 			return // keep the intent so a later pass retries
 		}
 		refund()
-		u.MaybeEnqueue(hash)
+		// A cold target is offered objects by eviction, which will offer
+		// this one again if local storage still needs the room.
+		if !u.cold {
+			u.MaybeEnqueue(hash)
+		}
 	}
 	if err := u.db.DeleteTierUploadIntent(hash); err != nil {
 		log.Warnf("Failed to delete upload intent for %s during recovery: %v", hash, err)

@@ -168,6 +168,7 @@ export interface TieringTarget {
   highwatermarkpercentage: number;
   lowwatermarkpercentage: number;
   adoptexisting: boolean;
+  cold: boolean;
 }
 
 export interface Path {
