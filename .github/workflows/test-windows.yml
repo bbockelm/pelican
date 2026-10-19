@@ -98,17 +98,9 @@ jobs:
       - name: Run "go test" on shared and client-specific code
         run: |
           # DIAGNOSTIC ONLY (branch windows-hang-diag): report the machine's
-          # state every 20s straight into the live log, so a runner that stops
-          # answering shows what it ran out of.
-          powershell -NoProfile -Command '
-            while ($true) {
-              $os = Get-CimInstance Win32_OperatingSystem
-              $disks = (Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Used -ne $null } | ForEach-Object { "{0}:free={1:N1}G" -f $_.Name, ($_.Free/1GB) }) -join " "
-              $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
-              "MACHINE {0:HH:mm:ss} cpu={1}% memfree={2:N0}M commitfree={3:N0}M procs={4} {5}" -f (Get-Date), $cpu, ($os.FreePhysicalMemory/1KB), ($os.FreeVirtualMemory/1KB), (Get-Process).Count, $disks
-              Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 6 | ForEach-Object { "MACHINE   {0} pid={1} ws={2:N0}M cpu={3:N0}s handles={4} threads={5}" -f $_.ProcessName, $_.Id, ($_.WorkingSet64/1MB), $_.CPU, $_.HandleCount, $_.Threads.Count }
-              Start-Sleep -Seconds 20
-            }' &
+          # state into the log, and kill the test binaries before the machine
+          # runs out of memory, disk or handles, so the log survives.
+          powershell -NoProfile -ExecutionPolicy Bypass -File github_scripts/windows-hang-monitor.ps1 &
           monitor=$!
           trap 'kill $monitor 2>/dev/null' EXIT
           # Start local_cache first, as on Linux and macOS.
