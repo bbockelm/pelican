@@ -72,7 +72,7 @@ func TestMain(m *testing.M) {
 		cleanup()
 		os.Exit(1)
 	}
-	code := m.Run()
+	code := test_utils.RunWithHangWatchdog(m, "client")
 	cleanup()
 	os.Exit(code)
 }
