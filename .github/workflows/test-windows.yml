@@ -28,6 +28,13 @@ on:
         type: boolean
         default: false
   workflow_dispatch:
+    inputs:
+      diag_temp_on_d:
+        # DIAGNOSTIC ONLY (branch windows-hang-diag): move the Go build
+        # cache and the temp directory off the C: OS disk.
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -62,11 +69,24 @@ jobs:
           check-latest: true
           cache: false
 
+      # DIAGNOSTIC ONLY (branch windows-hang-diag): with diag_temp_on_d, the
+      # Go build cache and every temp directory (so every t.TempDir) live on
+      # D: rather than the C: OS disk.
+      - name: Move the build cache and temp to the D drive
+        if: ${{ inputs.diag_temp_on_d }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/gocache" "$RUNNER_TEMP/tmp"
+          echo "GOCACHE=$(cygpath -w "$RUNNER_TEMP/gocache")" >> "$GITHUB_ENV"
+          echo "TMP=$(cygpath -w "$RUNNER_TEMP/tmp")" >> "$GITHUB_ENV"
+          echo "TEMP=$(cygpath -w "$RUNNER_TEMP/tmp")" >> "$GITHUB_ENV"
+
       - name: Pin the Go build cache
         # Point every later Go build, including those run by tests, at the
         # same cache. Tests that start an origin or cache set
         # XDG_CACHE_HOME, which on Linux would otherwise move Go's default.
-        run: echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_ENV"
+        run: |
+          echo "GOCACHE=$(go env GOCACHE)" >> "$GITHUB_ENV"
+          echo "DIAG: GOCACHE=$(go env GOCACHE) TEMP=$TEMP TMP=$TMP"
 
       - name: Install gotestsum
         run: |
@@ -94,18 +114,6 @@ jobs:
           ./.github/scripts/go-test/goreleaser_binaries.sh \
             TEST_PELICAN_BINARY |
             tee -a "$GITHUB_ENV"
-
-      # DIAGNOSTIC ONLY (branch windows-hang-diag): pstore alone, verbose, so
-      # the last "=== RUN" in the live log names the test running when the
-      # machine froze.
-      - name: Run pstore verbosely
-        continue-on-error: true
-        run: |
-          sentinel="$RUNNER_TEMP/hang-monitor.run"
-          touch "$sentinel"
-          trap 'rm -f "$sentinel"' EXIT
-          powershell -NoProfile -ExecutionPolicy Bypass -File github_scripts/windows-hang-monitor.ps1 "$(cygpath -w "$sentinel")" &
-          go test -v -count=3 -short -tags=client -timeout=12m ./pstore
 
       - name: Run "go test" on shared and client-specific code
         run: |
