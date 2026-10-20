@@ -6,6 +6,8 @@
 # that no log survives -- it dumps every process with its command line and
 # kills the Go test binaries, so the step ends and its log is kept.
 
+param([string]$Sentinel)
+
 $checkSeconds = 5
 $reportEvery = 4          # report every 4th check (20s)
 $minFreeMiB = 1500        # physical memory
@@ -22,6 +24,8 @@ function Write-Top($label) {
 
 $n = 0
 while ($true) {
+    # The step removes the sentinel when it ends; exit so the step can finish.
+    if ($Sentinel -and -not (Test-Path -LiteralPath $Sentinel)) { exit 0 }
     $n++
     $os = Get-CimInstance Win32_OperatingSystem
     $memFree = $os.FreePhysicalMemory / 1KB

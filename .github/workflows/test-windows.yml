@@ -95,14 +95,28 @@ jobs:
             TEST_PELICAN_BINARY |
             tee -a "$GITHUB_ENV"
 
+      # DIAGNOSTIC ONLY (branch windows-hang-diag): pstore alone, verbose, so
+      # the last "=== RUN" in the live log names the test running when the
+      # machine froze.
+      - name: Run pstore verbosely
+        continue-on-error: true
+        run: |
+          sentinel="$RUNNER_TEMP/hang-monitor.run"
+          touch "$sentinel"
+          trap 'rm -f "$sentinel"' EXIT
+          powershell -NoProfile -ExecutionPolicy Bypass -File github_scripts/windows-hang-monitor.ps1 "$(cygpath -w "$sentinel")" &
+          go test -v -count=3 -short -tags=client -timeout=12m ./pstore
+
       - name: Run "go test" on shared and client-specific code
         run: |
           # DIAGNOSTIC ONLY (branch windows-hang-diag): report the machine's
           # state into the log, and kill the test binaries before the machine
-          # runs out of memory, disk or handles, so the log survives.
-          powershell -NoProfile -ExecutionPolicy Bypass -File github_scripts/windows-hang-monitor.ps1 &
-          monitor=$!
-          trap 'kill $monitor 2>/dev/null' EXIT
+          # runs out of memory, disk or handles, so the log survives.  The
+          # monitor exits when the sentinel goes; bash's kill cannot reach it.
+          sentinel="$RUNNER_TEMP/hang-monitor.run"
+          touch "$sentinel"
+          trap 'rm -f "$sentinel"' EXIT
+          powershell -NoProfile -ExecutionPolicy Bypass -File github_scripts/windows-hang-monitor.ps1 "$(cygpath -w "$sentinel")" &
           # Start local_cache first, as on Linux and macOS.
           gotestsum \
             --format pkgname-and-test-fails \
