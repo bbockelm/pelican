@@ -10,7 +10,7 @@ A Pelican server records every transfer it serves as a ClassAd in an embedded HT
 
 The arrangement is deliberately **local-first**. The store on the node is the system of record; collection is a subscription a central service opens against it. Nothing in the data path waits on that service, and the server is unaffected if it is absent for days. A monitoring system that can slow down or break data serving is worse than no monitoring system.
 
-This is independent of how the server is deployed. It works the same for a systemd-managed origin, a containerised cache, and a daemon supervised by `condor_master` (see [condor-daemon-design.md](condor-daemon-design.md), which uses this feature but is not required by it).
+This is independent of how the server is deployed. It works the same for a systemd-managed origin, a containerised cache, and a daemon under any other supervisor.
 
 It is off by default: `Monitoring.EnableTransferRecords`.
 
@@ -166,15 +166,14 @@ Not supported on Windows: the store relies on memory-mapped segment files. Enabl
 
 ## 8. Testing
 
-| Tier                  | Coverage                                                                                                                                                                                         |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Fan-out               | All four combinations of shoveler and consumer; panic containment; unregistration; final counts reach the consumer.                                                                              |
-| Store                 | Projection; unknown fields omitted; archive durability across reopen; the active-row lifecycle; crash recovery via `Reconcile`; one transfer producing exactly one record.                       |
-| Feed                  | Delivery to a real `changefeed.Pull` subscriber; refusal of an unidentified caller; cursor resumption across a simulated outage with no redelivery.                                              |
-| Authorization         | An authenticated pull through the real middleware with a minted token; a token carrying a different scope refused 403, which shows the scope rather than authentication is what guards the feed. |
-| Under `condor_master` | The store opens and the feed is mounted and gated on a real supervised daemon.                                                                                                                   |
+| Tier          | Coverage                                                                                                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Fan-out       | All four combinations of shoveler and consumer; panic containment; unregistration; final counts reach the consumer.                                                                              |
+| Store         | Projection; unknown fields omitted; archive durability across reopen; the active-row lifecycle; crash recovery via `Reconcile`; one transfer producing exactly one record.                       |
+| Feed          | Delivery to a real `changefeed.Pull` subscriber; refusal of an unidentified caller; cursor resumption across a simulated outage with no redelivery.                                              |
+| Authorization | An authenticated pull through the real middleware with a minted token; a token carrying a different scope refused 403, which shows the scope rather than authentication is what guards the feed. |
 
-Not covered: minting a token against a *separate* `pelican-server` process's issuer and pulling from it. The route is proven mounted and gated on a real daemon, and the auth and pull are proven in-process; only the cross-process token provisioning is unexercised, and that is Pelican's ordinary issuer machinery.
+Not covered: minting a token against a *separate* `pelican-server` process's issuer and pulling from it. The auth and the pull are proven in-process; only the cross-process token provisioning is unexercised, and that is Pelican's ordinary issuer machinery.
 
 ## 9. Open questions
 

@@ -41,6 +41,130 @@ securityDefinitions:
     description: >-
       Enter the JWT with the `Bearer` prefix, e.g. "Bearer abcde12345".
 definitions:
+  TransferRecordChangeEvent:
+    type: object
+    description: >-
+      One event on the transfer-record change feed. The record itself is
+      carried in `ad`; the remaining fields let a subscriber order events and
+      resume after a disconnection.
+    properties:
+      kind:
+        type: string
+        description: >-
+          The kind of change. `Upsert` carries a record in `ad`; `Synced`
+          marks the point at which the subscriber has caught up with what was
+          retained at subscribe time.
+      src:
+        type: string
+        description: The name of the server the record came from.
+        example: "origin.example.edu"
+      ver:
+        type: integer
+        format: int64
+        description: Monotonic version within the source.
+      key:
+        type: string
+        description: >-
+          The record's key within the table. A completed transfer reuses the
+          key of its in-progress row, so a subscriber that saw both recognises
+          one transfer rather than counting two.
+      ad:
+        $ref: "#/definitions/TransferRecord"
+      cursor:
+        type: string
+        description: >-
+          Base64-encoded opaque cursor. A subscriber persists this once it has
+          durably stored the event, and presents it on the next subscribe.
+      ts:
+        type: integer
+        format: int64
+        description: >-
+          The record's `CompletionDate` in Unix seconds, which is what
+          acknowledgements are measured against.
+    readOnly: true
+  TransferRecord:
+    type: object
+    description: >-
+      A single transfer, as a ClassAd. Attributes that were not measured are
+      absent rather than empty, so an absent attribute says "not measured"
+      where an empty string would say "measured and blank". Every record
+      carries the identity of the server that served it, so it can be
+      interpreted without a join against whatever the collector knows about
+      its sources.
+    properties:
+      TransferKey:
+        type: string
+        description: >-
+          Identifies the transfer within this server. It is a per-server
+          counter, not a federation-wide identifier, so a collector
+          aggregating several servers must key on (server, TransferKey).
+      TransferPath:
+        type: string
+        description: The object path transferred.
+        example: "/ns/example/file.root"
+      TransferStatus:
+        type: string
+        description: >-
+          How the transfer ended. `abandoned` marks a transfer that was still
+          running when the server stopped: the server cannot know whether it
+          finished, so it is recorded as neither completed nor discarded.
+      ReadBytes:
+        type: integer
+        format: int64
+      WriteBytes:
+        type: integer
+        format: int64
+      ReadOps:
+        type: integer
+        format: int64
+      WriteOps:
+        type: integer
+        format: int64
+      ClientIP:
+        type: string
+        description: The address the request came from.
+      UserDN:
+        type: string
+        description: The identity of the user who requested the transfer, where one was established.
+      Role:
+        type: string
+      AuthProtocol:
+        type: string
+      Issuer:
+        type: string
+        description: The issuer of the token that authorized the transfer.
+      Project:
+        type: string
+      UserAgent:
+        type: string
+      StartDate:
+        type: integer
+        format: int64
+        description: Unix seconds at which the transfer started.
+      CompletionDate:
+        type: integer
+        format: int64
+        description: >-
+          Unix seconds at which the transfer finished. This is the archive's
+          zone-mapped attribute, so a query for everything since a given time
+          prunes whole segments rather than scanning.
+      DurationSeconds:
+        type: number
+        format: double
+        description: >-
+          Seconds the transfer took, as a float: most cache hits complete in
+          well under a second, and an integer would record every one of them
+          as zero.
+      PelicanServerName:
+        type: string
+      PelicanServerType:
+        type: string
+        description: The kind of server that served the transfer, e.g. `origin` or `cache`.
+      PelicanVersion:
+        type: string
+      PelicanFederation:
+        type: string
+    readOnly: true
   HealthStatus:
     type: object
     description: The health status of a server component
@@ -3015,6 +3139,15 @@ tags:
       carries it. The buffer is bounded by `Logging.Buffer.MaxSize`;
       older lines are evicted as new ones arrive, and a read reports how
       many it missed.
+  - name: transfer_records
+    description: >-
+      Read this server's per-transfer records over an authenticated change
+      feed. Gated by the `monitoring.raw` scope, which is deliberately
+      separate from `monitoring.scrape`: these records name the object
+      transferred, the address that asked for it, and the user who
+      authenticated, so permission to read a server's aggregate metrics does
+      not carry permission to reconstruct who transferred what. Present only
+      when `Monitoring.EnableTransferRecords` is set, and not on Windows.
 paths:
   /health:
     get:
@@ -3369,6 +3502,178 @@ paths:
                     $ref: "#/definitions/HealthStatus"
                   xrootd-liveness:
                     $ref: "#/definitions/HealthStatus"
+  /transfer_records/changefeed/v1/subscribe:
+    get:
+      tags:
+        - transfer_records
+      summary: Subscribe to this server's transfer-record change feed
+      description: >-
+        `Authentication Required` Requires a bearer token carrying the
+        `monitoring.raw` scope; a token with only `monitoring.scrape` is
+        refused.
+
+
+        Streams records as Server-Sent Events, resuming from `cursor` when one
+        is supplied and otherwise from the beginning of what is retained. The
+        stream is kept alive with an SSE comment every 15 seconds.
+
+
+        The subscriber identity is taken from the token's **subject**, not from
+        the `subscriber` query parameter, and the source label from this
+        server's own name rather than from `src`; both parameters are accepted
+        for client compatibility and ignored. This matters because
+        acknowledgements advance a garbage-collection floor, so a caller free
+        to name itself could acknowledge on another subscriber's behalf and
+        cause records to be dropped before that subscriber collected them. A
+        token that authenticates but carries no subject is refused for the same
+        reason.
+      produces:
+        - text/event-stream
+      parameters:
+        - in: query
+          name: table
+          required: true
+          type: string
+          description: >-
+            Which table to follow: `transfers`, the append-only archive of
+            completed transfers, or `transfers_active`, the mutable table of
+            transfers still running.
+          enum:
+            - transfers
+            - transfers_active
+        - in: query
+          name: cursor
+          required: false
+          type: string
+          description: >-
+            Base64-encoded opaque cursor from the last event the subscriber
+            durably stored. Omitted on a first subscription.
+        - in: query
+          name: constraint
+          required: false
+          type: string
+          description: A ClassAd expression limiting which records are sent.
+        - in: query
+          name: project
+          required: false
+          type: string
+          description: Comma-separated list of attributes to project, rather than the whole record.
+        - in: query
+          name: subscriber
+          required: false
+          type: string
+          description: Ignored; the subscriber identity is taken from the token's subject.
+        - in: query
+          name: src
+          required: false
+          type: string
+          description: Ignored; the source label is this server's own name.
+      responses:
+        "200":
+          description: >-
+            An SSE stream of change events. Each `data:` line is one
+            JSON-encoded event.
+          schema:
+            $ref: "#/definitions/TransferRecordChangeEvent"
+        "400":
+          description: Unknown or missing table, or a malformed cursor
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "401":
+          description: No token, or a token that does not verify
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: >-
+            The token lacks the `monitoring.raw` scope, or carries no subject
+            to attribute acknowledgements to
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "404":
+          description: Transfer records are not enabled on this server
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+  /transfer_records/changefeed/v1/ack:
+    post:
+      tags:
+        - transfer_records
+      summary: Acknowledge transfer records durably stored by this subscriber
+      description: >-
+        `Authentication Required` Requires a bearer token carrying the
+        `monitoring.raw` scope.
+
+
+        Advances this subscriber's watermark, which contributes to the
+        garbage-collection floor the server computes across all subscribers.
+        As on subscribe, the subscriber identity comes from the token's
+        subject; the `subscriber` field in the body is ignored.
+
+
+        Acknowledging is not what bounds the archive — `Monitoring.TransferRecordsMaxSize`
+        does, and the oldest records rotate away once it is reached whether or
+        not anyone has collected them.
+      consumes:
+        - application/json
+      produces:
+        - application/json
+      parameters:
+        - in: body
+          name: ack
+          required: true
+          schema:
+            type: object
+            required:
+              - table
+              - ackMillis
+            properties:
+              subscriber:
+                type: string
+                description: Ignored; the subscriber identity is taken from the token's subject.
+              table:
+                type: string
+                description: The table the acknowledgement applies to.
+                enum:
+                  - transfers
+                  - transfers_active
+              ackMillis:
+                type: integer
+                format: int64
+                description: >-
+                  Unix milliseconds up to which this subscriber has durably
+                  stored every record.
+      responses:
+        "200":
+          description: OK
+          schema:
+            type: object
+            properties:
+              floorMillis:
+                type: integer
+                format: int64
+                description: >-
+                  The garbage-collection floor across all subscribers, in Unix
+                  milliseconds.
+              held:
+                type: boolean
+                description: Whether this subscriber currently holds a lease on the floor.
+        "400":
+          description: Malformed body, or an unknown table
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "401":
+          description: No token, or a token that does not verify
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "403":
+          description: >-
+            The token lacks the `monitoring.raw` scope, or carries no subject
+            to attribute the acknowledgement to
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
+        "404":
+          description: Transfer records are not enabled on this server
+          schema:
+            $ref: "#/definitions/ErrorModelV2"
   /auth/login:
     post:
       tags:
