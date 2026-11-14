@@ -176,6 +176,7 @@ description: >-
   what.
 issuedBy: ["*"]
 acceptedBy: ["origin", "cache"]
+userGrantable: true
 ---
 name: monitoring.query
 description: >-

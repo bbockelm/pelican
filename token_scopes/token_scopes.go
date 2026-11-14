@@ -104,6 +104,7 @@ var UserGrantableScopes = []TokenScope{
 	Server_CollectionAdmin,
 	Pelican_LogRead,
 	Monitoring_Scrape,
+	Monitoring_Raw,
 	Monitoring_Query,
 	Pelican_Transfer,
 }

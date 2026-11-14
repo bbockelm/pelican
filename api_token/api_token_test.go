@@ -150,6 +150,30 @@ func TestIntersectWithUserScopes(t *testing.T) {
 			"with no hook wired, a binary cannot tell whether a creator still has a given user-grantable scope — must fail closed for those")
 	})
 
+	t.Run("monitoring.raw is gated by the creator's own scopes", func(t *testing.T) {
+		// Transfer records name the object transferred, the address that
+		// asked for it, and the user who authenticated -- strictly more
+		// revealing than the aggregate metrics monitoring.scrape guards.
+		// Minting an API key only requires web_ui.access, so if
+		// monitoring.raw were absent from UserGrantableScopes it would
+		// take the pass-through branch above and any logged-in user could
+		// mint themselves a key that reads the whole change feed. Pinning
+		// it here keeps the gate from eroding the way it would if someone
+		// added a future monitoring scope without listing it.
+		withMockEffectiveScopes(t, func(string) []token_scopes.TokenScope {
+			return []token_scopes.TokenScope{token_scopes.WebUi_Access}
+		})
+		caps := []string{token_scopes.Monitoring_Raw.String()}
+		assert.Empty(t, intersectWithUserScopes(caps, "u-erin"),
+			"a creator who does not hold monitoring.raw must not keep it on a minted key")
+
+		withMockEffectiveScopes(t, func(string) []token_scopes.TokenScope {
+			return []token_scopes.TokenScope{token_scopes.Monitoring_Raw}
+		})
+		assert.Equal(t, caps, intersectWithUserScopes(caps, "u-erin"),
+			"a creator who does hold monitoring.raw keeps it")
+	})
+
 	t.Run("unknown scope strings are treated as non-grantable and pass through", func(t *testing.T) {
 		// Defensive: a scope name we don't recognize (perhaps from
 		// a future server version) shouldn't be silently dropped
