@@ -20,6 +20,8 @@ package transfer
 
 import (
 	"time"
+
+	"github.com/pelicanplatform/pelican/client_agent"
 )
 
 // TransferCredential represents a stored credential in the database.
@@ -109,6 +111,24 @@ type CredentialResponse struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
+// The OAuth2 grant types a registered client can be selected for.
+//
+// findOAuthClientForGrant matches a stored client by comparing these strings
+// against the whitespace-separated grant_types recorded on the row, so the
+// value a client is registered with has to match the value the lookup asks
+// for exactly.  They are constants rather than literals at each site because a
+// client registered with a near-miss spelling is not rejected anywhere -- it
+// simply never matches, and the bootstrap fails later with "no OAuth client
+// configured for this issuer".
+const (
+	GrantTypeTokenExchange     = "urn:ietf:params:oauth:grant-type:token-exchange"
+	GrantTypeAuthorizationCode = "authorization_code"
+)
+
+// SupportedGrantTypes lists the grants a client may be registered for, in the
+// order they are preferred when more than one is available.
+var SupportedGrantTypes = []string{GrantTypeAuthorizationCode, GrantTypeTokenExchange}
+
 // OAuthClientCreateRequest is the request body for creating an OAuth2 client.
 type OAuthClientCreateRequest struct {
 	Name         string `json:"name" binding:"required"`
@@ -162,14 +182,23 @@ type TransferJobResponse struct {
 }
 
 // TransferJobStatus represents the full status of a transfer job.
+//
+// Progress is the job's live byte and transfer counts, reusing the shape the
+// client agent already publishes for its own jobs so that a reader of either
+// API sees the same field names. It is a pointer, and absent from the JSON,
+// precisely when the server cannot know: a job that has been evicted from the
+// transfer manager's memory is reconstructed from its durable record, which
+// carries no byte counts. A present Progress with zero bytes means no bytes
+// have moved yet; an absent one means nobody can say.
 type TransferJobStatus struct {
-	JobID              string     `json:"job_id"`
-	Status             string     `json:"status"`
-	CreatedAt          time.Time  `json:"created_at"`
-	CompletedAt        *time.Time `json:"completed_at,omitempty"`
-	SourceCredentialID string     `json:"source_credential_id,omitempty"`
-	DestCredentialID   string     `json:"dest_credential_id,omitempty"`
-	Error              string     `json:"error,omitempty"`
+	JobID              string                    `json:"job_id"`
+	Status             string                    `json:"status"`
+	CreatedAt          time.Time                 `json:"created_at"`
+	CompletedAt        *time.Time                `json:"completed_at,omitempty"`
+	SourceCredentialID string                    `json:"source_credential_id,omitempty"`
+	DestCredentialID   string                    `json:"dest_credential_id,omitempty"`
+	Progress           *client_agent.JobProgress `json:"progress,omitempty"`
+	Error              string                    `json:"error,omitempty"`
 }
 
 // TransferJobListResponse is a paginated list of transfer jobs.
