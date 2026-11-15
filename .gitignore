@@ -33,3 +33,7 @@ e2e_fed_tests.test
 # `go build ./cmd/sample_metadata_server`.
 /sample_metadata_server
 /cmd/sample_metadata_server/sample_metadata_server
+
+# Artifacts left behind by local_cache tests (the dque queue and its lock).
+local_cache/*.dque
+local_cache/lock.lock

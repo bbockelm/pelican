@@ -90,7 +90,7 @@ const TokenForm = () => {
       <Autocomplete
         multiple
         freeSolo
-        options={['monitoring.scrape', 'monitoring.query']}
+        options={['monitoring.scrape', 'monitoring.query', 'monitoring.raw']}
         id='tags-outlined'
         filterSelectedOptions
         renderInput={(params) => (

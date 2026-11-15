@@ -1,0 +1,104 @@
+# Collect Per-Transfer Records
+
+> For Pelican `>= 26.1.0`. Available on origins and caches, and not supported on Windows.
+
+Prometheus metrics tell you how much a server moved.
+Transfer records tell you *what* it moved: one record per transfer, naming the object, the client address, the identity that authenticated, the byte and operation counts, and how long it took.
+They are what you need to answer "who read this dataset last month", which no aggregate can answer.
+
+This is off by default.
+Turn it on with `Monitoring.EnableTransferRecords`:
+
+```yaml filename="pelican.yaml" copy
+Monitoring:
+  EnableTransferRecords: true
+```
+
+A server with this enabled writes every transfer it serves to an embedded database on its own disk, and offers those records to a collector over an authenticated change feed.
+The store on the node is the system of record; collection is a subscription opened against it.
+Nothing in the data path waits on a collector, and the server is unaffected if none ever connects.
+
+> Pelican does not yet ship a central collection service.
+> Enabling this gives you a local record store and a feed to read it from; you supply the collector.
+> See [Write a collector](#write-a-collector) below.
+
+## What is stored, and for how long
+
+Records live under `Monitoring.TransferRecordsLocation`, which defaults to `/var/lib/pelican/monitoring/transfer_records` when the server runs as root and to a path under `ConfigBase` otherwise.
+
+Retention is a **byte cap**, not a time window.
+`Monitoring.TransferRecordsMaxSize` (1 GiB by default) bounds what the store keeps on disk; once it is reached, the oldest records are dropped in bulk:
+
+```yaml filename="pelican.yaml" copy
+Monitoring:
+  EnableTransferRecords: true
+  TransferRecordsLocation: /var/lib/pelican/monitoring/transfer_records
+  TransferRecordsMaxSize: 1073741824 # 1 GiB
+```
+
+A byte cap is the bound you can size a filesystem against.
+How far back the records reach depends on how busy the server is: a busy server keeps a shorter window rather than overrunning a budget expressed in days.
+A server nobody collects from fills to the limit and then begins forgetting, so the cap is also the limit of how long a collector may stay away.
+
+Dropping is not coordinated with what has been collected.
+If a collector falls further behind than the cap, those records are gone.
+
+## Issue a token for the collector
+
+Reading the feed requires a bearer token carrying the `monitoring.raw` scope.
+Use `pelican apikey generate` on the server you want to collect from, as you would for an external Prometheus:
+
+```bash copy
+pelican apikey generate \
+  --scopes "monitoring.raw" \
+  --expiration "2038-01-19T03:14:07Z" \
+  --server https://<server-web-url>
+```
+
+The same caveats apply as for a scraping key: `--server` must match the server's `Server.ExternalWebUrl`, and the key is validated against the database of the server that issued it.
+See [Prometheus](../prometheus) for the details.
+
+`monitoring.raw` is deliberately a **separate scope from `monitoring.scrape`**.
+Metrics are aggregates; these records name the object transferred, the address that asked for it, and the user who authenticated.
+A credential that may read a server's metrics should not thereby be able to reconstruct who transferred what, so the two are granted independently and you decide separately who gets each.
+
+Treat a `monitoring.raw` token as you would any credential that reads user activity.
+The token's **subject** identifies the subscriber; the server will refuse a token that authenticates but names no subject, because acknowledgements are attributed to that subject and an anonymous shared cursor would let one collector acknowledge on another's behalf.
+
+## Write a collector
+
+The feed is served beneath `/api/v1.0/transfer_records` on the server's web port:
+
+| Endpoint                                        | Purpose                                                                 |
+| ----------------------------------------------- | ----------------------------------------------------------------------- |
+| `GET /changefeed/v1/subscribe`                  | Server-Sent Events stream of records, resuming from a cursor.           |
+| `POST /changefeed/v1/ack`                       | Report how far the collector has durably stored.                        |
+
+Two tables are available through the `table` query parameter:
+
+- `transfers` — the append-only archive of completed transfers. This is what a collector normally follows.
+- `transfers_active` — transfers still running, updated as they progress. Follow this to see what a server is doing right now.
+
+A collector subscribes, persists the `cursor` from each event it has durably stored, and presents that cursor when it reconnects.
+It then receives what it missed, without redelivery of what it already had.
+Acknowledging is not required for correctness of your own cursor, but it lets the server see how far behind each collector is.
+
+`transfer_records/internal/samplecollector` in the Pelican source is a worked example in about 200 lines: it writes NDJSON to standard output and persists its cursor through a temporary file and a rename, so an interrupted write leaves the previous cursor intact rather than a truncated one.
+It is a reference to read and adapt rather than a service to deploy.
+
+### Reading a record
+
+Every record carries the identity of the server that served it — name, type, version, and federation — so it can be interpreted on its own, without a join against whatever your collector knows about its sources.
+
+Two properties are worth knowing before you write a parser:
+
+- **Attributes that were not measured are absent, not empty.** An absent attribute means "not measured"; an empty string would mean "measured and blank".
+- **`TransferKey` identifies a transfer within one server, not across the federation.** A collector aggregating several servers must key on the pair of server name and `TransferKey`.
+
+`TransferStatus` is how the transfer ended.
+A status of `abandoned` marks a transfer that was still running when the server stopped: the server cannot know whether it finished, so it is recorded as neither completed nor discarded.
+A completed transfer reuses the key of its in-progress row, so a collector that saw both rows recognises one transfer rather than counting two.
+
+`DurationSeconds` is a float, because most cache hits complete in well under a second and an integer would record every one of them as zero.
+
+The full attribute list and the shape of a feed event are in the [API documentation](../../api-docs) under the `transfer_records` tag.
