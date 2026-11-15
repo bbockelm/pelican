@@ -49,13 +49,20 @@ type memSink struct {
 	mu      sync.Mutex
 	changes []replicate.Change
 	cursor  []byte
+	resets  []replicate.ResetReason
 }
 
 func (m *memSink) Apply(c replicate.Change) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if c.Kind == replicate.KindUpsert {
+	switch c.Kind {
+	case replicate.KindUpsert:
 		m.changes = append(m.changes, c)
+	case replicate.KindReset:
+		// A real collector keeps these: a Reset means discard and rebuild, and
+		// its reason is the difference between records it LOST and records it
+		// is merely being sent again.
+		m.resets = append(m.resets, c.Reason)
 	}
 	return nil
 }
@@ -79,6 +86,12 @@ func (m *memSink) count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.changes)
+}
+
+func (m *memSink) resetReasons() []replicate.ResetReason {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]replicate.ResetReason(nil), m.resets...)
 }
 
 // feedServer stands the change feed up on a real HTTP listener with the
@@ -202,6 +215,121 @@ func TestChangefeedResumesFromCursor(t *testing.T) {
 
 	assert.Equal(t, 3, sink.count(),
 		"resuming from a cursor must not redeliver records the subscriber already had")
+}
+
+// pullUntil runs a subscriber against srv until the sink holds want records and
+// has committed a position, then disconnects it the way a collector outage
+// would. Waiting for the cursor as well as the records is deliberate: the
+// cursor is what the next connection resumes from, and it is committed at the
+// Synced that follows catch-up, not with the records themselves.
+func pullUntil(t *testing.T, srv *httptest.Server, s *Store, table string, sink *memSink, want int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- changefeed.Pull(ctx, changefeed.PullConfig{
+			BaseURL: srv.URL + FeedRoutePrefix, Table: table, Src: s.cfg.Identity.Name,
+		}, sink)
+	}()
+	require.Eventually(t, func() bool { return sink.count() >= want && len(sink.Cursor()) > 0 },
+		15*time.Second, 100*time.Millisecond,
+		"the subscriber never reached %d records with a committed cursor", want)
+	cancel()
+	require.NoError(t, <-done)
+}
+
+// TestChangefeedResumesAcrossAServerRestart is the restart case, and the reason
+// TestChangefeedResumesFromCursor is not enough by itself: that test keeps the
+// store open and only disconnects the subscriber, so it cannot see whether the
+// position a collector persisted still means anything once the server it came
+// from has stopped and started. For a long time it did not -- a restart
+// invalidated every cursor, and a collector that had been following a server
+// for months was handed the whole retained archive again the first time that
+// server was upgraded.
+//
+// The archive carries its watch epoch across a CLEAN shutdown, which is why
+// this test closes the store rather than abandoning it.
+func TestChangefeedResumesAcrossAServerRestart(t *testing.T) {
+	cfg := Config{Dir: t.TempDir(), Identity: testIdentity(), RotateInterval: -1, MaintainInterval: -1}
+	sink := &memSink{}
+
+	first, err := Open(cfg)
+	require.NoError(t, err)
+	first.Record(sampleEvent())
+	pullUntil(t, feedServer(t, first, "collector-1"), first, ArchiveTableName, sink, 1)
+	require.NoError(t, first.Close(), "a clean shutdown is what lets the watch epoch survive")
+
+	require.Equal(t, []replicate.ResetReason{replicate.ResetInitial}, sink.resetReasons(),
+		"a first subscribe is a reset, and it must say which kind: nothing was missed")
+
+	// The server comes back on the same directory and records another transfer.
+	second, err := Open(cfg)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, second.Close()) }()
+	second.Record(sampleEvent())
+
+	pullUntil(t, feedServer(t, second, "collector-1"), second, ArchiveTableName, sink, 2)
+
+	assert.Equal(t, 2, sink.count(),
+		"a restart must not redeliver records the subscriber already had")
+	assert.Equal(t, []replicate.ResetReason{replicate.ResetInitial}, sink.resetReasons(),
+		"a cursor that survived a clean restart must not be reset a second time")
+}
+
+// TestActiveTableCursorSurvivesARestart pins what the watch-retention window
+// buys, and is the falsification of the archive test above: the two arms differ
+// only in whether the window is configured, and only one of them resumes.
+//
+// The active table is mutable, so a subscriber resuming after a restart has to
+// be told which rows went away while it was gone. That is what the delete
+// markers in the window are for; with no window the source cannot prove what it
+// removed, and the only honest answer is to reset the subscriber and send the
+// table again.
+func TestActiveTableCursorSurvivesARestart(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		retain     time.Duration
+		wantResets []replicate.ResetReason
+		wantRows   int
+	}{
+		{
+			name:       "with the default window",
+			retain:     0, // DefaultWatchRetain
+			wantResets: []replicate.ResetReason{replicate.ResetInitial},
+			wantRows:   2,
+		},
+		{
+			name:       "without a window",
+			retain:     -1,
+			wantResets: []replicate.ResetReason{replicate.ResetInitial, replicate.ResetEpoch},
+			wantRows:   3, // the first row again, then both
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{
+				Dir: t.TempDir(), Identity: testIdentity(),
+				RotateInterval: -1, MaintainInterval: -1, WatchRetain: tc.retain,
+			}
+			sink := &memSink{}
+
+			first, err := Open(cfg)
+			require.NoError(t, err)
+			require.NotEmpty(t, first.BeginActive(sampleEvent()))
+			pullUntil(t, feedServer(t, first, "collector-1"), first, ActiveTableName, sink, 1)
+			require.NoError(t, first.Close())
+
+			second, err := Open(cfg)
+			require.NoError(t, err)
+			defer func() { require.NoError(t, second.Close()) }()
+			require.NotEmpty(t, second.BeginActive(sampleEvent()))
+
+			pullUntil(t, feedServer(t, second, "collector-1"), second, ActiveTableName, sink, tc.wantRows)
+
+			assert.Equal(t, tc.wantResets, sink.resetReasons())
+			assert.Equal(t, tc.wantRows, sink.count())
+		})
+	}
 }
 
 // authenticatedFeedServer stands the feed up with the real authenticating

@@ -142,7 +142,10 @@ Reading the feed requires a token with the `monitoring.raw` scope.
 
 - **Nothing collecting** — appends continue, the archive fills to its cap, then the oldest records rotate away. `records_dropped_by_rotation` and `oldest_retained_record_timestamp` make the loss visible.
 - **A subscriber reconnects** — it resumes from its cursor and receives what it missed, without redelivery of what it already had.
-- **A subscriber falls further behind than retention** — records are gone. The acknowledgement registry lets the source see each subscriber's watermark, so this is detectable at the source rather than only inferable by the collector.
+- **The server restarts** — a cursor taken before a *clean* shutdown still resumes afterwards. The archive carries its watch position across the stop; the active table does so for as long as its retention window keeps the delete markers that say which in-flight transfers ended while the subscriber was away. After an *unclean* stop the subscriber is reset and sent the retained archive again: re-delivery, not loss.
+- **A subscriber falls further behind than retention** — records are gone. The subscriber is told which happened: a reset names its cause, and only `retention` means records went away. It is preceded by a gap event naming where the retained history now starts, so a collector can record the loss rather than silently re-ingest an archive. The acknowledgement registry also lets the source see each subscriber's watermark, so the lag is visible at the source rather than only inferable by the collector.
+
+One caveat for a collector that must not miss records: an unclean restart reports `epoch` even if the archive *also* rotated past the subscriber's position while the server was down, because a cursor from the previous epoch carries sequence numbers that cannot be compared against the retained floor. `epoch` therefore means "re-delivery, and possibly loss", where every other non-`retention` reason means re-delivery alone.
 
 ## 6. Where the central service belongs
 
@@ -166,12 +169,12 @@ Not supported on Windows: the store relies on memory-mapped segment files. Enabl
 
 ## 8. Testing
 
-| Tier          | Coverage                                                                                                                                                                                         |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Fan-out       | All four combinations of shoveler and consumer; panic containment; unregistration; final counts reach the consumer.                                                                              |
-| Store         | Projection; unknown fields omitted; archive durability across reopen; the active-row lifecycle; crash recovery via `Reconcile`; one transfer producing exactly one record.                       |
-| Feed          | Delivery to a real `changefeed.Pull` subscriber; refusal of an unidentified caller; cursor resumption across a simulated outage with no redelivery.                                              |
-| Authorization | An authenticated pull through the real middleware with a minted token; a token carrying a different scope refused 403, which shows the scope rather than authentication is what guards the feed. |
+| Tier          | Coverage                                                                                                                                                                                                                                                                                   |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Fan-out       | All four combinations of shoveler and consumer; panic containment; unregistration; final counts reach the consumer.                                                                                                                                                                        |
+| Store         | Projection; unknown fields omitted; archive durability across reopen; the active-row lifecycle; crash recovery via `Reconcile`; one transfer producing exactly one record.                                                                                                                 |
+| Feed          | Delivery to a real `changefeed.Pull` subscriber; refusal of an unidentified caller; cursor resumption across a simulated outage with no redelivery; cursor resumption across a server restart, with the active table's watch window present and absent, which is what tells the two apart. |
+| Authorization | An authenticated pull through the real middleware with a minted token; a token carrying a different scope refused 403, which shows the scope rather than authentication is what guards the feed.                                                                                           |
 
 Not covered: minting a token against a *separate* `pelican-server` process's issuer and pulling from it. The auth and the pull are proven in-process; only the cross-process token provisioning is unexercised, and that is Pelican's ordinary issuer machinery.
 

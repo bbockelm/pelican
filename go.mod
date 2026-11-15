@@ -7,10 +7,10 @@ go 1.26.0
 
 require (
 	github.com/JGLTechnologies/gin-rate-limit v1.5.4
-	github.com/PelicanPlatform/classad v0.21.0
-	github.com/PelicanPlatform/classad/changefeed v0.21.1
-	github.com/PelicanPlatform/classad/collections v0.21.1
-	github.com/PelicanPlatform/classad/db v0.21.1
+	github.com/PelicanPlatform/classad v0.40.0
+	github.com/PelicanPlatform/classad/changefeed v0.40.0
+	github.com/PelicanPlatform/classad/collections v0.40.0
+	github.com/PelicanPlatform/classad/db v0.40.0
 	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137
 	github.com/aws/aws-sdk-go-v2 v1.41.3
@@ -22,7 +22,7 @@ require (
 	github.com/charmbracelet/glamour v0.8.0
 	github.com/cyphar/filepath-securejoin v0.4.1
 	github.com/dgraph-io/badger/v4 v4.9.1
-	github.com/dgraph-io/ristretto/v2 v2.2.0
+	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/dunglas/httpsfv v1.1.0
 	github.com/ebitengine/purego v0.8.3
 	github.com/fatih/color v1.18.0
@@ -73,7 +73,7 @@ require (
 	golang.org/x/mod v0.30.0
 	golang.org/x/net v0.48.0
 	golang.org/x/oauth2 v0.34.0
-	golang.org/x/sys v0.46.0
+	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.38.0
 	gopkg.in/macaroon.v2 v2.1.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -96,7 +96,7 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.30.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.54.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.54.0 // indirect
-	github.com/RoaringBitmap/roaring/v2 v2.19.0 // indirect
+	github.com/RoaringBitmap/roaring/v2 v2.29.0 // indirect
 	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.6 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.19 // indirect
@@ -255,7 +255,7 @@ require (
 	github.com/jpillora/backoff v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/julienschmidt/httprouter v1.3.0 // indirect
-	github.com/klauspost/compress v1.19.0 // indirect
+	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.5 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/leodido/go-urn v1.2.4 // indirect

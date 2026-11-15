@@ -52,6 +52,18 @@ const (
 // can fill a filesystem is worse than one that forgets.
 const DefaultMaxBytes int64 = 1 << 30 // 1 GiB
 
+// DefaultWatchRetain is how long the active table keeps the delete markers a
+// reconnecting subscriber needs to be told which rows went away. Without a
+// window, a restart invalidates every cursor on that table and the subscriber
+// is sent back for a full replay.
+//
+// An hour is far longer than any restart-plus-reconnect, and it is cheap: the
+// markers are a key and a sequence each, against an archive budget measured in
+// gigabytes. The archive needs no equivalent -- it is append-only, has no
+// deletes to retain, and carries its watch epoch across a clean shutdown by
+// itself.
+const DefaultWatchRetain = time.Hour
+
 // Config configures a Store.
 type Config struct {
 	// Dir is the catalog directory. Required.
@@ -66,6 +78,10 @@ type Config struct {
 	// MaintainInterval is the mutable table's self-tuning cadence. Zero uses 15
 	// minutes, matching htcondordb; negative disables the loop.
 	MaintainInterval time.Duration
+	// WatchRetain is the active table's watch-retention window. Zero uses
+	// DefaultWatchRetain; negative keeps no window, which costs a subscriber a
+	// full replay of that table after every restart.
+	WatchRetain time.Duration
 }
 
 // Store is a Pelican server's local transfer history.
@@ -88,8 +104,21 @@ func Open(cfg Config) (*Store, error) {
 	if cfg.MaxBytes == 0 {
 		cfg.MaxBytes = DefaultMaxBytes
 	}
+	switch {
+	case cfg.WatchRetain == 0:
+		cfg.WatchRetain = DefaultWatchRetain
+	case cfg.WatchRetain < 0:
+		cfg.WatchRetain = 0
+	}
 
-	cat, err := db.OpenCatalog(cfg.Dir)
+	// Through the catalog rather than per table: a catalog reopens every table
+	// directory it finds at startup, so an option given at creation would take
+	// effect once and be ignored on every restart after -- which is exactly
+	// when a resuming subscriber needs the window.
+	cat, err := db.OpenCatalogConfig(db.CatalogConfig{
+		Dir:            cfg.Dir,
+		WatchRetainFor: map[string]time.Duration{ActiveTableName: cfg.WatchRetain},
+	})
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to open the transfer-record catalog at %s", cfg.Dir)
 	}
