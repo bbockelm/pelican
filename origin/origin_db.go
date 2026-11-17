@@ -19,6 +19,7 @@
 package origin
 
 import (
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -54,44 +55,25 @@ func getCollectionByUUID(uuid string) (*GlobusCollection, error) {
 	if err != nil {
 		return nil, err
 	}
-	if collection.RefreshToken != "" {
-		var keyID string
-		var decrypted string
-		decrypted, keyID, err = config.DecryptString(collection.RefreshToken)
+	// Decrypt both refresh tokens, re-sealing any that were encrypted under a
+	// retired issuer key so they keep up with key rotation.
+	for _, field := range []struct {
+		column string
+		value  *string
+	}{
+		{"refresh_token", &collection.RefreshToken},
+		{"transfer_refresh_token", &collection.TransferRefreshToken},
+	} {
+		if *field.value == "" {
+			continue
+		}
+		decrypted, reEncrypted, err := config.DecryptStringAndRotate(*field.value)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to decrypt the refresh token")
+			return nil, errors.Wrapf(err, "failed to decrypt the %s", strings.ReplaceAll(field.column, "_", " "))
 		}
-		collection.RefreshToken = decrypted
-
-		// Check if key rotation happened
-		currentIssuerKey, err := config.GetIssuerPrivateJWK()
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to get current issuer key")
-		}
-		if keyID != currentIssuerKey.KeyID() {
-			// Re-encrypt with the current key and update DB
-			newEncrypted, err := config.EncryptString(collection.RefreshToken)
-			if err == nil {
-				// Only update if re-encryption succeeded
-				database.ServerDatabase.Model(&GlobusCollection{}).Where("uuid = ?", uuid).Update("refresh_token", newEncrypted)
-			}
-		}
-	}
-	if collection.TransferRefreshToken != "" {
-		var keyID string
-		collection.TransferRefreshToken, keyID, err = config.DecryptString(collection.TransferRefreshToken)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to decrypt the transfer refresh token")
-		}
-		currentIssuerKey, err := config.GetIssuerPrivateJWK()
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to get current issuer key")
-		}
-		if keyID != currentIssuerKey.KeyID() {
-			newEncrypted, err := config.EncryptString(collection.TransferRefreshToken)
-			if err == nil {
-				database.ServerDatabase.Model(&GlobusCollection{}).Where("uuid = ?", uuid).Update("transfer_refresh_token", newEncrypted)
-			}
+		*field.value = decrypted
+		if reEncrypted != "" {
+			database.ServerDatabase.Model(&GlobusCollection{}).Where("uuid = ?", uuid).Update(field.column, reEncrypted)
 		}
 	}
 	return &collection, nil

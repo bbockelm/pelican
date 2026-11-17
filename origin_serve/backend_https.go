@@ -36,6 +36,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/pelicanplatform/pelican/config"
+	"github.com/pelicanplatform/pelican/oauth2/backendcred"
 	"github.com/pelicanplatform/pelican/server_utils"
 )
 
@@ -54,7 +55,15 @@ const (
 	HTTPSTokenPassthrough
 	// HTTPSTokenOAuth2 — an OAuth2 access token is acquired and refreshed automatically.
 	HTTPSTokenOAuth2
+	// HTTPSTokenManaged — the token comes from a backendcred.TokenSource, such
+	// as the long-lived credential an administrator activates with the device
+	// flow.
+	HTTPSTokenManaged
 )
+
+// HTTPSBackendCredentialID is the backendcred ID of the origin's managed
+// credential for its HTTPS/WebDAV backend (Origin.HttpAuthOAuth2DeviceFlow).
+const HTTPSBackendCredentialID = "origin-https"
 
 // ---------------------------------------------------------------------------
 // BackendMode — whether the upstream speaks WebDAV or plain HTTP.
@@ -87,6 +96,8 @@ type HTTPSBackendOptions struct {
 	// For OAuth2 tokens:
 	OAuth2Config *oauth2.Config
 	OAuth2Token  *oauth2.Token // initial token (with refresh_token)
+	// For managed tokens:
+	TokenSource backendcred.TokenSource
 	// EnableAutoMkdir, when true, causes PUT operations to automatically
 	// create missing parent directories via WebDAV MKCOL before retrying.
 	EnableAutoMkdir bool
@@ -105,6 +116,7 @@ func newHTTPSBackend(opts HTTPSBackendOptions) *httpsBackend {
 		staticTokenFile: opts.StaticTokenFile,
 		httpClient:      &http.Client{Transport: config.GetTransport()},
 		enableAutoMkdir: opts.EnableAutoMkdir,
+		tokenSource:     opts.TokenSource,
 	}
 	if opts.OAuth2Config != nil && opts.OAuth2Token != nil {
 		fs.oauth2Cfg = opts.OAuth2Config
@@ -115,7 +127,18 @@ func newHTTPSBackend(opts HTTPSBackendOptions) *httpsBackend {
 
 // CheckAvailability probes the upstream to determine whether it speaks WebDAV or
 // plain HTTP by issuing an OPTIONS request and inspecting the Allow / DAV headers.
+//
+// A managed credential that has not been activated makes the backend
+// unavailable (503) rather than letting requests go upstream
+// unauthenticated.
 func (b *httpsBackend) CheckAvailability() error {
+	if b.fs.tokenMode == HTTPSTokenManaged {
+		if avail, ok := b.fs.tokenSource.(interface{ Available() error }); ok {
+			if err := avail.Available(); err != nil {
+				return err
+			}
+		}
+	}
 	return b.fs.probeBackendMode()
 }
 
@@ -167,6 +190,9 @@ type httpsFileSystem struct {
 	oauth2Cfg *oauth2.Config
 	oauth2Tok *oauth2.Token
 	oauthMu   sync.Mutex // protects oauth2Tok
+
+	// Managed token source (HTTPSTokenManaged)
+	tokenSource backendcred.TokenSource
 
 	httpClient *http.Client
 
@@ -222,7 +248,7 @@ func (fs *httpsFileSystem) davPath(name string) string {
 // this client calls getToken() afresh — this ensures tokens that expire
 // mid-transfer are transparently renewed for long-lived clients.
 func (fs *httpsFileSystem) getDavClient(ctx context.Context) *gowebdav.Client {
-	auth := &simpleBearerAuth{tokenFunc: func() string { return fs.getToken(ctx) }}
+	auth := &simpleBearerAuth{tokenFunc: func() (string, error) { return fs.getToken(ctx) }}
 	client := gowebdav.NewAuthClient(fs.serviceURL, auth)
 	if fs.httpClient.Transport != nil {
 		client.SetTransport(fs.httpClient.Transport)
@@ -242,30 +268,27 @@ func (fs *httpsFileSystem) upstreamURL(name string) string {
 	return fs.serviceURL + "/" + name
 }
 
-// getToken returns the bearer token to use for the upstream request.
-func (fs *httpsFileSystem) getToken(ctx context.Context) string {
+// getToken returns the bearer token to use for the upstream request.  An
+// error means the request must not be sent: it would only go out
+// unauthenticated.
+func (fs *httpsFileSystem) getToken(ctx context.Context) (string, error) {
 	switch fs.tokenMode {
 	case HTTPSTokenStatic:
-		return fs.readStaticToken()
+		// A token file that cannot be read stops the request rather than
+		// letting it go upstream unauthenticated.
+		return backendcred.FileTokenSource{Path: fs.staticTokenFile}.Token(ctx)
 	case HTTPSTokenPassthrough:
-		return tokenFromContext(ctx)
+		return tokenFromContext(ctx), nil
 	case HTTPSTokenOAuth2:
-		return fs.getOAuth2Token(ctx)
+		return fs.getOAuth2Token(ctx), nil
+	case HTTPSTokenManaged:
+		if fs.tokenSource == nil {
+			return "", errors.New("HTTPS backend has no token source configured")
+		}
+		return fs.tokenSource.Token(ctx)
 	default:
-		return ""
+		return "", nil
 	}
-}
-
-func (fs *httpsFileSystem) readStaticToken() string {
-	if fs.staticTokenFile == "" {
-		return ""
-	}
-	data, err := os.ReadFile(fs.staticTokenFile)
-	if err != nil {
-		log.Debugf("Failed to read HTTPS auth token file %s: %v", fs.staticTokenFile, err)
-		return ""
-	}
-	return strings.TrimSpace(string(data))
 }
 
 func (fs *httpsFileSystem) getOAuth2Token(ctx context.Context) string {
@@ -292,7 +315,11 @@ func (fs *httpsFileSystem) doRequest(ctx context.Context, method, urlStr string,
 	if err != nil {
 		return nil, err
 	}
-	if token := fs.getToken(ctx); token != "" {
+	token, err := fs.getToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	for k, v := range extraHeaders {
@@ -564,11 +591,11 @@ func tokenFromContext(ctx context.Context) string {
 // ---------------------------------------------------------------------------
 
 type simpleBearerAuth struct {
-	tokenFunc func() string
+	tokenFunc func() (string, error)
 }
 
 type simpleBearerAuthenticator struct {
-	tokenFunc func() string
+	tokenFunc func() (string, error)
 }
 
 func (a *simpleBearerAuth) NewAuthenticator(body io.Reader) (gowebdav.Authenticator, io.Reader) {
@@ -578,7 +605,11 @@ func (a *simpleBearerAuth) NewAuthenticator(body io.Reader) (gowebdav.Authentica
 func (a *simpleBearerAuth) AddAuthenticator(_ string, _ gowebdav.AuthFactory) {}
 
 func (auth *simpleBearerAuthenticator) Authorize(_ *http.Client, rq *http.Request, _ string) error {
-	if tok := auth.tokenFunc(); tok != "" {
+	tok, err := auth.tokenFunc()
+	if err != nil {
+		return err
+	}
+	if tok != "" {
 		rq.Header.Set("Authorization", "Bearer "+tok)
 	}
 	return nil
@@ -814,7 +845,13 @@ func (f *httpsWriteFile) ensureStarted() error {
 			f.startErr = err
 			return
 		}
-		if token := f.fs.getToken(f.ctx); token != "" {
+		token, err := f.fs.getToken(f.ctx)
+		if err != nil {
+			_ = pipeR.CloseWithError(err)
+			f.startErr = err
+			return
+		}
+		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		if ph := server_utils.PelicanHeadersFromContext(f.ctx); ph != nil {

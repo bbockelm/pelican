@@ -139,6 +139,13 @@ func OriginServe(ctx context.Context, engine *gin.Engine, egrp *errgroup.Group, 
 		origin.LaunchGlobusTokenRefresh(ctx, egrp)
 	}
 
+	// The managed HTTPS backend credential must exist before the XRootD
+	// configuration (which points XRootD at its token file) and the native
+	// backends (which take it as their token source) are built.
+	if err := origin.InitBackendCredentials(ctx, egrp); err != nil {
+		return nil, errors.Wrap(err, "failed to initialize the HTTPS backend credential")
+	}
+
 	concLimit := param.Origin_Concurrency.GetInt()
 	if concLimit > 0 {
 		server_utils.LaunchConcurrencyMonitoring(ctx, egrp, originServer.GetServerType())

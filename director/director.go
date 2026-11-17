@@ -1900,6 +1900,11 @@ func RegisterDirectorAPI(ctx context.Context, router *gin.RouterGroup) {
 		// Rename the endpoint to reflect such plan.
 		directorAPIV1.GET("/discoverServers", discoverOriginCache)
 
+		// OAuth client ID metadata documents for the federation's servers, at
+		// backendcred.ClientIDMetadataDocumentPath; see
+		// serveClientIDMetadataDocument.
+		directorAPIV1.GET("/oauthClients/*serverPrefix", serveClientIDMetadataDocument)
+
 	}
 
 	directorAPIV2 := router.Group("/api/v2.0/director", web_ui.ServerHeaderMiddleware)

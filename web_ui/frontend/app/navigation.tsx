@@ -20,6 +20,7 @@ import {
   SwapHoriz,
   TripOrigin,
   Groups,
+  Key,
   Person,
   VpnKey,
 } from '@mui/icons-material';
@@ -181,6 +182,12 @@ const NavigationConfig: NavigationConfiguration = {
       icon: <Public />,
       allowedRoles: ['admin'],
       allowedExportTypes: ['globus'],
+    },
+    {
+      title: 'Backend Credentials',
+      href: '/origin/backend-credentials/',
+      icon: <Key />,
+      allowedRoles: ['admin'],
     },
     {
       title: 'Issuer',
