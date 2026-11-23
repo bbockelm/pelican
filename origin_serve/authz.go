@@ -36,6 +36,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/pelicanplatform/pelican/config"
+	"github.com/pelicanplatform/pelican/oa4mp"
 	"github.com/pelicanplatform/pelican/param"
 	"github.com/pelicanplatform/pelican/server_structs"
 	"github.com/pelicanplatform/pelican/server_utils"
@@ -56,6 +57,34 @@ type (
 		issuerKeys *ttlcache.Cache[string, authConfigItem]
 		tokenAuthz *ttlcache.Cache[string, cachedTokenInfo]
 		userMapper *UserMapper // Maps JWT claims to local users/groups
+
+		// ctx is the server's lifetime context. The token-authorization
+		// cache's loader runs on the request path but ttlcache hands it no
+		// context, and the placement-daemon branch of it makes a network
+		// call that needs one; see placementdTokenInfo.
+		ctx context.Context
+
+		// placementd verifies tokens issued by an HTCondor placement
+		// daemon, and is nil unless one is configured.
+		// placementdIssuer is the issuer those identities are recorded
+		// under in Pelican's own identity table.
+		placementd       placementdVerifier
+		placementdIssuer string
+
+		// authzRules holds the compiled Issuer.AuthorizationTemplates: the
+		// global set, plus the per-export overrides keyed by federation
+		// prefix. Compiled once per configuration change because
+		// placementdAcls evaluates them on the request path. Swapped
+		// together with exports.
+		authzRules atomic.Pointer[authzRuleSet]
+	}
+
+	// authzRuleSet is the compiled authorization templates for one
+	// configuration: byPrefix holds an export's own templates where it
+	// defines them, and global is what every other export uses.
+	authzRuleSet struct {
+		global   []*oa4mp.CompiledAuthz
+		byPrefix map[string][]*oa4mp.CompiledAuthz
 	}
 
 	authConfigItem struct {
@@ -77,6 +106,11 @@ type (
 )
 
 var globalAuthConfig *authConfig
+
+// tokenAuthzTTL is how long an authorization decision about one token is
+// reused. Named because the placement-daemon path has to clamp its own
+// entries to it; see placementdTokenInfo.
+const tokenAuthzTTL = 5 * time.Minute
 
 // hasPathPrefix checks if the request path is under the authorized prefix.
 // Unlike strings.HasPrefix, this checks path boundaries to prevent
@@ -101,7 +135,7 @@ func hasPathPrefix(requestPath, authorizedPrefix string) bool {
 }
 
 func newAuthConfig(ctx context.Context, egrp *errgroup.Group) (ac *authConfig) {
-	ac = &authConfig{}
+	ac = &authConfig{ctx: ctx}
 
 	// Build the set of accepted audience values.
 	// The WLCG Common JWT Profile and SciTokens specs each define a
@@ -174,7 +208,7 @@ func newAuthConfig(ctx context.Context, egrp *errgroup.Group) (ac *authConfig) {
 	)
 
 	ac.tokenAuthz = ttlcache.New[string, cachedTokenInfo](
-		ttlcache.WithTTL[string, cachedTokenInfo](5*time.Minute),
+		ttlcache.WithTTL[string, cachedTokenInfo](tokenAuthzTTL),
 		ttlcache.WithLoader[string, cachedTokenInfo](ttlcache.LoaderFunc[string, cachedTokenInfo](ac.loader)),
 	)
 
@@ -205,14 +239,24 @@ func (ac *authConfig) updateConfig(exports []server_utils.OriginExport) error {
 			issuers[issuer] = true
 		}
 	}
+
+	// Compile the authorization templates now rather than per request. Only
+	// the placement-daemon path reads them today, but a template that will
+	// not compile is a configuration error whichever path would have used
+	// it, so it is reported here for every origin.
+	rules, err := ac.compileAuthzRules(exports)
+	if err != nil {
+		return err
+	}
 	// An export whose issuer URL will not parse cannot produce token hints, but
 	// it can still be authorized against; keep the rest of the config current and
 	// leave the ads empty rather than refusing to serve.
-	nsAds, err := server_utils.NamespaceAdsFromExports(exports)
-	if err != nil {
-		log.Warningf("Unable to derive namespace ads from the origin's exports; token hint headers will be omitted: %v", err)
+	nsAds, adErr := server_utils.NamespaceAdsFromExports(exports)
+	if adErr != nil {
+		log.Warningf("Unable to derive namespace ads from the origin's exports; token hint headers will be omitted: %v", adErr)
 		nsAds = nil
 	}
+	ac.authzRules.Store(rules)
 	ac.issuers.Store(&issuers)
 	ac.nsAds.Store(&nsAds)
 	ac.exports.Store(&exports)
@@ -390,44 +434,66 @@ func (ac *authConfig) getAcls(token string) (newAcls acls, err error) {
 			newAcls = append(newAcls, token_scopes.ResourceScope{Authorization: token_scopes.Wlcg_Storage_Read, Resource: export.FederationPrefix})
 		}
 
-		// Always check token-based authorization for write operations (even if PublicReads is true)
-		for _, resource := range resources {
-			if (resource.Authorization == token_scopes.Wlcg_Storage_Create || resource.Authorization == token_scopes.Wlcg_Storage_Modify) && !export.Capabilities.Writes {
-				continue
-			}
-			if resource.Authorization == token_scopes.Wlcg_Storage_Read && !export.Capabilities.Reads {
-				continue
-			}
-
-			// Check if issuer is authorized for this export
-			authorized := false
-			for _, exportIssuer := range export.IssuerUrls {
-				if exportIssuer == issuer {
-					authorized = true
-					break
-				}
-			}
-			if !authorized {
-				log.Debugf("Token issuer %s not authorized for export %s (export issuers: %v)", issuer, export.FederationPrefix, export.IssuerUrls)
-				continue
-			}
-
-			// Token scopes are relative to the namespace (federation prefix)
-			// So we need to prepend the federation prefix to the token's resource to get the full path
-			fullResourcePath := path.Join(export.FederationPrefix, resource.Resource)
-
-			// Add the scope with the full path (including federation prefix)
-			fullScope := token_scopes.ResourceScope{
-				Authorization: resource.Authorization,
-				Resource:      fullResourcePath,
-			}
-			newAcls = append(newAcls, fullScope)
+		// Token-based authorization is still checked even when
+		// PublicReads is true, since that only covers reads.
+		if !slices.Contains(export.IssuerUrls, issuer) {
+			log.Debugf("Token issuer %s not authorized for export %s (export issuers: %v)", issuer, export.FederationPrefix, export.IssuerUrls)
+			continue
 		}
+		newAcls = appendScopesForExport(newAcls, export, resources)
 	}
 	return
 }
 
+// appendScopesForExport turns namespace-relative scopes into this origin's
+// absolute ACLs for one export, dropping each scope the export's capabilities
+// do not permit.
+//
+// Every scope that reaches the data plane goes through here, whatever
+// established it: the scopes a presented token carries (getAcls) and the
+// scopes a resolved user holds under the authorization templates and
+// collection rules (placementdAcls). Keeping the capability gate and the
+// prefix join in one place is what stops the two from drifting — a
+// write-disabled export has to stay write-disabled no matter which credential
+// asked.
+func appendScopesForExport(out acls, export server_utils.OriginExport, resources []token_scopes.ResourceScope) acls {
+	for _, resource := range resources {
+		switch resource.Authorization {
+		case token_scopes.Wlcg_Storage_Create, token_scopes.Wlcg_Storage_Modify:
+			if !export.Capabilities.Writes {
+				continue
+			}
+		case token_scopes.Wlcg_Storage_Read:
+			if !export.Capabilities.Reads {
+				continue
+			}
+		}
+
+		// Scopes are relative to the namespace (federation prefix), so the
+		// prefix is prepended to get the path the data plane checks.
+		out = append(out, token_scopes.ResourceScope{
+			Authorization: resource.Authorization,
+			Resource:      path.Join(export.FederationPrefix, resource.Resource),
+		})
+	}
+	return out
+}
+
 func (ac *authConfig) loader(cache *ttlcache.Cache[string, cachedTokenInfo], tokenStr string) *ttlcache.Item[string, cachedTokenInfo] {
+	// A token this origin cannot verify on its own, but a configured
+	// placement daemon might, takes an entirely separate path: there is no
+	// signature to check here and no scopes in the token to honor. It is
+	// tried first because the ordinary path would only reject it, and
+	// because Recognize settles the question from the token alone.
+	if ac.placementd != nil && ac.placementd.Recognize(tokenStr) {
+		info, ttl, err := ac.placementdTokenInfo(tokenStr)
+		if err != nil {
+			log.Warningln("Rejecting placement-daemon token:", err)
+			return nil
+		}
+		return cache.Set(tokenStr, info, ttl)
+	}
+
 	acls, err := ac.getAcls(tokenStr)
 	if err != nil {
 		// If the token is not a valid one signed by a known issuer, do not keep it in memory (avoids a DoS)
@@ -504,7 +570,11 @@ func (ac *authConfig) authorizeWithContext(ctx context.Context, action token_sco
 
 // InitAuthConfig initializes the global auth config
 func InitAuthConfig(ctx context.Context, egrp *errgroup.Group, exports []server_utils.OriginExport) error {
-	globalAuthConfig = newAuthConfig(ctx, egrp)
+	ac := newAuthConfig(ctx, egrp)
+	if err := ac.initPlacementd(ctx, egrp); err != nil {
+		return err
+	}
+	globalAuthConfig = ac
 	return globalAuthConfig.updateConfig(exports)
 }
 

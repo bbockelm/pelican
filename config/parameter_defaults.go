@@ -670,6 +670,16 @@ func SetParameterDefaults(v *viper.Viper, isRoot bool, isOSDF bool) {
 	v.SetDefault(param.Origin_PStoreMetadataBackupInterval.GetName(), "6h")
 	// Origin.PStoreMetadataBackupsToKeep
 	v.SetDefault(param.Origin_PStoreMetadataBackupsToKeep.GetName(), 24)
+	// Origin.Placementd.IdentityCacheTimeout
+	v.SetDefault(param.Origin_Placementd_IdentityCacheTimeout.GetName(), "15m")
+	// Origin.Placementd.RefusalCacheTimeout
+	v.SetDefault(param.Origin_Placementd_RefusalCacheTimeout.GetName(), "1m")
+	// Origin.Placementd.VerificationBurst
+	v.SetDefault(param.Origin_Placementd_VerificationBurst.GetName(), 5)
+	// Origin.Placementd.VerificationTimeout
+	v.SetDefault(param.Origin_Placementd_VerificationTimeout.GetName(), "10s")
+	// Origin.Placementd.VerificationsPerSecond
+	v.SetDefault(param.Origin_Placementd_VerificationsPerSecond.GetName(), 2)
 	// Origin.Port
 	v.SetDefault(param.Origin_Port.GetName(), 8443)
 	// Origin.Posc.Enabled

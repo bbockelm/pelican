@@ -444,6 +444,14 @@ var runtimeConfigurableMap = map[string]bool{
 	"Origin.PStoreMetadataBackupLocation": false,
 	"Origin.PStoreMetadataBackupsToKeep": false,
 	"Origin.PStoreStorageDirs": false,
+	"Origin.Placementd.Address": false,
+	"Origin.Placementd.IdentityCacheTimeout": false,
+	"Origin.Placementd.IdentityIssuer": false,
+	"Origin.Placementd.RefusalCacheTimeout": false,
+	"Origin.Placementd.TrustDomain": false,
+	"Origin.Placementd.VerificationBurst": false,
+	"Origin.Placementd.VerificationTimeout": false,
+	"Origin.Placementd.VerificationsPerSecond": false,
 	"Origin.Port": false,
 	"Origin.Posc.Enabled": false,
 	"Origin.Posc.FileTimeout": false,
@@ -790,6 +798,9 @@ var stringAccessors = map[string]func(*Config) string{
 	"Origin.ObjectProviderURL": func(c *Config) string { return c.Origin.ObjectProviderURL },
 	"Origin.PStoreLocation": func(c *Config) string { return c.Origin.PStoreLocation },
 	"Origin.PStoreMetadataBackupLocation": func(c *Config) string { return c.Origin.PStoreMetadataBackupLocation },
+	"Origin.Placementd.Address": func(c *Config) string { return c.Origin.Placementd.Address },
+	"Origin.Placementd.IdentityIssuer": func(c *Config) string { return c.Origin.Placementd.IdentityIssuer },
+	"Origin.Placementd.TrustDomain": func(c *Config) string { return c.Origin.Placementd.TrustDomain },
 	"Origin.Posc.Prefix": func(c *Config) string { return c.Origin.Posc.Prefix },
 	"Origin.RunLocation": func(c *Config) string { return c.Origin.RunLocation },
 	"Origin.S3AccessKeyfile": func(c *Config) string { return c.Origin.S3AccessKeyfile },
@@ -1022,6 +1033,8 @@ var intAccessors = map[string]func(*Config) int{
 	"Origin.MultiuserUmask": func(c *Config) int { return c.Origin.MultiuserUmask },
 	"Origin.PStoreInlineMaxBytes": func(c *Config) int { return c.Origin.PStoreInlineMaxBytes },
 	"Origin.PStoreMetadataBackupsToKeep": func(c *Config) int { return c.Origin.PStoreMetadataBackupsToKeep },
+	"Origin.Placementd.VerificationBurst": func(c *Config) int { return c.Origin.Placementd.VerificationBurst },
+	"Origin.Placementd.VerificationsPerSecond": func(c *Config) int { return c.Origin.Placementd.VerificationsPerSecond },
 	"Origin.Port": func(c *Config) int { return c.Origin.Port },
 	"Origin.SSH.MaxRetries": func(c *Config) int { return c.Origin.SSH.MaxRetries },
 	"Origin.SSH.Port": func(c *Config) int { return c.Origin.SSH.Port },
@@ -1312,6 +1325,9 @@ var durationAccessors = map[string]func(*Config) time.Duration{
 	"Origin.PStoreDataScanInterval": func(c *Config) time.Duration { return c.Origin.PStoreDataScanInterval },
 	"Origin.PStoreIndexCheckInterval": func(c *Config) time.Duration { return c.Origin.PStoreIndexCheckInterval },
 	"Origin.PStoreMetadataBackupInterval": func(c *Config) time.Duration { return c.Origin.PStoreMetadataBackupInterval },
+	"Origin.Placementd.IdentityCacheTimeout": func(c *Config) time.Duration { return c.Origin.Placementd.IdentityCacheTimeout },
+	"Origin.Placementd.RefusalCacheTimeout": func(c *Config) time.Duration { return c.Origin.Placementd.RefusalCacheTimeout },
+	"Origin.Placementd.VerificationTimeout": func(c *Config) time.Duration { return c.Origin.Placementd.VerificationTimeout },
 	"Origin.Posc.FileTimeout": func(c *Config) time.Duration { return c.Origin.Posc.FileTimeout },
 	"Origin.Posc.KeepaliveInterval": func(c *Config) time.Duration { return c.Origin.Posc.KeepaliveInterval },
 	"Origin.SSH.ChallengeTimeout": func(c *Config) time.Duration { return c.Origin.SSH.ChallengeTimeout },
@@ -1783,6 +1799,14 @@ var allParameterNames = []string{
 	"Origin.PStoreMetadataBackupLocation",
 	"Origin.PStoreMetadataBackupsToKeep",
 	"Origin.PStoreStorageDirs",
+	"Origin.Placementd.Address",
+	"Origin.Placementd.IdentityCacheTimeout",
+	"Origin.Placementd.IdentityIssuer",
+	"Origin.Placementd.RefusalCacheTimeout",
+	"Origin.Placementd.TrustDomain",
+	"Origin.Placementd.VerificationBurst",
+	"Origin.Placementd.VerificationTimeout",
+	"Origin.Placementd.VerificationsPerSecond",
 	"Origin.Port",
 	"Origin.Posc.Enabled",
 	"Origin.Posc.FileTimeout",
@@ -2102,6 +2126,9 @@ var (
 	Origin_ObjectProviderURL = StringParam{"Origin.ObjectProviderURL"}
 	Origin_PStoreLocation = StringParam{"Origin.PStoreLocation"}
 	Origin_PStoreMetadataBackupLocation = StringParam{"Origin.PStoreMetadataBackupLocation"}
+	Origin_Placementd_Address = StringParam{"Origin.Placementd.Address"}
+	Origin_Placementd_IdentityIssuer = StringParam{"Origin.Placementd.IdentityIssuer"}
+	Origin_Placementd_TrustDomain = StringParam{"Origin.Placementd.TrustDomain"}
 	Origin_Posc_Prefix = StringParam{"Origin.Posc.Prefix"}
 	Origin_RunLocation = StringParam{"Origin.RunLocation"}
 	Origin_S3AccessKeyfile = StringParam{"Origin.S3AccessKeyfile"}
@@ -2278,6 +2305,8 @@ var (
 	Origin_MultiuserUmask = IntParam{"Origin.MultiuserUmask"}
 	Origin_PStoreInlineMaxBytes = IntParam{"Origin.PStoreInlineMaxBytes"}
 	Origin_PStoreMetadataBackupsToKeep = IntParam{"Origin.PStoreMetadataBackupsToKeep"}
+	Origin_Placementd_VerificationBurst = IntParam{"Origin.Placementd.VerificationBurst"}
+	Origin_Placementd_VerificationsPerSecond = IntParam{"Origin.Placementd.VerificationsPerSecond"}
 	Origin_Port = IntParam{"Origin.Port"}
 	Origin_SSH_MaxRetries = IntParam{"Origin.SSH.MaxRetries"}
 	Origin_SSH_Port = IntParam{"Origin.SSH.Port"}
@@ -2475,6 +2504,9 @@ var (
 	Origin_PStoreDataScanInterval = DurationParam{"Origin.PStoreDataScanInterval"}
 	Origin_PStoreIndexCheckInterval = DurationParam{"Origin.PStoreIndexCheckInterval"}
 	Origin_PStoreMetadataBackupInterval = DurationParam{"Origin.PStoreMetadataBackupInterval"}
+	Origin_Placementd_IdentityCacheTimeout = DurationParam{"Origin.Placementd.IdentityCacheTimeout"}
+	Origin_Placementd_RefusalCacheTimeout = DurationParam{"Origin.Placementd.RefusalCacheTimeout"}
+	Origin_Placementd_VerificationTimeout = DurationParam{"Origin.Placementd.VerificationTimeout"}
 	Origin_Posc_FileTimeout = DurationParam{"Origin.Posc.FileTimeout"}
 	Origin_Posc_KeepaliveInterval = DurationParam{"Origin.Posc.KeepaliveInterval"}
 	Origin_SSH_ChallengeTimeout = DurationParam{"Origin.SSH.ChallengeTimeout"}
@@ -2671,6 +2703,9 @@ func init() {
 		"Origin.ObjectProviderURL": Origin_ObjectProviderURL,
 		"Origin.PStoreLocation": Origin_PStoreLocation,
 		"Origin.PStoreMetadataBackupLocation": Origin_PStoreMetadataBackupLocation,
+		"Origin.Placementd.Address": Origin_Placementd_Address,
+		"Origin.Placementd.IdentityIssuer": Origin_Placementd_IdentityIssuer,
+		"Origin.Placementd.TrustDomain": Origin_Placementd_TrustDomain,
 		"Origin.Posc.Prefix": Origin_Posc_Prefix,
 		"Origin.RunLocation": Origin_RunLocation,
 		"Origin.S3AccessKeyfile": Origin_S3AccessKeyfile,
@@ -2841,6 +2876,8 @@ func init() {
 		"Origin.MultiuserUmask": Origin_MultiuserUmask,
 		"Origin.PStoreInlineMaxBytes": Origin_PStoreInlineMaxBytes,
 		"Origin.PStoreMetadataBackupsToKeep": Origin_PStoreMetadataBackupsToKeep,
+		"Origin.Placementd.VerificationBurst": Origin_Placementd_VerificationBurst,
+		"Origin.Placementd.VerificationsPerSecond": Origin_Placementd_VerificationsPerSecond,
 		"Origin.Port": Origin_Port,
 		"Origin.SSH.MaxRetries": Origin_SSH_MaxRetries,
 		"Origin.SSH.Port": Origin_SSH_Port,
@@ -3029,6 +3066,9 @@ func init() {
 		"Origin.PStoreDataScanInterval": Origin_PStoreDataScanInterval,
 		"Origin.PStoreIndexCheckInterval": Origin_PStoreIndexCheckInterval,
 		"Origin.PStoreMetadataBackupInterval": Origin_PStoreMetadataBackupInterval,
+		"Origin.Placementd.IdentityCacheTimeout": Origin_Placementd_IdentityCacheTimeout,
+		"Origin.Placementd.RefusalCacheTimeout": Origin_Placementd_RefusalCacheTimeout,
+		"Origin.Placementd.VerificationTimeout": Origin_Placementd_VerificationTimeout,
 		"Origin.Posc.FileTimeout": Origin_Posc_FileTimeout,
 		"Origin.Posc.KeepaliveInterval": Origin_Posc_KeepaliveInterval,
 		"Origin.SSH.ChallengeTimeout": Origin_SSH_ChallengeTimeout,
