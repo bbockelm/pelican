@@ -366,6 +366,39 @@ func (um *UserMapper) MapTokenToUser(tokenStr string) *userInfo {
 	}
 }
 
+// MapIdentityToUser is MapTokenToUser for a caller whose identity did not come
+// out of a JWT this origin could read — today, one the HTCondor placement
+// daemon authenticated and that was resolved to a Pelican user.
+//
+// subject is the username the mapfile rules are matched against and groups the
+// groups they are matched against; both are already-resolved Pelican facts
+// rather than token claims. The mapfile contract is otherwise identical to
+// MapTokenToUser's: a matching rule names the local user, a configured mapfile
+// with no matching rule falls back to Origin.ScitokensDefaultUser, and no
+// default means the request is refused.
+func (um *UserMapper) MapIdentityToUser(subject string, groups []string) *userInfo {
+	um.mu.RLock()
+	defer um.mu.RUnlock()
+
+	if groups == nil {
+		groups = []string{}
+	}
+	user := subject
+	if um.mapfile != nil {
+		if mapped := um.mapfile.MapUsername(subject, groups, ""); mapped != "" {
+			user = mapped
+		} else if um.defaultUser == "" {
+			log.WithFields(log.Fields{
+				"user": subject,
+			}).Warn("Identity did not match any mapfile rule and no default user is configured; denying access")
+			return nil
+		} else {
+			user = um.defaultUser
+		}
+	}
+	return &userInfo{User: user, Groups: groups}
+}
+
 // StartPeriodicRefresh starts a goroutine that periodically checks and reloads
 // the mapfile if it has been modified on disk. The refresh interval is controlled
 // by the provided interval parameter.

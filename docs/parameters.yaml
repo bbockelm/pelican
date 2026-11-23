@@ -1862,6 +1862,80 @@ default: nobody
 hidden: true
 components: ["origin"]
 ---
+name: Origin.Placementd.Address
+description: |+
+  The CEDAR address of the HTCondor placement daemon (`condor_placementd`) whose tokens this
+  origin accepts, either a sinful string (`<10.0.0.1:9618?addrs=...>`) or a plain `host:port`.
+
+  Leave this unset to refuse placement-daemon tokens.
+type: string
+default: none
+components: ["origin"]
+---
+name: Origin.Placementd.TrustDomain
+description: |+
+  The HTCondor trust domain of the pool named by `${Origin.Placementd.Address}`, which is the
+  `iss` claim the placement daemon stamps on the tokens it issues. The origin only contacts the
+  placement daemon about a token carrying this issuer, so a token from anywhere else costs
+  nothing to refuse.
+
+  Required whenever `${Origin.Placementd.Address}` is set.
+type: string
+default: none
+components: ["origin"]
+---
+name: Origin.Placementd.IdentityIssuer
+description: |+
+  The issuer recorded on the Pelican identities that placement-daemon identities are matched
+  against. An administrator links a placement-daemon identity to a Pelican user by adding an
+  identity with this issuer and the identity's name as its subject; a token whose identity has
+  no such link is refused.
+
+  Defaults to `${Origin.Placementd.TrustDomain}`.
+type: string
+default: none
+components: ["origin"]
+---
+name: Origin.Placementd.VerificationTimeout
+description: |+
+  How long the origin will spend verifying one token against the placement daemon, including
+  any wait for rate-limit budget.
+type: duration
+default: 10s
+components: ["origin"]
+---
+name: Origin.Placementd.VerificationsPerSecond
+description: |+
+  Token-bucket rate limit on how often the origin will verify a token it has not seen before
+  against the placement daemon.
+type: int
+default: 2
+components: ["origin"]
+---
+name: Origin.Placementd.VerificationBurst
+description: |+
+  How many token verifications the origin may send to the placement daemon back-to-back before
+  `${Origin.Placementd.VerificationsPerSecond}` applies.
+type: int
+default: 5
+components: ["origin"]
+---
+name: Origin.Placementd.IdentityCacheTimeout
+description: |+
+  How long the origin reuses the identity the placement daemon reported for a token. A token
+  that expires sooner is trusted only until it expires.
+type: duration
+default: 15m
+components: ["origin"]
+---
+name: Origin.Placementd.RefusalCacheTimeout
+description: |+
+  How long the origin remembers that the placement daemon refused a token, so a client
+  retrying with it does not reach the daemon again.
+type: duration
+default: 1m
+components: ["origin"]
+---
 name: Origin.TokenAudience
 description: |+
   This parameter can be used to configure accepted audiences for the Origin's SciTokens configuration, referenced when deciding

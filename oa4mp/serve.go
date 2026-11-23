@@ -150,6 +150,28 @@ func InitAuthzRules() error {
 	return nil
 }
 
+// EnsureAuthzRules returns the compiled Issuer.AuthorizationTemplates,
+// compiling them first if nobody has yet.
+//
+// CalculateAllowedScopes reads a package global that is only populated as a
+// side effect of InitAuthzRules, which runs when the embedded issuer is
+// configured. Every other consumer of the templates therefore has to know
+// that the issuer was started first, and silently grants nothing when it was
+// not — a configured template that quietly authorizes nobody. Callers that
+// need the rules ask for them here instead of hoping.
+//
+// Call this during startup: it writes the same global InitAuthzRules does,
+// and is not safe to race against a reconfiguration.
+func EnsureAuthzRules() ([]*CompiledAuthz, error) {
+	if compiledAuthzRules != nil {
+		return compiledAuthzRules, nil
+	}
+	if err := InitAuthzRules(); err != nil {
+		return nil, err
+	}
+	return compiledAuthzRules, nil
+}
+
 // CompileAuthzTemplates compiles a list of raw authorization template maps
 // into CompiledAuthz rules.  Each map should have the same keys as the
 // Issuer.AuthorizationTemplates config entries (actions, prefix, groups, etc.).

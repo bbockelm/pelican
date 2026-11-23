@@ -411,6 +411,16 @@ type Config struct {
 		PStoreMetadataBackupLocation string `mapstructure:"pstoremetadatabackuplocation" yaml:"PStoreMetadataBackupLocation"`
 		PStoreMetadataBackupsToKeep int `mapstructure:"pstoremetadatabackupstokeep" yaml:"PStoreMetadataBackupsToKeep"`
 		PStoreStorageDirs any `mapstructure:"pstorestoragedirs" yaml:"PStoreStorageDirs"`
+		Placementd struct {
+			Address string `mapstructure:"address" yaml:"Address"`
+			IdentityCacheTimeout time.Duration `mapstructure:"identitycachetimeout" yaml:"IdentityCacheTimeout"`
+			IdentityIssuer string `mapstructure:"identityissuer" yaml:"IdentityIssuer"`
+			RefusalCacheTimeout time.Duration `mapstructure:"refusalcachetimeout" yaml:"RefusalCacheTimeout"`
+			TrustDomain string `mapstructure:"trustdomain" yaml:"TrustDomain"`
+			VerificationBurst int `mapstructure:"verificationburst" yaml:"VerificationBurst"`
+			VerificationTimeout time.Duration `mapstructure:"verificationtimeout" yaml:"VerificationTimeout"`
+			VerificationsPerSecond int `mapstructure:"verificationspersecond" yaml:"VerificationsPerSecond"`
+		} `mapstructure:"placementd" yaml:"Placementd"`
 		Port int `mapstructure:"port" yaml:"Port"`
 		Posc struct {
 			Enabled bool `mapstructure:"enabled" yaml:"Enabled"`
@@ -1016,6 +1026,16 @@ type configWithType struct {
 		PStoreMetadataBackupLocation struct { Type string; Value string }
 		PStoreMetadataBackupsToKeep struct { Type string; Value int }
 		PStoreStorageDirs struct { Type string; Value any }
+		Placementd struct {
+			Address struct { Type string; Value string }
+			IdentityCacheTimeout struct { Type string; Value time.Duration }
+			IdentityIssuer struct { Type string; Value string }
+			RefusalCacheTimeout struct { Type string; Value time.Duration }
+			TrustDomain struct { Type string; Value string }
+			VerificationBurst struct { Type string; Value int }
+			VerificationTimeout struct { Type string; Value time.Duration }
+			VerificationsPerSecond struct { Type string; Value int }
+		}
 		Port struct { Type string; Value int }
 		Posc struct {
 			Enabled struct { Type string; Value bool }
